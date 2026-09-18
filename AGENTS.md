@@ -1,4 +1,4 @@
-# Jarvis Conductor Agent Guide
+# Conductor Agent Guide
 
 This repository owns development orchestration and owner control. It does not own project product truth, Development Intelligence semantics, DevOS methodology, Git hosting, or worker-model implementations.
 

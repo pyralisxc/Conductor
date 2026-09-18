@@ -1,6 +1,6 @@
-# Jarvis Conductor
+# Conductor
 
-Jarvis Conductor is the orchestration and owner-control layer for an AI-assisted development environment.
+Conductor is the orchestration and owner-control layer for an AI-assisted development environment.
 
 It does **not** replace the developer, DevOS, Development Intelligence, GitHub, or specialized workers. It connects them.
 
@@ -12,7 +12,7 @@ It does **not** replace the developer, DevOS, Development Intelligence, GitHub, 
 - **DevOS 4.x** — development cognition: Objective, Ambition, stage, authorization, Evidence Appetite, proof.
 - **Development Intelligence** — compact, evidence-backed project reality.
 - **GitHub** — durable repositories, issues, projects, PRs, checks, branches, releases.
-- **Jarvis Conductor** — observes state and decides what should happen next, who/what should do it, where it should run, and when intelligence should wake again.
+- **Conductor** — observes state and decides what should happen next, who/what should do it, where it should run, and when intelligence should wake again.
 - **Conversational developer** — preferred primary owner for ambiguous/deep development work.
 - **Delegated workers** — bounded execution, browser/computer work, migrations, audits, local/Unity tasks.
 - **Owner Console** — unified visibility and control across the system.
@@ -90,7 +90,7 @@ The initial code is intentionally a small provider-neutral core. It should be ex
 
 Automatic creation/resumption of ordinary consumer ChatGPT conversations is **not** treated as a guaranteed API contract.
 
-Jarvis may later use an experimental browser/operator bridge, but the system must remain useful and safe when that bridge falls back to a small human resume action.
+Conductor may later use an experimental browser/operator bridge, but the system must remain useful and safe when that bridge falls back to a small human resume action.
 
 ## Build order
 

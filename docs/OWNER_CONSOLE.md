@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The Owner Console is the unified visibility and command surface over Jarvis Conductor.
+The Owner Console is the unified visibility and command surface over Conductor.
 
 It is a projection over durable systems, not another source of truth.
 
@@ -68,7 +68,7 @@ Track interactive sessions, worker runs, API spend/tokens, DI queries, Actions m
 
 Every significant automated action must answer:
 
-- Why did Jarvis do this?
+- Why did Conductor do this?
 - What evidence supported it?
 - What policy authorized it?
 - What will happen next?
