@@ -1,4 +1,4 @@
-# Jarvis Conductor — Full Product / Technical Crystal
+# Conductor — Full Product / Technical Crystal
 
 ## Outcome
 

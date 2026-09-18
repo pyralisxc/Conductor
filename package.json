@@ -1,5 +1,5 @@
 {
-  "name": "jarvis-conductor",
+  "name": "conductor",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,6 +13,7 @@
     "verify": "npm run build && npm run test"
   },
   "devDependencies": {
+    "@types/node": "22.19.7",
     "typescript": "5.8.3"
   }
 }
