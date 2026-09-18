@@ -1,0 +1,18 @@
+{
+  "name": "jarvis-conductor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Provider-neutral orchestration and owner-control layer for DevOS-driven development.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test dist/tests/*.test.js",
+    "verify": "npm run build && npm run test"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
+  }
+}
