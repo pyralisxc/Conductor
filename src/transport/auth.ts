@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 
 export const CONDUCTOR_READ_SCOPE = 'conductor.read';
@@ -32,25 +32,34 @@ export class JwtAccessTokenVerifier implements AccessTokenVerifier {
       issuer: this.issuer,
       audience: this.audience,
     });
-    const scopes = parseScopes(verified.payload.scope, verified.payload.scp);
-    const missing = this.requiredScopes.filter((scope) => !scopes.includes(scope));
-    if (missing.length > 0) {
-      throw new Error(`Access token is missing required scopes: ${missing.join(', ')}`);
-    }
-    const clientId = stringClaim(verified.payload.client_id)
-      ?? stringClaim(verified.payload.azp)
-      ?? stringClaim(verified.payload.sub);
-    if (!clientId) throw new Error('Access token has no stable client identity');
-
-    return {
-      token,
-      clientId,
-      scopes,
-      expiresAt: verified.payload.exp,
-      resource: new URL(this.audience),
-      extra: verified.payload.sub ? { subject: verified.payload.sub } : undefined,
-    };
+    return authInfoFromJwt(token, verified.payload, this.audience, this.requiredScopes);
   }
+}
+
+export function authInfoFromJwt(
+  token: string,
+  payload: JWTPayload,
+  audience: string,
+  requiredScopes: string[] = [CONDUCTOR_READ_SCOPE],
+): AuthInfo {
+  const scopes = parseScopes(payload.scope, payload.scp);
+  const missing = requiredScopes.filter((scope) => !scopes.includes(scope));
+  if (missing.length > 0) {
+    throw new Error(`Access token is missing required scopes: ${missing.join(', ')}`);
+  }
+  const clientId = stringClaim(payload.client_id)
+    ?? stringClaim(payload.azp)
+    ?? stringClaim(payload.sub);
+  if (!clientId) throw new Error('Access token has no stable client identity');
+
+  return {
+    token,
+    clientId,
+    scopes,
+    expiresAt: payload.exp,
+    resource: new URL(audience),
+    extra: payload.sub ? { subject: payload.sub } : undefined,
+  };
 }
 
 function parseScopes(scope: unknown, scp: unknown): string[] {

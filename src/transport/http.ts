@@ -11,6 +11,11 @@ export interface ConductorHttpHandlerOptions {
   verifier: AccessTokenVerifier;
   publicUrl: string;
   oauthIssuer: string;
+  handleOAuthRequest?: (
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+  ) => Promise<boolean>;
 }
 
 export function createConductorHttpHandler(options: ConductorHttpHandlerOptions) {
@@ -21,7 +26,7 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
     scopes_supported: [CONDUCTOR_READ_SCOPE],
     resource_name: 'Conductor Tool Runtime',
   };
-  const challenge = `Bearer resource_metadata="${new URL('/.well-known/oauth-protected-resource', mcpUrl).toString()}", scope="${CONDUCTOR_READ_SCOPE}"`;
+  const challenge = `Bearer resource_metadata="${new URL('/.well-known/oauth-protected-resource/mcp', mcpUrl).toString()}", scope="${CONDUCTOR_READ_SCOPE}"`;
 
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', options.publicUrl);
@@ -32,6 +37,7 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
       });
       return;
     }
+    if (options.handleOAuthRequest && await options.handleOAuthRequest(request, response, url)) return;
     if (request.method === 'GET' && (
       url.pathname === '/.well-known/oauth-protected-resource' ||
       url.pathname === '/.well-known/oauth-protected-resource/mcp'
