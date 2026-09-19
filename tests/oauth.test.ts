@@ -80,7 +80,7 @@ test('self-hosted OAuth supports ChatGPT DCR, PKCE, refresh, and exact MCP acces
     const resource = await resourceResponse.json() as Record<string, unknown>;
     assert.equal(resource.resource, `${origin}/mcp`);
     assert.deepEqual(resource.authorization_servers, [origin]);
-    assert.deepEqual(resource.scopes_supported, ['conductor.read']);
+    assert.deepEqual(resource.scopes_supported, ['conductor.read', 'conductor.write']);
 
     const discoveryResponse = await fetch(`${origin}/.well-known/oauth-authorization-server`);
     assert.equal(discoveryResponse.status, 200);
@@ -91,6 +91,7 @@ test('self-hosted OAuth supports ChatGPT DCR, PKCE, refresh, and exact MCP acces
     assert.equal(discovery.registration_endpoint, `${origin}/oauth/register`);
     assert.deepEqual(discovery.code_challenge_methods_supported, ['S256']);
     assert.deepEqual(discovery.grant_types_supported, ['authorization_code', 'refresh_token']);
+    assert.deepEqual(discovery.scopes_supported, ['conductor.read', 'conductor.write', 'offline_access']);
 
     const denied = await fetch(`${origin}/mcp`, { method: 'POST' });
     assert.equal(denied.status, 401);
@@ -123,7 +124,7 @@ test('self-hosted OAuth supports ChatGPT DCR, PKCE, refresh, and exact MCP acces
     authorizeUrl.searchParams.set('response_type', 'code');
     authorizeUrl.searchParams.set('client_id', registration.client_id);
     authorizeUrl.searchParams.set('redirect_uri', redirectUri);
-    authorizeUrl.searchParams.set('scope', 'conductor.read offline_access');
+    authorizeUrl.searchParams.set('scope', 'conductor.read conductor.write offline_access');
     authorizeUrl.searchParams.set('state', 'test-state');
     authorizeUrl.searchParams.set('code_challenge', challenge);
     authorizeUrl.searchParams.set('code_challenge_method', 'S256');
@@ -161,7 +162,7 @@ test('self-hosted OAuth supports ChatGPT DCR, PKCE, refresh, and exact MCP acces
         response_type: 'code',
         client_id: registration.client_id,
         redirect_uri: redirectUri,
-        scope: 'conductor.read offline_access',
+        scope: 'conductor.read conductor.write offline_access',
         state: 'test-state',
         code_challenge: challenge,
         code_challenge_method: 'S256',
@@ -190,6 +191,8 @@ test('self-hosted OAuth supports ChatGPT DCR, PKCE, refresh, and exact MCP acces
     const tokens = await tokenResponse.json() as { access_token: string; refresh_token: string };
     assert.match(tokens.access_token, /^[\w-]+\.[\w-]+\.[\w-]+$/u);
     assert.match(tokens.refresh_token, /^[\w-]+\.[\w-]+\.[\w-]+$/u);
+    const access = await new SelfHostedAccessTokenVerifier().verifyAccessToken(tokens.access_token);
+    assert.deepEqual(access.scopes, ['conductor.read', 'conductor.write', 'offline_access']);
 
     const replay = await fetch(`${origin}/oauth/token`, {
       method: 'POST',
@@ -228,6 +231,8 @@ test('self-hosted OAuth supports ChatGPT DCR, PKCE, refresh, and exact MCP acces
     const refreshed = await refreshResponse.json() as { access_token: string; refresh_token: string };
     assert.notEqual(refreshed.access_token, tokens.access_token);
     assert.notEqual(refreshed.refresh_token, tokens.refresh_token);
+    const refreshedAccess = await new SelfHostedAccessTokenVerifier().verifyAccessToken(refreshed.access_token);
+    assert.deepEqual(refreshedAccess.scopes, ['conductor.read', 'conductor.write', 'offline_access']);
   } finally {
     await close(server);
     for (const key of keys) {
