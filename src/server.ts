@@ -1,23 +1,23 @@
 import { createServer } from 'node:http';
 import { createRuntimeFromEnvironment } from './config/runtime.js';
-import { JwtAccessTokenVerifier } from './transport/auth.js';
 import { createConductorHttpHandler } from './transport/http.js';
+import { handleOAuthHttpRequest } from './transport/oauth-http.js';
+import {
+  assertOAuthConfiguration,
+  oauthPublicBaseUrl,
+  SelfHostedAccessTokenVerifier,
+} from './transport/oauth.js';
 
 const port = integerEnvironment('PORT', 3000);
-const publicUrl = requiredEnvironment('CONDUCTOR_PUBLIC_URL');
-const oauthIssuer = requiredEnvironment('CONDUCTOR_OAUTH_ISSUER');
-const oauthJwksUrl = requiredEnvironment('CONDUCTOR_OAUTH_JWKS_URL');
-const mcpAudience = new URL('/mcp', publicUrl.endsWith('/') ? publicUrl : `${publicUrl}/`).toString();
+assertOAuthConfiguration();
+const publicUrl = oauthPublicBaseUrl();
 
 const handler = createConductorHttpHandler({
   runtime: createRuntimeFromEnvironment(),
   publicUrl,
-  oauthIssuer,
-  verifier: new JwtAccessTokenVerifier({
-    issuer: oauthIssuer,
-    audience: mcpAudience,
-    jwksUrl: oauthJwksUrl,
-  }),
+  oauthIssuer: publicUrl,
+  verifier: new SelfHostedAccessTokenVerifier(),
+  handleOAuthRequest: handleOAuthHttpRequest,
 });
 
 createServer((request, response) => {
@@ -25,12 +25,6 @@ createServer((request, response) => {
 }).listen(port, () => {
   console.log(`Conductor runtime listening on port ${port}`);
 });
-
-function requiredEnvironment(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`${name} is required`);
-  return value;
-}
 
 function integerEnvironment(name: string, fallback: number): number {
   const raw = process.env[name];
