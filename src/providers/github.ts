@@ -132,11 +132,15 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
       );
       if (!response.ok) throw await githubResponseError(response);
       const repository = await response.json() as GitHubRepositoryResponse;
-      const canRead = repository.permissions?.pull ?? true;
-      const repositoryRoleAllowsWrite = configured.write !== false && Boolean(
-        repository.permissions?.push ||
-        repository.permissions?.admin ||
-        repository.permissions?.maintain,
+      const appInstallation = credential.kind === 'app-installation';
+      const canRead = appInstallation ? true : (repository.permissions?.pull ?? true);
+      const repositoryRoleAllowsWrite = configured.write !== false && (
+        appInstallation ||
+        Boolean(
+          repository.permissions?.push ||
+          repository.permissions?.admin ||
+          repository.permissions?.maintain,
+        )
       );
 
       const readError = canRead ? undefined : normalizeToolError({
@@ -558,3 +562,4 @@ async function githubResponseError(response: Response): Promise<unknown> {
     }] : undefined,
   };
 }
+
