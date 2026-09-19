@@ -121,7 +121,9 @@ test('GitHub App preflight proves operation-specific develop permissions', async
     allowedOwners: ['pyralisxc'],
     fetch: async () => Response.json({
       full_name: 'pyralisxc/CardForge',
-      permissions: { pull: true, push: true },
+      // GitHub App installation access is proven by the successful repository
+      // request plus installation-token permissions, not user/PAT role flags.
+      permissions: { pull: false, push: false },
     }),
   });
 
@@ -343,3 +345,4 @@ test('unconfigured Development Intelligence is explicit and read-only', async ()
   const checks = await provider.preflightProject({ id: 'conductor' });
   assert.equal(checks[0]?.error?.code, 'TOOL_UNAVAILABLE');
 });
+
