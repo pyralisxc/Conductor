@@ -120,7 +120,7 @@ export interface CreateCommitInput {
 export interface CreatePullRequestInput {
   project: ProjectReference;
   head: string;
-  base: 'preview';
+  base: string;
   title: string;
   body?: string;
   draft?: boolean;
@@ -204,3 +204,4 @@ export interface FailedExecutionReceipt extends ReceiptBase {
 export type ExecutionReceipt<Result> =
   | SuccessfulExecutionReceipt<Result>
   | FailedExecutionReceipt;
+

@@ -231,6 +231,55 @@ test('GitHub provider resolves repositories under an authorized owner without pe
   assert.equal(requested.length, 1);
 });
 
+test('GitHub provider allows explicit non-production integration branches and blocks accepted branches', async () => {
+  const requests: Array<{ url: string; method: string; body?: any }> = [];
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write', pull_requests: 'write', issues: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      requests.push({ url, method, body });
+      if (method === 'GET') return Response.json({ full_name: 'pyralisxc/CardForge', default_branch: 'main' });
+      if (url.endsWith('/pulls') && method === 'POST') return Response.json({ number: 12, html_url: 'https://github.com/pyralisxc/CardForge/pull/12' });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    },
+  });
+
+  const created = await provider.createPullRequest({
+    project: { id: 'pyralisxc/CardForge' },
+    head: 'work/cf-cleanup',
+    base: 'vercel-preview',
+    title: 'Cleanup',
+    idempotencyKey: 'pr:cf:cleanup',
+  });
+  assert.equal(created.pullRequestNumber, 12);
+  assert.equal(requests.at(-1)?.body?.base, 'vercel-preview');
+
+  await assert.rejects(
+    provider.createPullRequest({
+      project: { id: 'pyralisxc/CardForge' },
+      head: 'work/cf-cleanup',
+      base: 'main',
+      title: 'Unsafe',
+      idempotencyKey: 'pr:cf:unsafe',
+    }),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /protected branch main/.test(error.message),
+  );
+});
+
 test('workspace provider verifies an allowlisted workspace, shell, and test script', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'conductor-workspace-'));
   await writeFile(join(workspace, 'package.json'), JSON.stringify({
@@ -345,4 +394,5 @@ test('unconfigured Development Intelligence is explicit and read-only', async ()
   const checks = await provider.preflightProject({ id: 'conductor' });
   assert.equal(checks[0]?.error?.code, 'TOOL_UNAVAILABLE');
 });
+
 

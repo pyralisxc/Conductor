@@ -218,12 +218,12 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     });
 
     server.registerTool('pull-request.create', {
-      title: 'Open a pull request to preview',
-      description: 'Open a work/* pull request targeting preview. Main promotion is intentionally unavailable.',
+      title: 'Open an integration pull request',
+      description: 'Open a work/* pull request targeting an explicit non-production integration branch. Direct main/default-branch promotion is intentionally unavailable.',
       inputSchema: z.object({
         project: projectSchema,
         head: z.string().min(6),
-        base: z.literal('preview'),
+        base: z.string().min(1).max(255).describe('Non-production integration branch, for example preview or vercel-preview'),
         title: z.string().min(1).max(256),
         body: z.string().optional(),
         draft: z.boolean().optional(),
@@ -270,3 +270,4 @@ function result(receipt: object) {
     content: [{ type: 'text' as const, text: JSON.stringify(receipt) }],
   };
 }
+
