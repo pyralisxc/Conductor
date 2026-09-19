@@ -209,7 +209,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     if (input.files.length < 1 || input.files.length > 100) {
       throw { code: 'CONFLICT', message: 'A commit must contain between 1 and 100 files' };
     }
-    const totalBytes = input.files.reduce((size, file) => size + Buffer.byteLength(file.content, 'utf8'), 0);
+    const totalBytes = input.files.reduce((size, file) => size + (file.content === null ? 0 : Buffer.byteLength(file.content, 'utf8')), 0);
     if (totalBytes > 5 * 1024 * 1024) {
       throw { code: 'PERMISSION_DENIED', message: 'Commit content exceeds the 5 MiB mutation limit' };
     }
@@ -221,7 +221,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     const paths = new Set<string>();
     const validatedFiles = input.files.map((file) => {
       const path = validRepositoryPath(file.path);
-      if (Buffer.byteLength(file.content, 'utf8') > 1024 * 1024) {
+      if (file.content !== null && Buffer.byteLength(file.content, 'utf8') > 1024 * 1024) {
         throw { code: 'PERMISSION_DENIED', message: `Commit file exceeds the 1 MiB limit: ${path}` };
       }
       if (paths.has(path)) throw { code: 'CONFLICT', message: `Duplicate commit path: ${path}` };
@@ -229,6 +229,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
       return { ...file, path };
     });
     const tree = await Promise.all(validatedFiles.map(async (file) => {
+      if (file.content === null) return { path: file.path, mode: '100644', type: 'blob', sha: null };
       const blob = await this.request<{ sha: string }>(repository, '/git/blobs', {
         method: 'POST',
         body: JSON.stringify({ content: file.content, encoding: 'utf-8' }),
@@ -565,6 +566,7 @@ async function githubResponseError(response: Response): Promise<unknown> {
     }] : undefined,
   };
 }
+
 
 
 

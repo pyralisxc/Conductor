@@ -105,7 +105,7 @@ export interface CreateBranchInput {
 
 export interface CreateCommitFile {
   path: string;
-  content: string;
+  content: string | null;
 }
 
 export interface CreateCommitInput {
@@ -204,4 +204,5 @@ export interface FailedExecutionReceipt extends ReceiptBase {
 export type ExecutionReceipt<Result> =
   | SuccessfulExecutionReceipt<Result>
   | FailedExecutionReceipt;
+
 
