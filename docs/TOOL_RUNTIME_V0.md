@@ -15,7 +15,7 @@ When explicitly enabled with durable Redis idempotency state, it also exposes fo
 
 - `git.branch.create` creates only `work/*` branches from an exact SHA.
 - `git.commit.create` creates a bounded file commit and advances a `work/*` branch only from an expected head SHA.
-- `pull-request.create` opens `work/*` pull requests only to explicit non-production integration branches; the repository default branch, `main`, and `master` remain blocked.
+- `pull-request.create` opens `work/*` pull requests against an explicit target branch. Opening a proposal does not authorize or perform merge/promotion; consequential acceptance remains a separate operation and gate.
 - `pull-request.comment.create` adds an idempotent pull-request comment.
 
 No generic “do anything” tool exists.
@@ -76,4 +76,5 @@ The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the confi
 - Receipts are stable and carry provider identifiers.
 - Retrying the same mutation cannot repeat its side effect through the idempotency executor.
 - Existing orchestration policy and tests remain intact.
+
 

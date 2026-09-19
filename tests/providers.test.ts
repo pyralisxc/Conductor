@@ -231,7 +231,7 @@ test('GitHub provider resolves repositories under an authorized owner without pe
   assert.equal(requested.length, 1);
 });
 
-test('GitHub provider allows explicit non-production integration branches and blocks accepted branches', async () => {
+test('GitHub provider opens work pull requests against explicit repository-native targets', async () => {
   const requests: Array<{ url: string; method: string; body?: any }> = [];
   const provider = new GitHubRuntimeProvider({
     credentials: {
@@ -252,31 +252,32 @@ test('GitHub provider allows explicit non-production integration branches and bl
       const method = init?.method ?? 'GET';
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       requests.push({ url, method, body });
-      if (method === 'GET') return Response.json({ full_name: 'pyralisxc/CardForge', default_branch: 'main' });
       if (url.endsWith('/pulls') && method === 'POST') return Response.json({ number: 12, html_url: 'https://github.com/pyralisxc/CardForge/pull/12' });
       throw new Error(`Unexpected request ${method} ${url}`);
     },
   });
 
-  const created = await provider.createPullRequest({
-    project: { id: 'pyralisxc/CardForge' },
-    head: 'work/cf-cleanup',
-    base: 'vercel-preview',
-    title: 'Cleanup',
-    idempotencyKey: 'pr:cf:cleanup',
-  });
-  assert.equal(created.pullRequestNumber, 12);
-  assert.equal(requests.at(-1)?.body?.base, 'vercel-preview');
+  for (const base of ['vercel-preview', 'main']) {
+    const created = await provider.createPullRequest({
+      project: { id: 'pyralisxc/CardForge' },
+      head: 'work/cf-cleanup',
+      base,
+      title: 'Cleanup',
+      idempotencyKey: `pr:cf:cleanup:${base}`,
+    });
+    assert.equal(created.pullRequestNumber, 12);
+    assert.equal(requests.at(-1)?.body?.base, base);
+  }
 
   await assert.rejects(
     provider.createPullRequest({
       project: { id: 'pyralisxc/CardForge' },
       head: 'work/cf-cleanup',
-      base: 'main',
-      title: 'Unsafe',
-      idempotencyKey: 'pr:cf:unsafe',
+      base: 'work/cf-cleanup',
+      title: 'Invalid',
+      idempotencyKey: 'pr:cf:self',
     }),
-    (error: any) => error?.code === 'PERMISSION_DENIED' && /protected branch main/.test(error.message),
+    (error: any) => error?.code === 'CONFLICT' && /head and base must differ/.test(error.message),
   );
 });
 
@@ -394,5 +395,6 @@ test('unconfigured Development Intelligence is explicit and read-only', async ()
   const checks = await provider.preflightProject({ id: 'conductor' });
   assert.equal(checks[0]?.error?.code, 'TOOL_UNAVAILABLE');
 });
+
 
 

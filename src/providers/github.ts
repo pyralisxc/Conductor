@@ -255,15 +255,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     assertWorkBranch(input.head);
     const base = input.base.trim();
     if (!base || base.startsWith('refs/')) throw { code: 'CONFLICT', message: 'Pull-request base must be a branch name' };
-    const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
-    const protectedTargets = new Set(
-      ['main', 'master', repositoryInfo.default_branch]
-        .filter((value): value is string => Boolean(value))
-        .map((value) => value.toLowerCase()),
-    );
-    if (protectedTargets.has(base.toLowerCase())) {
-      throw { code: 'PERMISSION_DENIED', message: `Conductor may not open work pull requests directly against protected branch ${base}` };
-    }
+    if (base === input.head) throw { code: 'CONFLICT', message: 'Pull-request head and base must differ' };
     const created = await this.request<{ number: number; html_url: string }>(repository, '/pulls', {
       method: 'POST',
       body: JSON.stringify({
@@ -573,5 +565,6 @@ async function githubResponseError(response: Response): Promise<unknown> {
     }] : undefined,
   };
 }
+
 
 
