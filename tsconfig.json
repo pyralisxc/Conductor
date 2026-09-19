@@ -12,6 +12,7 @@
     "skipLibCheck": true
   },
   "include": [
+    "api/**/*.ts",
     "src/**/*.ts",
     "tests/**/*.ts"
   ]
