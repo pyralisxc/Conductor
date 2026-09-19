@@ -323,6 +323,42 @@ test('a retry while the first mutation is running cannot execute a duplicate', a
   assert.equal(completed.status, 'succeeded');
 });
 
+test('runtime exposes PR status as a read operation when a PR provider is configured', async () => {
+  const pullRequestProvider = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    async getPullRequestStatus(input: any) {
+      return {
+        repository: input.project.repository,
+        pullRequestNumber: input.pullRequestNumber,
+        url: 'https://github.com/pyralisxc/CardForge/pull/12',
+        state: 'open',
+        draft: false,
+        merged: false,
+        mergeable: true,
+        mergeableState: 'clean',
+        head: { ref: 'work/cf', sha: 'a'.repeat(40) },
+        base: { ref: 'vercel-preview', sha: 'b'.repeat(40) },
+        labels: [],
+        checks: { total: 0, pending: 0, successful: 0, failed: 0, neutral: 0, skipped: 0, items: [] },
+        workflowRuns: [],
+      };
+    },
+  };
+  const runtime = new ConductorToolRuntime({ pullRequestProvider });
+  const capabilities = await runtime.capabilities();
+  assert.equal(capabilities.status, 'succeeded');
+  if (capabilities.status === 'succeeded') {
+    assert.equal(capabilities.result.operations.some((item) => item.name === 'pull-request.status' && !item.mutates), true);
+  }
+  const receipt = await runtime.pullRequestStatus({
+    project: { id: 'cardforge', repository: 'pyralisxc/CardForge' },
+    pullRequestNumber: 12,
+  });
+  assert.equal(receipt.status, 'succeeded');
+  if (receipt.status === 'succeeded') assert.equal(receipt.result.pullRequestNumber, 12);
+});
+
 test('runtime exposes bounded mutations only with a provider and idempotency executor', async () => {
   let creates = 0;
   const mutationProvider: ProjectMutationProvider = {
@@ -335,6 +371,9 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
     async createCommit() { throw new Error('unused'); },
     async createPullRequest() { throw new Error('unused'); },
     async commentPullRequest() { throw new Error('unused'); },
+    async updatePullRequestLabels() { throw new Error('unused'); },
+    async mergeIntegrationPullRequest() { throw new Error('unused'); },
+    async promotePullRequest() { throw new Error('unused'); },
   };
   const runtime = new ConductorToolRuntime({
     mutationProvider,
@@ -345,6 +384,7 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   if (capabilities.status === 'succeeded') {
     assert.deepEqual(capabilities.result.operations.filter((item) => item.mutates).map((item) => item.name), [
       'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
+      'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.promote',
     ]);
   }
   const input = {
@@ -359,3 +399,4 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   assert.equal(replay.idempotency?.replayed, true);
   assert.equal(creates, 1);
 });
+
