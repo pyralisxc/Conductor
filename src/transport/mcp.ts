@@ -200,13 +200,13 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
 
     server.registerTool('git.commit.create', {
       title: 'Commit files to a work branch',
-      description: 'Create one bounded commit and advance a work/* branch only when its head matches expectedHeadSha.',
+      description: 'Create one bounded commit, including tracked-file deletions via null content, and advance a work/* branch only when its head matches expectedHeadSha.',
       inputSchema: z.object({
         project: projectSchema,
         branch: z.string().min(6),
         expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
         message: z.string().min(1).max(500),
-        files: z.array(z.object({ path: z.string().min(1).max(1024), content: z.string().max(1024 * 1024) })).min(1).max(100),
+        files: z.array(z.object({ path: z.string().min(1).max(1024), content: z.string().max(1024 * 1024).nullable().describe('Full UTF-8 file content, or null to delete the tracked path') })).min(1).max(100),
         idempotencyKey: z.string().min(8).max(200),
       }),
       outputSchema: mutationOutputSchema,
@@ -218,12 +218,12 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     });
 
     server.registerTool('pull-request.create', {
-      title: 'Open a pull request to preview',
-      description: 'Open a work/* pull request targeting preview. Main promotion is intentionally unavailable.',
+      title: 'Open a pull request',
+      description: 'Open a work/* pull request against an explicit branch. Creating a proposal is allowed; merging or promoting accepted branches is a separate consequential operation.',
       inputSchema: z.object({
         project: projectSchema,
         head: z.string().min(6),
-        base: z.literal('preview'),
+        base: z.string().min(1).max(255).describe('Target branch for the pull request, for example main, preview, or vercel-preview'),
         title: z.string().min(1).max(256),
         body: z.string().optional(),
         draft: z.boolean().optional(),
@@ -270,3 +270,6 @@ function result(receipt: object) {
     content: [{ type: 'text' as const, text: JSON.stringify(receipt) }],
   };
 }
+
+
+

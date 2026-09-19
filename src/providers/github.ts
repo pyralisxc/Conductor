@@ -19,6 +19,7 @@ import {
 
 interface GitHubRepositoryResponse {
   full_name: string;
+  default_branch?: string;
   permissions?: {
     pull?: boolean;
     push?: boolean;
@@ -208,7 +209,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     if (input.files.length < 1 || input.files.length > 100) {
       throw { code: 'CONFLICT', message: 'A commit must contain between 1 and 100 files' };
     }
-    const totalBytes = input.files.reduce((size, file) => size + Buffer.byteLength(file.content, 'utf8'), 0);
+    const totalBytes = input.files.reduce((size, file) => size + (file.content === null ? 0 : Buffer.byteLength(file.content, 'utf8')), 0);
     if (totalBytes > 5 * 1024 * 1024) {
       throw { code: 'PERMISSION_DENIED', message: 'Commit content exceeds the 5 MiB mutation limit' };
     }
@@ -220,7 +221,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     const paths = new Set<string>();
     const validatedFiles = input.files.map((file) => {
       const path = validRepositoryPath(file.path);
-      if (Buffer.byteLength(file.content, 'utf8') > 1024 * 1024) {
+      if (file.content !== null && Buffer.byteLength(file.content, 'utf8') > 1024 * 1024) {
         throw { code: 'PERMISSION_DENIED', message: `Commit file exceeds the 1 MiB limit: ${path}` };
       }
       if (paths.has(path)) throw { code: 'CONFLICT', message: `Duplicate commit path: ${path}` };
@@ -228,6 +229,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
       return { ...file, path };
     });
     const tree = await Promise.all(validatedFiles.map(async (file) => {
+      if (file.content === null) return { path: file.path, mode: '100644', type: 'blob', sha: null };
       const blob = await this.request<{ sha: string }>(repository, '/git/blobs', {
         method: 'POST',
         body: JSON.stringify({ content: file.content, encoding: 'utf-8' }),
@@ -252,13 +254,15 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   async createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }> {
     const { repository, credential } = await this.writableRepository(input.project, { pull_requests: 'write' });
     assertWorkBranch(input.head);
-    if (input.base !== 'preview') throw { code: 'PERMISSION_DENIED', message: 'Conductor may only open work pull requests targeting preview' };
+    const base = input.base.trim();
+    if (!base || base.startsWith('refs/')) throw { code: 'CONFLICT', message: 'Pull-request base must be a branch name' };
+    if (base === input.head) throw { code: 'CONFLICT', message: 'Pull-request head and base must differ' };
     const created = await this.request<{ number: number; html_url: string }>(repository, '/pulls', {
       method: 'POST',
       body: JSON.stringify({
         title: input.title,
         head: input.head,
-        base: input.base,
+        base,
         body: input.body ?? '',
         draft: input.draft ?? false,
       }),
@@ -562,4 +566,7 @@ async function githubResponseError(response: Response): Promise<unknown> {
     }] : undefined,
   };
 }
+
+
+
 
