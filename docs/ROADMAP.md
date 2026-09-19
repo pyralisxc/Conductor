@@ -3,6 +3,9 @@
 ## Phase 0 — Repository spine
 Domain types, policy engine, provider contracts, deterministic next-action logic, verification workflow, Crystal/docs.
 
+## Priority foundation — Tool Runtime v0
+Stable capability discovery, project preflight, normalized tool failures, execution receipts, and mutation idempotency. Establish this execution boundary before adding advanced orchestration, delegation, or session machinery.
+
 ## Phase 1 — GitHub kernel
 Private GitHub App, webhook receiver, issue/PR adapter, branch manager, idempotent event ingestion, project policy.
 
