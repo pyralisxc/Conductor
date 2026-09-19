@@ -3,7 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
 import { TOOL_RUNTIME_CONTRACT_VERSION } from '../runtime/types.js';
 import type { AccessTokenVerifier } from './auth.js';
-import { CONDUCTOR_READ_SCOPE } from './auth.js';
+import { CONDUCTOR_READ_SCOPE, CONDUCTOR_WRITE_SCOPE } from './auth.js';
 import { createConductorMcpServer } from './mcp.js';
 
 export interface ConductorHttpHandlerOptions {
@@ -23,7 +23,7 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
   const metadata = {
     resource: mcpUrl.toString(),
     authorization_servers: [options.oauthIssuer.replace(/\/$/, '')],
-    scopes_supported: [CONDUCTOR_READ_SCOPE],
+    scopes_supported: [CONDUCTOR_READ_SCOPE, CONDUCTOR_WRITE_SCOPE],
     resource_name: 'Conductor Tool Runtime',
   };
   const challenge = `Bearer resource_metadata="${new URL('/.well-known/oauth-protected-resource/mcp', mcpUrl).toString()}", scope="${CONDUCTOR_READ_SCOPE}"`;

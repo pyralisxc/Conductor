@@ -9,7 +9,10 @@ import {
   ConductorToolRuntime,
   createConductorHttpHandler,
   createConductorMcpServer,
+  IdempotentMutationExecutor,
+  InMemoryIdempotencyStore,
 } from '../src/index.js';
+import type { ProjectMutationProvider } from '../src/index.js';
 
 test('MCP adapter advertises only the two typed read-only runtime tools', async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -62,7 +65,7 @@ test('HTTP MCP boundary publishes OAuth metadata and fails closed', async () => 
   try {
     const metadata = await fetch(`${base}/.well-known/oauth-protected-resource`);
     assert.equal(metadata.status, 200);
-    assert.deepEqual((await metadata.json() as { scopes_supported: string[] }).scopes_supported, ['conductor.read']);
+    assert.deepEqual((await metadata.json() as { scopes_supported: string[] }).scopes_supported, ['conductor.read', 'conductor.write']);
 
     const unauthorized = await fetch(`${base}/mcp`, { method: 'POST' });
     assert.equal(unauthorized.status, 401);
@@ -80,4 +83,32 @@ test('HTTP MCP boundary publishes OAuth metadata and fails closed', async () => 
     httpServer.close();
     await once(httpServer, 'close');
   }
+});
+
+test('MCP advertises bounded mutations only when durable mutation infrastructure is supplied', async () => {
+  const mutationProvider: ProjectMutationProvider = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    async createBranch(input) { return { repository: input.project.repository!, branch: input.branch, commitSha: input.fromSha }; },
+    async createCommit() { throw new Error('unused'); },
+    async createPullRequest() { throw new Error('unused'); },
+    async commentPullRequest() { throw new Error('unused'); },
+  };
+  const runtime = new ConductorToolRuntime({
+    mutationProvider,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createConductorMcpServer(runtime);
+  const client = new Client({ name: 'test-client', version: '1.0.0' });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const listed = await client.listTools();
+  assert.deepEqual(listed.tools.map((tool) => tool.name), [
+    'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
+    'pull-request.create', 'pull-request.comment.create',
+  ]);
+  assert.equal(listed.tools.find((tool) => tool.name === 'git.branch.create')?.annotations?.readOnlyHint, false);
+  await client.close();
+  await server.close();
 });

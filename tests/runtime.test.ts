@@ -12,6 +12,7 @@ import type {
   PreflightCheck,
   ProjectReference,
   ToolRuntimeProvider,
+  ProjectMutationProvider,
 } from '../src/index.js';
 
 const project: ProjectReference = {
@@ -105,7 +106,7 @@ test('capabilities reports only the configured runtime operations and provider f
   assert.equal(receipt.operationId, 'op-capabilities');
 });
 
-test('preflight returns every required check and explicit degraded state', async () => {
+test('preflight defaults to develop checks without requiring a local execution plane', async () => {
   const runtime = new ConductorToolRuntime({
     providers: [
       provider({
@@ -146,16 +147,14 @@ test('preflight returns every required check and explicit degraded state', async
   if (receipt.status !== 'succeeded') return;
 
   assert.equal(receipt.result.status, 'blocked');
-  assert.equal(receipt.result.checks.length, 7);
+  assert.equal(receipt.result.intent, 'develop');
+  assert.equal(receipt.result.checks.length, 4);
   assert.deepEqual(
     receipt.result.checks.map((check) => check.check),
     [
       'repository.access',
       'github.read',
       'github.write',
-      'workspace.access',
-      'shell.execute',
-      'tests.run',
       'development-intelligence.read',
     ],
   );
@@ -163,6 +162,26 @@ test('preflight returns every required check and explicit degraded state', async
     receipt.result.checks.at(-1)?.error?.code,
     'TOOL_UNAVAILABLE',
   );
+});
+
+test('preflight intents select only their required evidence planes', async () => {
+  const runtime = new ConductorToolRuntime({
+    providers: [provider({
+      id: 'all',
+      checks: [
+        readyCheck('repository.access', 'all'), readyCheck('github.read', 'all'),
+        readyCheck('github.write', 'all'), readyCheck('workspace.access', 'all'),
+        readyCheck('shell.execute', 'all'), readyCheck('tests.run', 'all'),
+        readyCheck('development-intelligence.read', 'all'),
+      ],
+    })],
+  });
+  const inspect = await runtime.preflightProject(project, 'inspect');
+  const execute = await runtime.preflightProject(project, 'execute');
+  assert.equal(inspect.status, 'succeeded');
+  assert.equal(execute.status, 'succeeded');
+  if (inspect.status === 'succeeded') assert.equal(inspect.result.checks.length, 3);
+  if (execute.status === 'succeeded') assert.equal(execute.result.checks.length, 7);
 });
 
 test('provider failures become truthful capability health instead of hidden throws', async () => {
@@ -302,4 +321,41 @@ test('a retry while the first mutation is running cannot execute a duplicate', a
   releaseMutation();
   const completed = await first;
   assert.equal(completed.status, 'succeeded');
+});
+
+test('runtime exposes bounded mutations only with a provider and idempotency executor', async () => {
+  let creates = 0;
+  const mutationProvider: ProjectMutationProvider = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    async createBranch(input) {
+      creates += 1;
+      return { repository: input.project.repository!, branch: input.branch, commitSha: input.fromSha };
+    },
+    async createCommit() { throw new Error('unused'); },
+    async createPullRequest() { throw new Error('unused'); },
+    async commentPullRequest() { throw new Error('unused'); },
+  };
+  const runtime = new ConductorToolRuntime({
+    mutationProvider,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const capabilities = await runtime.capabilities();
+  assert.equal(capabilities.status, 'succeeded');
+  if (capabilities.status === 'succeeded') {
+    assert.deepEqual(capabilities.result.operations.filter((item) => item.mutates).map((item) => item.name), [
+      'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
+    ]);
+  }
+  const input = {
+    project: { id: 'cardforge', repository: 'pyralisxc/CardForge' },
+    branch: 'work/cf-42',
+    fromSha: 'a'.repeat(40),
+    idempotencyKey: 'branch:cardforge:cf-42',
+  };
+  const first = await runtime.createBranch(input);
+  const replay = await runtime.createBranch(input);
+  assert.equal(first.status, 'succeeded');
+  assert.equal(replay.idempotency?.replayed, true);
+  assert.equal(creates, 1);
 });

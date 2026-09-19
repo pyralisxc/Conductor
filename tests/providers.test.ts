@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   GitHubRuntimeProvider,
+  DevelopmentIntelligenceProvider,
   UnavailableDevelopmentIntelligenceProvider,
   WorkspaceRuntimeProvider,
   parseProjects,
+  parseOwners,
 } from '../src/index.js';
 
 test('GitHub provider reports missing authentication explicitly', async () => {
@@ -68,6 +70,25 @@ test('GitHub provider rejects project identity mismatches before network access'
   assert.equal(checks[0]?.error?.code, 'CONFLICT');
 });
 
+test('GitHub provider resolves repositories under an authorized owner without per-repository registration', async () => {
+  const requested: string[] = [];
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      requested.push(String(input));
+      return Response.json({ full_name: 'pyralisxc/CardForge', permissions: { pull: true, push: true } });
+    },
+  });
+  const checks = await provider.preflightProject({ id: 'pyralisxc/CardForge' });
+  assert.equal(checks.every((check) => check.status === 'ready'), true);
+  assert.match(requested[0] ?? '', /repos\/pyralisxc\/CardForge$/);
+
+  const rejected = await provider.preflightProject({ id: 'attacker/CardForge' });
+  assert.equal(rejected[0]?.error?.code, 'NOT_FOUND');
+  assert.equal(requested.length, 1);
+});
+
 test('workspace provider verifies an allowlisted workspace, shell, and test script', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'conductor-workspace-'));
   await writeFile(join(workspace, 'package.json'), JSON.stringify({
@@ -86,11 +107,40 @@ test('project configuration is strict and rejects duplicate identities', () => {
     id: 'conductor',
     repository: 'pyralisxc/Conductor',
     workspace: undefined,
+    githubWrite: undefined,
   }]);
+  assert.deepEqual(parseOwners('pyralisxc,PYRALISXC'), ['pyralisxc']);
   assert.throws(
     () => parseProjects('[{"id":"same"},{"id":"same"}]'),
     /Duplicate project id/,
   );
+});
+
+test('Development Intelligence provider verifies MCP discovery and project status with its machine token', async () => {
+  const requests: Array<{ authorization: string | null; body: any }> = [];
+  const provider = new DevelopmentIntelligenceProvider({
+    endpoint: 'https://devint.example.com/mcp',
+    token: 'machine-token',
+    fetch: async (_input, init) => {
+      const body = JSON.parse(String(init?.body));
+      requests.push({
+        authorization: new Headers(init?.headers).get('authorization'),
+        body,
+      });
+      if (body.method === 'tools/list') {
+        return Response.json({ jsonrpc: '2.0', id: body.id, result: { tools: [{ name: 'project_status' }] } });
+      }
+      return Response.json({
+        jsonrpc: '2.0', id: body.id,
+        result: { structuredContent: { project: 'pyralisxc/CardForge', upstreamSha: 'abc' } },
+      });
+    },
+  });
+
+  assert.equal((await provider.getCapabilities())[0]?.available, true);
+  assert.equal((await provider.preflightProject({ id: 'cardforge', repository: 'pyralisxc/CardForge' }))[0]?.status, 'ready');
+  assert.equal(requests.every((request) => request.authorization === 'Bearer machine-token'), true);
+  assert.equal(requests[1]?.body.params.arguments.project, 'pyralisxc/CardForge');
 });
 
 test('unconfigured Development Intelligence is explicit and read-only', async () => {

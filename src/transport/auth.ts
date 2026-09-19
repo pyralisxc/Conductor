@@ -2,6 +2,7 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 
 export const CONDUCTOR_READ_SCOPE = 'conductor.read';
+export const CONDUCTOR_WRITE_SCOPE = 'conductor.write';
 
 export interface AccessTokenVerifier {
   verifyAccessToken(token: string): Promise<AuthInfo>;

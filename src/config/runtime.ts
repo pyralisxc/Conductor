@@ -1,35 +1,53 @@
 import { ConductorToolRuntime } from '../runtime/runtime.js';
 import { GitHubRuntimeProvider } from '../providers/github.js';
-import { UnavailableDevelopmentIntelligenceProvider } from '../providers/development-intelligence.js';
+import { DevelopmentIntelligenceProvider, UnavailableDevelopmentIntelligenceProvider } from '../providers/development-intelligence.js';
 import type { ToolRuntimeProvider } from '../providers/runtime.js';
 import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
+import { IdempotentMutationExecutor } from '../runtime/idempotency.js';
+import { RedisIdempotencyStore } from '../runtime/redis-idempotency.js';
 
 export interface ConfiguredProject {
   id: string;
   repository?: string;
   workspace?: string;
+  githubWrite?: boolean;
 }
 
 export interface RuntimeEnvironment extends Record<string, string | undefined> {
   CONDUCTOR_PROJECTS_JSON?: string;
   GITHUB_TOKEN?: string;
+  CONDUCTOR_GITHUB_ALLOWED_OWNERS?: string;
+  DEVINT_MCP_URL?: string;
+  DEVINT_AGENT_TOKEN?: string;
+  CONDUCTOR_ENABLE_GITHUB_MUTATIONS?: string;
+  UPSTASH_REDIS_REST_URL?: string;
+  UPSTASH_REDIS_REST_TOKEN?: string;
+  KV_REST_API_URL?: string;
+  KV_REST_API_TOKEN?: string;
 }
 
 export function createRuntimeFromEnvironment(
   environment: RuntimeEnvironment = process.env,
 ): ConductorToolRuntime {
   const projects = parseProjects(environment.CONDUCTOR_PROJECTS_JSON);
-  const providers: ToolRuntimeProvider[] = [
-    new UnavailableDevelopmentIntelligenceProvider(),
-  ];
+  const providers: ToolRuntimeProvider[] = [environment.DEVINT_MCP_URL
+    ? new DevelopmentIntelligenceProvider({
+      endpoint: environment.DEVINT_MCP_URL,
+      token: environment.DEVINT_AGENT_TOKEN,
+    })
+    : new UnavailableDevelopmentIntelligenceProvider()];
   const githubProjects = projects.flatMap((project) => project.repository
-    ? [{ id: project.id, repository: project.repository }]
+    ? [{ id: project.id, repository: project.repository, write: project.githubWrite }]
     : []);
-  if (githubProjects.length > 0) {
-    providers.push(new GitHubRuntimeProvider({
+  const allowedOwners = parseOwners(environment.CONDUCTOR_GITHUB_ALLOWED_OWNERS);
+  let githubProvider: GitHubRuntimeProvider | undefined;
+  if (githubProjects.length > 0 || allowedOwners.length > 0) {
+    githubProvider = new GitHubRuntimeProvider({
       token: environment.GITHUB_TOKEN,
       projects: githubProjects,
-    }));
+      allowedOwners,
+    });
+    providers.push(githubProvider);
   }
 
   const workspaceProjects = projects.flatMap((project) => project.workspace
@@ -39,7 +57,37 @@ export function createRuntimeFromEnvironment(
     providers.push(new WorkspaceRuntimeProvider({ projects: workspaceProjects }));
   }
 
-  return new ConductorToolRuntime({ providers });
+  const mutationsEnabled = environment.CONDUCTOR_ENABLE_GITHUB_MUTATIONS === '1';
+  if (!mutationsEnabled) return new ConductorToolRuntime({ providers, projectResolver: githubProvider });
+  if (!githubProvider || !environment.GITHUB_TOKEN) {
+    throw new Error('GitHub mutations require an authorized owner/project and GITHUB_TOKEN');
+  }
+  const redisUrl = environment.UPSTASH_REDIS_REST_URL ?? environment.KV_REST_API_URL;
+  const redisToken = environment.UPSTASH_REDIS_REST_TOKEN ?? environment.KV_REST_API_TOKEN;
+  if (!redisUrl || !redisToken) {
+    throw new Error('GitHub mutations require durable Redis idempotency state');
+  }
+  return new ConductorToolRuntime({
+    providers,
+    mutationProvider: githubProvider,
+    mutationExecutor: new IdempotentMutationExecutor({
+      store: new RedisIdempotencyStore({ url: redisUrl, token: redisToken }),
+    }),
+    projectResolver: githubProvider,
+  });
+}
+
+export function parseOwners(value?: string): string[] {
+  if (!value?.trim()) return [];
+  const owners = value.split(',').map((owner) => owner.trim()).filter(Boolean);
+  const unique = new Map<string, string>();
+  for (const owner of owners) {
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner)) {
+      throw new Error(`Invalid GitHub owner in CONDUCTOR_GITHUB_ALLOWED_OWNERS: ${owner}`);
+    }
+    if (!unique.has(owner.toLowerCase())) unique.set(owner.toLowerCase(), owner);
+  }
+  return [...unique.values()];
 }
 
 export function parseProjects(value?: string): ConfiguredProject[] {
@@ -65,10 +113,14 @@ export function parseProjects(value?: string): ConfiguredProject[] {
     if (project.workspace !== undefined && typeof project.workspace !== 'string') {
       throw new Error(`Project ${project.id} workspace must be a string`);
     }
+    if (project.githubWrite !== undefined && typeof project.githubWrite !== 'boolean') {
+      throw new Error(`Project ${project.id} githubWrite must be a boolean`);
+    }
     return {
       id: project.id,
       repository: project.repository,
       workspace: project.workspace,
+      githubWrite: project.githubWrite,
     } as ConfiguredProject;
   });
 }

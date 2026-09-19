@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
-import { authInfoFromJwt, CONDUCTOR_READ_SCOPE, type AccessTokenVerifier } from './auth.js';
+import { authInfoFromJwt, CONDUCTOR_READ_SCOPE, CONDUCTOR_WRITE_SCOPE, type AccessTokenVerifier } from './auth.js';
 import { derivedSecret, sessionSecret } from './owner-auth.js';
 import {
   sharedAuthorizationStateConfigured,
@@ -213,7 +213,7 @@ function requestedScopes(value: string | null): string[] {
   const values = value
     ? value.split(/\s+/u).map((scope) => scope.trim()).filter(Boolean)
     : [CONDUCTOR_READ_SCOPE];
-  const allowed = new Set([CONDUCTOR_READ_SCOPE, 'offline_access']);
+  const allowed = new Set([CONDUCTOR_READ_SCOPE, CONDUCTOR_WRITE_SCOPE, 'offline_access']);
   if (values.some((scope) => !allowed.has(scope))) {
     throw Object.assign(new Error('Requested scope is not supported'), { status: 400, oauthError: 'invalid_scope' });
   }
@@ -267,7 +267,11 @@ export function renderOAuthConsent(request: OAuthAuthorizationRequest): string {
     ...(request.state ? [['state', request.state]] : []),
   ].map(([name, value]) => `<input type="hidden" name="${escapeHtml(name!)}" value="${escapeHtml(value!)}">`).join('');
   const redirectHost = new URL(request.redirectUri).host;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize — Conductor</title><style>:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#090b10;color:#f3f5f8}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 50% 12%,#262135 0,#090b10 48%)}.card{width:min(520px,calc(100vw - 28px));border:1px solid #393346;background:#111019e8;border-radius:18px;padding:26px;box-shadow:0 26px 70px #0008}.mark{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:#2b2340;border:1px solid #5b4b78;color:#e0d3ff;font-weight:800}.eyebrow{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#9a8bac;margin-top:20px}h1{font-size:24px;margin:7px 0}p{color:#aaa2b6;font-size:13px;line-height:1.55}.box{border:1px solid #40384d;background:#0c0b11;border-radius:10px;padding:12px;margin:16px 0;font-size:12px;line-height:1.6}.box strong{color:#eee7f8}button{width:100%;border:1px solid #6e5a91;background:#392d52;color:#f7f1ff;border-radius:10px;padding:11px;font-weight:700;cursor:pointer}.note{margin-top:16px;padding-top:14px;border-top:1px solid #312b3b;color:#887d94;font-size:10px;line-height:1.45}</style></head><body><main class="card"><div class="mark">C</div><div class="eyebrow">MCP authorization</div><h1>Allow ${escapeHtml(request.clientName)}?</h1><p>This grants read-only access to the current Conductor Tool Runtime v0 tools. It does not expose mutation operations.</p><div class="box"><strong>Client</strong>: ${escapeHtml(request.clientName)}<br><strong>Return host</strong>: ${escapeHtml(redirectHost)}<br><strong>Scope</strong>: ${escapeHtml(request.scope)}</div><form method="post" action="/oauth/authorize">${hidden}<button type="submit">Authorize Conductor</button></form><div class="note">Only approve this request if you initiated it from ChatGPT or another trusted MCP client.</div></main></body></html>`;
+  const writeRequested = request.scope.split(/\s+/).includes(CONDUCTOR_WRITE_SCOPE);
+  const accessDescription = writeRequested
+    ? 'This grants read access plus bounded GitHub writes on authorized work/* branches and pull requests. Main promotion remains owner-gated.'
+    : 'This grants read-only access to Conductor.';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize — Conductor</title><style>:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#090b10;color:#f3f5f8}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 50% 12%,#262135 0,#090b10 48%)}.card{width:min(520px,calc(100vw - 28px));border:1px solid #393346;background:#111019e8;border-radius:18px;padding:26px;box-shadow:0 26px 70px #0008}.mark{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:#2b2340;border:1px solid #5b4b78;color:#e0d3ff;font-weight:800}.eyebrow{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#9a8bac;margin-top:20px}h1{font-size:24px;margin:7px 0}p{color:#aaa2b6;font-size:13px;line-height:1.55}.box{border:1px solid #40384d;background:#0c0b11;border-radius:10px;padding:12px;margin:16px 0;font-size:12px;line-height:1.6}.box strong{color:#eee7f8}button{width:100%;border:1px solid #6e5a91;background:#392d52;color:#f7f1ff;border-radius:10px;padding:11px;font-weight:700;cursor:pointer}.note{margin-top:16px;padding-top:14px;border-top:1px solid #312b3b;color:#887d94;font-size:10px;line-height:1.45}</style></head><body><main class="card"><div class="mark">C</div><div class="eyebrow">MCP authorization</div><h1>Allow ${escapeHtml(request.clientName)}?</h1><p>${accessDescription}</p><div class="box"><strong>Client</strong>: ${escapeHtml(request.clientName)}<br><strong>Return host</strong>: ${escapeHtml(redirectHost)}<br><strong>Scope</strong>: ${escapeHtml(request.scope)}</div><form method="post" action="/oauth/authorize">${hidden}<button type="submit">Authorize Conductor</button></form><div class="note">Only approve this request if you initiated it from ChatGPT or another trusted MCP client.</div></main></body></html>`;
 }
 
 export async function issueAuthorizationCode(request: OAuthAuthorizationRequest): Promise<string> {
