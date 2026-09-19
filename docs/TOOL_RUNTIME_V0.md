@@ -54,10 +54,12 @@ The included in-memory idempotency store is suitable for tests and one-process d
 - multi-agent workers or handoffs
 - scheduling and durable waits
 - session management
-- a required MCP, HTTP, Vercel, or other transport
+- a provider-specific orchestration transport beyond the thin authenticated MCP adapter
 - a second source of project intelligence
 
 Transports adapt this contract. They do not own it.
+
+The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the two public tools over authenticated Streamable HTTP without adding runtime semantics.
 
 ## Acceptance
 
