@@ -93,6 +93,12 @@ npm run verify
 
 The initial code is intentionally a small provider-neutral core. It should be expanded only after the CardForge canary proves the first real integration needs.
 
+## Tool runtime
+
+The v0 runtime now includes a thin authenticated Streamable HTTP MCP adapter, concrete GitHub and local-workspace preflight probes, strict project allowlisting, and explicit unavailable state for the not-yet-deployed Development Intelligence adapter.
+
+See `docs/TOOL_RUNTIME_V0.md` for the stable contract and `docs/MCP_RUNTIME.md` for deployment, OAuth, and ChatGPT connection requirements.
+
 ## Important current experimental boundary
 
 Automatic creation/resumption of ordinary consumer ChatGPT conversations is **not** treated as a guaranteed API contract.

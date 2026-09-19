@@ -71,8 +71,16 @@ export class ConductorToolRuntime {
 
         for (const provider of this.providers) {
           try {
-            capabilities.push(...(await provider.getCapabilities()));
-            providers.push({ provider: provider.id, health: 'ready' });
+            const reported = await provider.getCapabilities();
+            capabilities.push(...reported);
+            const health = reported.some((capability) => capability.health === 'ready')
+              ? reported.some((capability) => capability.health !== 'ready')
+                ? 'degraded'
+                : 'ready'
+              : reported.some((capability) => capability.health === 'degraded')
+                ? 'degraded'
+                : 'unavailable';
+            providers.push({ provider: provider.id, health });
           } catch (error) {
             const normalized = normalizeToolError(
               error,
