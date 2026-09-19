@@ -30,7 +30,7 @@ local_runners:
 
 # Project orchestration policy
 
-This file specializes Jarvis Conductor for one project.
+This file specializes Conductor for one project.
 
 It does not replace DevOS, project product truth, repository instructions, or Development Intelligence.
 

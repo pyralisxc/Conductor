@@ -1,6 +1,6 @@
-# Jarvis Conductor
+# Conductor
 
-Jarvis Conductor is the orchestration and owner-control layer for an AI-assisted development environment.
+Conductor is the orchestration and owner-control layer for an AI-assisted development environment.
 
 It does **not** replace the developer, DevOS, Development Intelligence, GitHub, or specialized workers. It connects them.
 
@@ -12,7 +12,7 @@ It does **not** replace the developer, DevOS, Development Intelligence, GitHub, 
 - **DevOS 4.x** — development cognition: Objective, Ambition, stage, authorization, Evidence Appetite, proof.
 - **Development Intelligence** — compact, evidence-backed project reality.
 - **GitHub** — durable repositories, issues, projects, PRs, checks, branches, releases.
-- **Jarvis Conductor** — observes state and decides what should happen next, who/what should do it, where it should run, and when intelligence should wake again.
+- **Conductor** — observes state and decides what should happen next, who/what should do it, where it should run, and when intelligence should wake again.
 - **Conversational developer** — preferred primary owner for ambiguous/deep development work.
 - **Delegated workers** — bounded execution, browser/computer work, migrations, audits, local/Unity tasks.
 - **Owner Console** — unified visibility and control across the system.
@@ -53,6 +53,7 @@ See `docs/PROVIDERS.md` for alternatives and cost posture.
 ├── ORCHESTRATION.example.md
 ├── docs/
 │   ├── CRYSTAL.md
+│   ├── TOOL_RUNTIME_V0.md
 │   ├── OWNER_CONSOLE.md
 │   ├── PROVIDERS.md
 │   ├── STATE_MODEL.md
@@ -65,7 +66,13 @@ See `docs/PROVIDERS.md` for alternatives and cost posture.
 │   │   ├── types.ts
 │   │   └── policy.ts
 │   ├── providers/
-│   │   └── contracts.ts
+│   │   ├── contracts.ts
+│   │   └── runtime.ts
+│   ├── runtime/
+│   │   ├── types.ts
+│   │   ├── errors.ts
+│   │   ├── idempotency.ts
+│   │   └── runtime.ts
 │   ├── workflow/
 │   │   └── decide-next.ts
 │   ├── owner-console/
@@ -86,11 +93,17 @@ npm run verify
 
 The initial code is intentionally a small provider-neutral core. It should be expanded only after the CardForge canary proves the first real integration needs.
 
+## Tool runtime
+
+The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery with explicit project overrides, intent-aware preflight, a read-only Development Intelligence MCP adapter, and optionally enabled bounded GitHub mutations backed by durable idempotency state.
+
+See `docs/TOOL_RUNTIME_V0.md` for the stable contract and `docs/MCP_RUNTIME.md` for deployment, OAuth, and ChatGPT connection requirements.
+
 ## Important current experimental boundary
 
 Automatic creation/resumption of ordinary consumer ChatGPT conversations is **not** treated as a guaranteed API contract.
 
-Jarvis may later use an experimental browser/operator bridge, but the system must remain useful and safe when that bridge falls back to a small human resume action.
+Conductor may later use an experimental browser/operator bridge, but the system must remain useful and safe when that bridge falls back to a small human resume action.
 
 ## Build order
 

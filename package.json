@@ -1,5 +1,5 @@
 {
-  "name": "jarvis-conductor",
+  "name": "conductor",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,10 +9,18 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
     "test": "node --test dist/tests/*.test.js",
     "verify": "npm run build && npm run test"
   },
   "devDependencies": {
+    "@types/node": "22.19.7",
     "typescript": "5.8.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@upstash/redis": "1.38.4",
+    "jose": "^6.2.12",
+    "zod": "^4.6.5"
   }
 }

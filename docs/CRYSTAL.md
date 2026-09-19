@@ -1,4 +1,4 @@
-# Jarvis Conductor — Full Product / Technical Crystal
+# Conductor — Full Product / Technical Crystal
 
 ## Outcome
 
@@ -14,7 +14,7 @@ The owner should experience high autonomy without opacity, low interruption freq
 
 ## Ownership boundaries
 
-Conductor owns work lifecycle observation, owner/session affinity, continuation/wake decisions, delegated-worker routing, deterministic wait/event handling, Preview integration coordination, founder gate routing, release-candidate snapshot creation, owner-control projections, and orchestration telemetry.
+Conductor owns the stable development-tool execution surface, work lifecycle observation, owner/session affinity, continuation/wake decisions, delegated-worker routing, deterministic wait/event handling, Preview integration coordination, founder gate routing, release-candidate snapshot creation, owner-control projections, and orchestration telemetry.
 
 It does **not** own product meaning, technical truth, source control, CI runtime, web deployment, or model internals.
 
@@ -33,6 +33,8 @@ It does **not** own product meaning, technical truth, source control, CI runtime
 - Project Reality
 
 Providers are replaceable implementations.
+
+The Tool Runtime is the canonical execution boundary. It reports actual capabilities, preflights projects, normalizes provider failures, emits stable receipts, and requires idempotency for mutations. It does not absorb DevOS reasoning or Development Intelligence semantics.
 
 ## Work ownership
 

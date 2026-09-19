@@ -1,0 +1,352 @@
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  supportsProjectPreflight,
+  type ToolRuntimeProvider,
+  type ProjectMutationProvider,
+  type ProjectReferenceResolver,
+} from '../providers/runtime.js';
+import { normalizeToolError } from './errors.js';
+import {
+  TOOL_RUNTIME_CONTRACT_VERSION,
+  type CapabilityAvailability,
+  type CapabilityReport,
+  type ExecutionReceipt,
+  type PreflightCheck,
+  type PreflightCheckId,
+  type PreflightIntent,
+  type ProjectPreflight,
+  type ProjectReference,
+  type ProviderHealth,
+  type ToolDefinition,
+  type ToolDiagnostic,
+  type ToolOperationName,
+  type CreateBranchInput,
+  type CreateCommitInput,
+  type CreatePullRequestInput,
+  type CommentPullRequestInput,
+} from './types.js';
+import { IdempotentMutationExecutor } from './idempotency.js';
+
+const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
+  {
+    name: 'capabilities',
+    description: 'Report the operations and development capabilities currently available.',
+    mutates: false,
+  },
+  {
+    name: 'preflight_project',
+    description: 'Verify development access, execution surfaces, tests, and intelligence for a project.',
+    mutates: false,
+  },
+];
+
+const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
+  { name: 'git.branch.create', description: 'Create a work/* branch from an exact Git SHA.', mutates: true },
+  { name: 'git.commit.create', description: 'Create files in one commit and advance an existing work/* branch from an expected head SHA.', mutates: true },
+  { name: 'pull-request.create', description: 'Open a work/* pull request targeting preview.', mutates: true },
+  { name: 'pull-request.comment.create', description: 'Add a comment to a pull request.', mutates: true },
+];
+
+const REQUIRED_PREFLIGHT_CHECKS: Record<PreflightIntent, readonly PreflightCheckId[]> = {
+  inspect: ['repository.access', 'github.read', 'development-intelligence.read'],
+  develop: ['repository.access', 'github.read', 'github.write', 'development-intelligence.read'],
+  execute: [
+    'repository.access', 'github.read', 'github.write', 'workspace.access',
+    'shell.execute', 'tests.run', 'development-intelligence.read',
+  ],
+};
+
+export interface ConductorToolRuntimeOptions {
+  providers?: ToolRuntimeProvider[];
+  now?: () => Date;
+  createOperationId?: () => string;
+  mutationProvider?: ProjectMutationProvider;
+  mutationExecutor?: IdempotentMutationExecutor;
+  projectResolver?: ProjectReferenceResolver;
+}
+
+export class ConductorToolRuntime {
+  private readonly providers: ToolRuntimeProvider[];
+  private readonly now: () => Date;
+  private readonly createOperationId: () => string;
+  private readonly mutationProvider?: ProjectMutationProvider;
+  private readonly mutationExecutor?: IdempotentMutationExecutor;
+  private readonly projectResolver?: ProjectReferenceResolver;
+
+  constructor(options: ConductorToolRuntimeOptions = {}) {
+    this.providers = options.providers ?? [];
+    this.now = options.now ?? (() => new Date());
+    this.createOperationId =
+      options.createOperationId ?? (() => randomUUID());
+    this.mutationProvider = options.mutationProvider;
+    this.mutationExecutor = options.mutationExecutor;
+    this.projectResolver = options.projectResolver;
+  }
+
+  get mutationsEnabled(): boolean {
+    return Boolean(this.mutationProvider && this.mutationExecutor);
+  }
+
+  async capabilities(): Promise<ExecutionReceipt<CapabilityReport>> {
+    return this.executeRead(
+      'capabilities',
+      { kind: 'runtime', id: 'conductor' },
+      async () => {
+        const capabilities: CapabilityAvailability[] = [];
+        const providers: ProviderHealth[] = [];
+        const diagnostics: ToolDiagnostic[] = [];
+
+        for (const provider of this.providers) {
+          try {
+            const reported = await provider.getCapabilities();
+            capabilities.push(...reported);
+            const health = reported.some((capability) => capability.health === 'ready')
+              ? reported.some((capability) => capability.health !== 'ready')
+                ? 'degraded'
+                : 'ready'
+              : reported.some((capability) => capability.health === 'degraded')
+                ? 'degraded'
+                : 'unavailable';
+            providers.push({ provider: provider.id, health });
+          } catch (error) {
+            const normalized = normalizeToolError(
+              error,
+              'TOOL_UNAVAILABLE',
+              provider.id,
+            );
+            providers.push({
+              provider: provider.id,
+              health:
+                normalized.code === 'TRANSIENT' ? 'degraded' : 'unavailable',
+              error: normalized,
+            });
+            diagnostics.push(...normalized.diagnostics);
+          }
+        }
+
+        capabilities.sort((left, right) =>
+          left.capability.localeCompare(right.capability),
+        );
+        providers.sort((left, right) =>
+          left.provider.localeCompare(right.provider),
+        );
+
+        return {
+          result: {
+            contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+            operations: [
+              ...TOOL_DEFINITIONS,
+              ...(this.mutationsEnabled ? MUTATION_DEFINITIONS : []),
+            ],
+            capabilities,
+            providers,
+          },
+          diagnostics,
+        };
+      },
+    );
+  }
+
+  async createBranch(input: CreateBranchInput) {
+    return await this.executeMutation(input, 'git.branch.create', async (provider) => {
+      const result = await provider.createBranch(input);
+      return { result, identifiers: { branch: result.branch, commitSha: result.commitSha } };
+    });
+  }
+
+  async createCommit(input: CreateCommitInput) {
+    return await this.executeMutation(input, 'git.commit.create', async (provider) => {
+      const result = await provider.createCommit(input);
+      return { result, identifiers: { branch: result.branch, commitSha: result.commitSha } };
+    });
+  }
+
+  async createPullRequest(input: CreatePullRequestInput) {
+    return await this.executeMutation(input, 'pull-request.create', async (provider) => {
+      const result = await provider.createPullRequest(input);
+      return { result, identifiers: { pullRequestNumber: result.pullRequestNumber } };
+    });
+  }
+
+  async commentPullRequest(input: CommentPullRequestInput) {
+    return await this.executeMutation(input, 'pull-request.comment.create', async (provider) => {
+      const result = await provider.commentPullRequest(input);
+      return {
+        result,
+        identifiers: { pullRequestNumber: result.pullRequestNumber, commentId: result.commentId },
+      };
+    });
+  }
+
+  private async executeMutation<Result>(
+    input: { project: ProjectReference; idempotencyKey: string },
+    operation: import('./types.js').MutationOperationName,
+    mutate: (provider: ProjectMutationProvider) => Promise<import('./idempotency.js').MutationResult<Result>>,
+  ): Promise<ExecutionReceipt<Result>> {
+    if (!this.mutationProvider || !this.mutationExecutor) {
+      const executor = new IdempotentMutationExecutor({
+        store: {
+          async claim() { throw { code: 'TOOL_UNAVAILABLE', message: 'Mutation tools are not enabled' }; },
+          async complete() {},
+        },
+        createOperationId: this.createOperationId,
+        now: this.now,
+      });
+      return await executor.execute({
+        key: input.idempotencyKey,
+        fingerprint: mutationFingerprint(operation, input),
+        operation,
+        target: { kind: 'repository', id: input.project.repository ?? input.project.id },
+      }, async () => { throw { code: 'TOOL_UNAVAILABLE', message: 'Mutation tools are not enabled' }; });
+    }
+    if (!/^[A-Za-z0-9._:/-]{8,200}$/.test(input.idempotencyKey)) {
+      throw new Error('idempotencyKey must be 8-200 stable URL-safe characters');
+    }
+    return await this.mutationExecutor.execute({
+      key: input.idempotencyKey,
+      fingerprint: mutationFingerprint(operation, input),
+      operation,
+      target: { kind: 'repository', id: input.project.repository ?? input.project.id },
+    }, async () => await mutate(this.mutationProvider!));
+  }
+
+  async preflightProject(
+    project: ProjectReference,
+    intent: PreflightIntent = 'develop',
+  ): Promise<ExecutionReceipt<ProjectPreflight>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(project) ?? project;
+    return this.executeRead(
+      'preflight_project',
+      { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
+      async () => {
+        const checks = new Map<PreflightCheckId, PreflightCheck>();
+        const diagnostics: ToolDiagnostic[] = [];
+
+        for (const provider of this.providers) {
+          if (!supportsProjectPreflight(provider)) continue;
+
+          try {
+            const providerChecks = await provider.preflightProject(resolvedProject);
+            for (const check of providerChecks) {
+              const existing = checks.get(check.check);
+              if (existing) {
+                const error = normalizeToolError(
+                  {
+                    code: 'CONFLICT',
+                    message: `Preflight check ${check.check} was reported by both ${existing.provider} and ${provider.id}`,
+                  },
+                  'CONFLICT',
+                  'conductor',
+                );
+                checks.set(check.check, {
+                  check: check.check,
+                  status: 'blocked',
+                  provider: 'conductor',
+                  summary: error.message,
+                  error,
+                  diagnostics: error.diagnostics,
+                });
+                diagnostics.push(...error.diagnostics);
+                continue;
+              }
+              checks.set(check.check, check);
+            }
+          } catch (error) {
+            const normalized = normalizeToolError(
+              error,
+              'TOOL_UNAVAILABLE',
+              provider.id,
+            );
+            diagnostics.push(...normalized.diagnostics);
+          }
+        }
+
+        const requiredChecks = REQUIRED_PREFLIGHT_CHECKS[intent];
+        for (const check of requiredChecks) {
+          if (!checks.has(check)) {
+            const error = normalizeToolError(
+              {
+                code: 'TOOL_UNAVAILABLE',
+                message: `No provider is configured for ${check}`,
+              },
+              'TOOL_UNAVAILABLE',
+              'conductor',
+            );
+            checks.set(check, {
+              check,
+              status: 'unavailable',
+              provider: 'conductor',
+              summary: error.message,
+              error,
+              diagnostics: error.diagnostics,
+            });
+          }
+        }
+
+        const orderedChecks = requiredChecks.map(
+          (check) => checks.get(check)!,
+        );
+        const status = orderedChecks.some((check) => check.status === 'blocked')
+          ? 'blocked'
+          : orderedChecks.some((check) => check.status !== 'ready')
+            ? 'degraded'
+            : 'ready';
+
+        return {
+          result: {
+            contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+            project: resolvedProject,
+            intent,
+            status,
+            checks: orderedChecks,
+          },
+          diagnostics,
+        };
+      },
+    );
+  }
+
+  private async executeRead<Result>(
+    operation: ToolOperationName,
+    target: { kind: 'runtime' | 'project'; id: string; ref?: string },
+    read: () => Promise<{
+      result: Result;
+      diagnostics?: ToolDiagnostic[];
+    }>,
+  ): Promise<ExecutionReceipt<Result>> {
+    const operationId = this.createOperationId();
+    const startedAt = this.now().toISOString();
+
+    try {
+      const outcome = await read();
+      return {
+        contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+        operationId,
+        operation,
+        target,
+        status: 'succeeded',
+        startedAt,
+        finishedAt: this.now().toISOString(),
+        result: outcome.result,
+        diagnostics: outcome.diagnostics ?? [],
+      };
+    } catch (error) {
+      const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE');
+      return {
+        contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+        operationId,
+        operation,
+        target,
+        status: 'failed',
+        startedAt,
+        finishedAt: this.now().toISOString(),
+        error: normalized,
+        diagnostics: normalized.diagnostics,
+      };
+    }
+  }
+}
+
+function mutationFingerprint(operation: string, input: unknown): string {
+  return `sha256:${createHash('sha256').update(JSON.stringify({ operation, input })).digest('hex')}`;
+}
