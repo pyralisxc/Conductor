@@ -391,7 +391,7 @@ export function oauthProtectedResourceMetadata(): Record<string, unknown> {
   return {
     resource: oauthResourceUrl(),
     authorization_servers: [oauthPublicBaseUrl()],
-    scopes_supported: [CONDUCTOR_READ_SCOPE],
+    scopes_supported: [CONDUCTOR_READ_SCOPE, CONDUCTOR_WRITE_SCOPE],
     bearer_methods_supported: ['header'],
     resource_name: 'Conductor Tool Runtime',
   };
@@ -409,7 +409,7 @@ export function oauthAuthorizationServerMetadata(): Record<string, unknown> {
     grant_types_supported: ['authorization_code', 'refresh_token'],
     token_endpoint_auth_methods_supported: ['none'],
     code_challenge_methods_supported: ['S256'],
-    scopes_supported: [CONDUCTOR_READ_SCOPE, 'offline_access'],
+    scopes_supported: [CONDUCTOR_READ_SCOPE, CONDUCTOR_WRITE_SCOPE, 'offline_access'],
     authorization_response_iss_parameter_supported: true,
     client_id_metadata_document_supported: false,
   };
