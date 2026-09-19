@@ -1,5 +1,6 @@
 import { ConductorToolRuntime } from '../runtime/runtime.js';
 import { GitHubRuntimeProvider } from '../providers/github.js';
+import { GitHubAppCredentialProvider } from '../providers/github-auth.js';
 import { DevelopmentIntelligenceProvider, UnavailableDevelopmentIntelligenceProvider } from '../providers/development-intelligence.js';
 import type { ToolRuntimeProvider } from '../providers/runtime.js';
 import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
@@ -16,6 +17,8 @@ export interface ConfiguredProject {
 export interface RuntimeEnvironment extends Record<string, string | undefined> {
   CONDUCTOR_PROJECTS_JSON?: string;
   GITHUB_TOKEN?: string;
+  CONDUCTOR_GITHUB_APP_ID?: string;
+  CONDUCTOR_GITHUB_APP_PRIVATE_KEY?: string;
   CONDUCTOR_GITHUB_ALLOWED_OWNERS?: string;
   DEVINT_MCP_URL?: string;
   DEVINT_AGENT_TOKEN?: string;
@@ -40,10 +43,12 @@ export function createRuntimeFromEnvironment(
     ? [{ id: project.id, repository: project.repository, write: project.githubWrite }]
     : []);
   const allowedOwners = parseOwners(environment.CONDUCTOR_GITHUB_ALLOWED_OWNERS);
+  const githubApp = githubAppCredentials(environment);
   let githubProvider: GitHubRuntimeProvider | undefined;
   if (githubProjects.length > 0 || allowedOwners.length > 0) {
     githubProvider = new GitHubRuntimeProvider({
-      token: environment.GITHUB_TOKEN,
+      token: githubApp ? undefined : environment.GITHUB_TOKEN,
+      credentials: githubApp,
       projects: githubProjects,
       allowedOwners,
     });
@@ -59,8 +64,8 @@ export function createRuntimeFromEnvironment(
 
   const mutationsEnabled = environment.CONDUCTOR_ENABLE_GITHUB_MUTATIONS === '1';
   if (!mutationsEnabled) return new ConductorToolRuntime({ providers, projectResolver: githubProvider });
-  if (!githubProvider || !environment.GITHUB_TOKEN) {
-    throw new Error('GitHub mutations require an authorized owner/project and GITHUB_TOKEN');
+  if (!githubProvider || (!environment.GITHUB_TOKEN && !githubApp)) {
+    throw new Error('GitHub mutations require an authorized owner/project and GitHub authentication');
   }
   const redisUrl = environment.UPSTASH_REDIS_REST_URL ?? environment.KV_REST_API_URL;
   const redisToken = environment.UPSTASH_REDIS_REST_TOKEN ?? environment.KV_REST_API_TOKEN;
@@ -75,6 +80,16 @@ export function createRuntimeFromEnvironment(
     }),
     projectResolver: githubProvider,
   });
+}
+
+function githubAppCredentials(environment: RuntimeEnvironment): GitHubAppCredentialProvider | undefined {
+  const appId = environment.CONDUCTOR_GITHUB_APP_ID?.trim();
+  const privateKey = environment.CONDUCTOR_GITHUB_APP_PRIVATE_KEY?.trim();
+  if (!appId && !privateKey) return undefined;
+  if (!appId || !privateKey) {
+    throw new Error('CONDUCTOR_GITHUB_APP_ID and CONDUCTOR_GITHUB_APP_PRIVATE_KEY must be configured together');
+  }
+  return new GitHubAppCredentialProvider({ appId, privateKey });
 }
 
 export function parseOwners(value?: string): string[] {

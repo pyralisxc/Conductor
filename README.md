@@ -97,6 +97,8 @@ The initial code is intentionally a small provider-neutral core. It should be ex
 
 The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery with explicit project overrides, intent-aware preflight, a read-only Development Intelligence MCP adapter, and optionally enabled bounded GitHub mutations backed by durable idempotency state.
 
+The preferred GitHub identity is a private GitHub App that mints repository-scoped installation tokens and proves operation-specific permissions. Static tokens remain an explicitly degraded migration path. See `docs/GITHUB_AUTHORIZATION.md` for the shared authorization and workflow contract.
+
 See `docs/TOOL_RUNTIME_V0.md` for the stable contract and `docs/MCP_RUNTIME.md` for deployment, OAuth, and ChatGPT connection requirements.
 
 ## Important current experimental boundary

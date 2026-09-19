@@ -14,6 +14,10 @@ Typical initial permissions may include metadata read, contents read/write where
 
 Avoid Administration and workflow-file mutation unless specifically justified.
 
+Conductor mints installation tokens per repository instead of distributing the App private key or a portfolio-wide installation token to mutation workers. Development Intelligence uses a separate read-only identity.
+
+Repository reach, operation permission, Dev OS authorization, and consequential approval are separate checks. Passing one never implies the others.
+
 ## Secrets
 
 Separate Preview credentials, Production credentials, GitHub App credentials, model/API credentials, and local hardware credentials.
@@ -37,3 +41,5 @@ Use stable work, delegation, integration, release candidate, and webhook-deliver
 ## Explainability
 
 Every meaningful automated mutation retains triggering event, governing policy, evidence/reason, resulting state, and owner override path.
+
+Authorization grants, invalidations, exact consequential approvals, and execution receipts are durable. The combined Work Envelope remains an ephemeral, reconstructable projection.

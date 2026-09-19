@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { generateKeyPairSync } from 'node:crypto';
 import {
   GitHubRuntimeProvider,
+  GitHubAppCredentialProvider,
   DevelopmentIntelligenceProvider,
   UnavailableDevelopmentIntelligenceProvider,
   WorkspaceRuntimeProvider,
@@ -51,6 +53,144 @@ test('GitHub provider proves project-specific read and write permissions', async
   assert.match(requested.at(-1) ?? '', /repos\/pyralisxc\/Conductor$/);
 });
 
+test('GitHub App credentials discover the repository installation and mint a repository-scoped token', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const requests: Array<{ url: string; authorization: string | null; body?: string }> = [];
+  const now = () => new Date('2026-09-20T00:00:00Z');
+  const credentials = new GitHubAppCredentialProvider({
+    appId: '12345',
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    now,
+    fetch: async (input, init) => {
+      const url = String(input);
+      requests.push({
+        url,
+        authorization: new Headers(init?.headers).get('authorization'),
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      if (url.endsWith('/app')) return Response.json({ id: 12345, slug: 'dev-os-conductor' });
+      if (url.endsWith('/repos/pyralisxc/CardForge/installation')) {
+        return Response.json({ id: 42, account: { login: 'pyralisxc' }, repository_selection: 'all' });
+      }
+      if (url.endsWith('/app/installations/42/access_tokens')) {
+        return Response.json({
+          token: 'installation-token',
+          expires_at: '2026-09-20T01:00:00Z',
+          repository_selection: 'selected',
+          permissions: { contents: 'write', pull_requests: 'write', issues: 'write', checks: 'read' },
+        });
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    },
+  });
+
+  const first = await credentials.getCredential('pyralisxc/CardForge');
+  const cached = await credentials.getCredential('pyralisxc/CardForge');
+  assert.equal(first.token, 'installation-token');
+  assert.equal(first.identity.appSlug, 'dev-os-conductor');
+  assert.equal(first.identity.installationId, 42);
+  assert.equal(first.permissions?.contents, 'write');
+  assert.equal(cached, first);
+  assert.equal(requests.length, 3);
+  assert.deepEqual(JSON.parse(requests[2]?.body ?? '{}'), { repositories: ['CardForge'] });
+  assert.equal(requests.every((request) => request.authorization?.startsWith('Bearer eyJ')), true);
+});
+
+test('GitHub App preflight proves operation-specific develop permissions', async () => {
+  const credentials = {
+    async getIdentity() { return { kind: 'app' as const, appId: '12345', appSlug: 'dev-os-conductor' }; },
+    async getCredential(repository: string) {
+      return {
+        token: 'installation-token',
+        kind: 'app-installation' as const,
+        identity: {
+          kind: 'app' as const,
+          appId: '12345',
+          appSlug: 'dev-os-conductor',
+          installationId: 42,
+          account: 'pyralisxc',
+        },
+        repository,
+        repositorySelection: 'all',
+        permissions: { contents: 'write', pull_requests: 'write', issues: 'write' },
+      };
+    },
+  };
+  const provider = new GitHubRuntimeProvider({
+    credentials,
+    allowedOwners: ['pyralisxc'],
+    fetch: async () => Response.json({
+      full_name: 'pyralisxc/CardForge',
+      permissions: { pull: true, push: true },
+    }),
+  });
+
+  const checks = await provider.preflightProject({ id: 'pyralisxc/CardForge' });
+  assert.deepEqual(checks.map((check) => check.status), ['ready', 'ready', 'ready']);
+  const evidence = checks[2]?.diagnostics[0]?.details;
+  assert.equal(evidence?.identityKind, 'app-installation');
+  assert.equal(evidence?.installationId, 42);
+  assert.equal(evidence?.['permission.contents'], 'write');
+});
+
+test('GitHub App preflight blocks develop when one advertised mutation permission is missing', async () => {
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write', pull_requests: 'write', issues: 'read' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async () => Response.json({ permissions: { pull: true, push: true } }),
+  });
+
+  const checks = await provider.preflightProject({ id: 'pyralisxc/CardForge' });
+  assert.equal(checks[2]?.status, 'blocked');
+  assert.equal(checks[2]?.error?.code, 'PERMISSION_DENIED');
+  assert.match(checks[2]?.summary ?? '', /issues:write/);
+});
+
+test('GitHub App mutations fail closed before the provider call when operation permission is missing', async () => {
+  let providerCalls = 0;
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'read', pull_requests: 'write', issues: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async () => {
+      providerCalls += 1;
+      return Response.json({});
+    },
+  });
+
+  await assert.rejects(
+    provider.createBranch({
+      project: { id: 'pyralisxc/CardForge' },
+      branch: 'work/cf-authorization',
+      fromSha: 'a'.repeat(40),
+      idempotencyKey: 'branch:cf:authorization',
+    }),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /contents:write/.test(error.message),
+  );
+  assert.equal(providerCalls, 0);
+});
+
 test('GitHub provider rejects project identity mismatches before network access', async () => {
   let calls = 0;
   const provider = new GitHubRuntimeProvider({
@@ -81,7 +221,7 @@ test('GitHub provider resolves repositories under an authorized owner without pe
     },
   });
   const checks = await provider.preflightProject({ id: 'pyralisxc/CardForge' });
-  assert.equal(checks.every((check) => check.status === 'ready'), true);
+  assert.deepEqual(checks.map((check) => check.status), ['ready', 'ready', 'degraded']);
   assert.match(requested[0] ?? '', /repos\/pyralisxc\/CardForge$/);
 
   const rejected = await provider.preflightProject({ id: 'attacker/CardForge' });
