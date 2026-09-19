@@ -11,6 +11,11 @@ import type {
 } from '../runtime/types.js';
 import { normalizeToolError } from '../runtime/errors.js';
 import type { ProjectMutationProvider, ProjectPreflightProvider } from './runtime.js';
+import {
+  StaticGitHubCredentialProvider,
+  type GitHubCredential,
+  type GitHubCredentialProvider,
+} from './github-auth.js';
 
 interface GitHubRepositoryResponse {
   full_name: string;
@@ -31,6 +36,7 @@ export interface GitHubProjectConfiguration {
 
 export interface GitHubRuntimeProviderOptions {
   token?: string;
+  credentials?: GitHubCredentialProvider;
   projects?: GitHubProjectConfiguration[];
   allowedOwners?: string[];
   apiBaseUrl?: string;
@@ -39,14 +45,19 @@ export interface GitHubRuntimeProviderOptions {
 
 export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectMutationProvider {
   readonly id = 'github';
-  private readonly token?: string;
+  private readonly credentials?: GitHubCredentialProvider;
   private readonly projects: ReadonlyMap<string, GitHubProjectConfiguration>;
   private readonly allowedOwners: ReadonlyMap<string, string>;
   private readonly apiBaseUrl: string;
   private readonly fetch: typeof globalThis.fetch;
 
   constructor(options: GitHubRuntimeProviderOptions) {
-    this.token = options.token;
+    if (options.token && options.credentials) {
+      throw new Error('Configure either a GitHub token or GitHub App credentials, not both');
+    }
+    this.credentials = options.credentials ?? (options.token
+      ? new StaticGitHubCredentialProvider(options.token)
+      : undefined);
     this.projects = new Map((options.projects ?? []).map((project) => [project.id, project]));
     this.allowedOwners = new Map((options.allowedOwners ?? []).map((owner) => [owner.toLowerCase(), owner]));
     this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.github.com').replace(/\/$/, '');
@@ -54,7 +65,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
-    if (!this.token) {
+    if (!this.credentials) {
       return [
         unavailableCapability('github.read', 'read', 'AUTH_REQUIRED'),
         unavailableCapability('github.write', 'write', 'AUTH_REQUIRED'),
@@ -63,15 +74,21 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
       ];
     }
 
-    const response = await this.fetch(`${this.apiBaseUrl}/rate_limit`, {
-      headers: this.headers(),
-    });
-    if (!response.ok) throw await githubResponseError(response);
+    const identity = await this.credentials.getIdentity();
+    if (identity.kind === 'static-token') {
+      const credential = await this.credentials.getCredential('runtime/identity');
+      const response = await this.fetch(`${this.apiBaseUrl}/rate_limit`, {
+        headers: this.headers(credential.token),
+      });
+      if (!response.ok) throw await githubResponseError(response);
+    }
 
     const projectSpecific: ToolDiagnostic = {
       level: 'info',
       source: this.id,
-      message: 'Repository write permission is verified per project during preflight.',
+      message: identity.kind === 'app'
+        ? `GitHub App ${identity.appSlug ?? identity.appId ?? 'identity'} permissions are verified per repository and operation during preflight.`
+        : 'Static-token write reach is repository-scoped but cannot prove operation-specific token permissions; migrate to the Conductor GitHub App.',
     };
 
     return [
@@ -100,7 +117,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
       }, resolution.code, this.id));
     }
     const configured = resolution.project;
-    if (!this.token) {
+    if (!this.credentials) {
       return githubChecks('blocked', normalizeToolError({
         code: 'AUTH_REQUIRED',
         message: 'GitHub authentication is not configured',
@@ -108,14 +125,15 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     }
 
     try {
+      const credential = await this.credentials.getCredential(configured.repository);
       const response = await this.fetch(
         `${this.apiBaseUrl}/repos/${encodeRepository(configured.repository)}`,
-        { headers: this.headers() },
+        { headers: this.headers(credential.token) },
       );
       if (!response.ok) throw await githubResponseError(response);
       const repository = await response.json() as GitHubRepositoryResponse;
       const canRead = repository.permissions?.pull ?? true;
-      const canWrite = configured.write !== false && Boolean(
+      const repositoryRoleAllowsWrite = configured.write !== false && Boolean(
         repository.permissions?.push ||
         repository.permissions?.admin ||
         repository.permissions?.maintain,
@@ -125,15 +143,41 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
         code: 'PERMISSION_DENIED',
         message: `GitHub token cannot read ${configured.repository}`,
       }, 'PERMISSION_DENIED', this.id);
+      const permissionEvidence = permissionDiagnostics(credential, configured.repository);
+      const missingPermissions = credential.kind === 'app-installation'
+        ? missingDevelopPermissions(credential)
+        : [];
+      const canWrite = repositoryRoleAllowsWrite && missingPermissions.length === 0;
       const writeError = canWrite ? undefined : normalizeToolError({
         code: 'PERMISSION_DENIED',
-        message: `GitHub token cannot write ${configured.repository}`,
+        message: missingPermissions.length > 0
+          ? `GitHub App installation lacks required develop permissions for ${configured.repository}: ${missingPermissions.join(', ')}`
+          : `GitHub credential cannot write ${configured.repository}`,
       }, 'PERMISSION_DENIED', this.id);
 
+      const writeCheck = credential.kind === 'static-token' && canWrite
+        ? {
+          check: 'github.write' as const,
+          status: 'degraded' as const,
+          provider: 'github',
+          summary: `Repository role allows writes to ${configured.repository}, but the static token cannot prove operation-specific permissions`,
+          diagnostics: permissionEvidence,
+        }
+        : check('github.write', canWrite, configured.repository, writeError, [
+          ...permissionEvidence,
+          ...(writeError?.diagnostics ?? []),
+        ]);
+
       return [
-        check('repository.access', canRead, configured.repository, readError),
-        check('github.read', canRead, configured.repository, readError),
-        check('github.write', canWrite, configured.repository, writeError),
+        check('repository.access', canRead, configured.repository, readError, [
+          ...permissionEvidence,
+          ...(readError?.diagnostics ?? []),
+        ]),
+        check('github.read', canRead, configured.repository, readError, [
+          ...permissionEvidence,
+          ...(readError?.diagnostics ?? []),
+        ]),
+        writeCheck,
       ];
     } catch (error) {
       const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', this.id);
@@ -142,18 +186,18 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }> {
-    const repository = this.writableRepository(input.project);
+    const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
     assertWorkBranch(input.branch);
     assertSha(input.fromSha, 'fromSha');
     const created = await this.request<{ object: { sha: string } }>(repository, '/git/refs', {
       method: 'POST',
       body: JSON.stringify({ ref: `refs/heads/${input.branch}`, sha: input.fromSha }),
-    });
+    }, credential);
     return { repository, branch: input.branch, commitSha: created.object.sha };
   }
 
   async createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }> {
-    const repository = this.writableRepository(input.project);
+    const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
     assertWorkBranch(input.branch);
     assertSha(input.expectedHeadSha, 'expectedHeadSha');
     if (!input.message.trim()) throw { code: 'CONFLICT', message: 'Commit message must not be empty' };
@@ -164,11 +208,11 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     if (totalBytes > 5 * 1024 * 1024) {
       throw { code: 'PERMISSION_DENIED', message: 'Commit content exceeds the 5 MiB mutation limit' };
     }
-    const ref = await this.request<{ object: { sha: string } }>(repository, `/git/ref/heads/${encodePath(input.branch)}`);
+    const ref = await this.request<{ object: { sha: string } }>(repository, `/git/ref/heads/${encodePath(input.branch)}`, {}, credential);
     if (ref.object.sha !== input.expectedHeadSha) {
       throw { status: 409, message: `Branch head changed from expected ${input.expectedHeadSha} to ${ref.object.sha}` };
     }
-    const parent = await this.request<{ tree: { sha: string } }>(repository, `/git/commits/${encodeURIComponent(input.expectedHeadSha)}`);
+    const parent = await this.request<{ tree: { sha: string } }>(repository, `/git/commits/${encodeURIComponent(input.expectedHeadSha)}`, {}, credential);
     const paths = new Set<string>();
     const validatedFiles = input.files.map((file) => {
       const path = validRepositoryPath(file.path);
@@ -183,26 +227,26 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
       const blob = await this.request<{ sha: string }>(repository, '/git/blobs', {
         method: 'POST',
         body: JSON.stringify({ content: file.content, encoding: 'utf-8' }),
-      });
+      }, credential);
       return { path: file.path, mode: '100644', type: 'blob', sha: blob.sha };
     }));
     const createdTree = await this.request<{ sha: string }>(repository, '/git/trees', {
       method: 'POST',
       body: JSON.stringify({ base_tree: parent.tree.sha, tree }),
-    });
+    }, credential);
     const commit = await this.request<{ sha: string }>(repository, '/git/commits', {
       method: 'POST',
       body: JSON.stringify({ message: input.message, tree: createdTree.sha, parents: [input.expectedHeadSha] }),
-    });
+    }, credential);
     await this.request(repository, `/git/refs/heads/${encodePath(input.branch)}`, {
       method: 'PATCH',
       body: JSON.stringify({ sha: commit.sha, force: false }),
-    });
+    }, credential);
     return { repository, branch: input.branch, commitSha: commit.sha };
   }
 
   async createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }> {
-    const repository = this.writableRepository(input.project);
+    const { repository, credential } = await this.writableRepository(input.project, { pull_requests: 'write' });
     assertWorkBranch(input.head);
     if (input.base !== 'preview') throw { code: 'PERMISSION_DENIED', message: 'Conductor may only open work pull requests targeting preview' };
     const created = await this.request<{ number: number; html_url: string }>(repository, '/pulls', {
@@ -214,19 +258,19 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
         body: input.body ?? '',
         draft: input.draft ?? false,
       }),
-    });
+    }, credential);
     return { repository, pullRequestNumber: created.number, url: created.html_url };
   }
 
   async commentPullRequest(input: CommentPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; commentId: string; url: string }> {
-    const repository = this.writableRepository(input.project);
+    const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
     if (!Number.isSafeInteger(input.pullRequestNumber) || input.pullRequestNumber < 1) {
       throw { code: 'CONFLICT', message: 'pullRequestNumber must be a positive integer' };
     }
     const created = await this.request<{ id: number; html_url: string }>(repository, `/issues/${input.pullRequestNumber}/comments`, {
       method: 'POST',
       body: JSON.stringify({ body: input.body }),
-    });
+    }, credential);
     return {
       repository,
       pullRequestNumber: input.pullRequestNumber,
@@ -279,33 +323,50 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     return `${[...this.allowedOwners.values()][0]}/${projectId}`;
   }
 
-  private headers(): Record<string, string> {
+  private headers(token: string): Record<string, string> {
     return {
       Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${this.token}`,
+      Authorization: `Bearer ${token}`,
       'User-Agent': 'Conductor-Tool-Runtime',
       'X-GitHub-Api-Version': '2022-11-28',
     };
   }
 
-  private writableRepository(project: ProjectReference): string {
-    if (!this.token) throw { code: 'AUTH_REQUIRED', message: 'GitHub authentication is not configured' };
+  private async writableRepository(
+    project: ProjectReference,
+    requiredPermissions: Record<string, 'write'>,
+  ): Promise<{ repository: string; credential: GitHubCredential }> {
+    if (!this.credentials) throw { code: 'AUTH_REQUIRED', message: 'GitHub authentication is not configured' };
     const resolution = this.resolveProject(project);
     if ('error' in resolution) throw { code: resolution.code, message: resolution.error };
     if (resolution.project.write === false) {
       throw { code: 'PERMISSION_DENIED', message: `Writes are disabled for ${resolution.project.repository}` };
     }
-    return resolution.project.repository;
+    const repository = resolution.project.repository;
+    const credential = await this.credentials.getCredential(repository);
+    if (credential.kind === 'app-installation') {
+      const missing = missingPermissions(credential, requiredPermissions);
+      if (missing.length > 0) {
+        throw {
+          code: 'PERMISSION_DENIED',
+          message: `GitHub App installation lacks required permissions for ${repository}: ${missing.join(', ')}`,
+        };
+      }
+    }
+    return { repository, credential };
   }
 
   private async request<Result>(
     repository: string,
     path: string,
     init: RequestInit = {},
+    credential?: GitHubCredential,
   ): Promise<Result> {
+    const authorized = credential ?? await this.credentials?.getCredential(repository);
+    if (!authorized) throw { code: 'AUTH_REQUIRED', message: 'GitHub authentication is not configured' };
     const response = await this.fetch(`${this.apiBaseUrl}/repos/${encodeRepository(repository)}${path}`, {
       ...init,
-      headers: { ...this.headers(), ...(init.headers ?? {}) },
+      headers: { ...this.headers(authorized.token), ...(init.headers ?? {}) },
     });
     if (!response.ok) throw await githubResponseError(response);
     return await response.json() as Result;
@@ -408,6 +469,7 @@ function check(
   ready: boolean,
   repository: string,
   error?: NormalizedToolError,
+  diagnostics: ToolDiagnostic[] = error?.diagnostics ?? [],
 ): PreflightCheck {
   return {
     check: id,
@@ -417,8 +479,55 @@ function check(
       ? `${id} is available for ${repository}`
       : error?.message ?? `${id} is unavailable for ${repository}`,
     error,
-    diagnostics: error?.diagnostics ?? [],
+    diagnostics,
   };
+}
+
+const DEVELOP_PERMISSIONS = {
+  contents: 'write',
+  pull_requests: 'write',
+  issues: 'write',
+} as const;
+
+function missingDevelopPermissions(credential: GitHubCredential): string[] {
+  return missingPermissions(credential, DEVELOP_PERMISSIONS);
+}
+
+function missingPermissions(
+  credential: GitHubCredential,
+  required: Readonly<Record<string, 'write'>>,
+): string[] {
+  return Object.entries(required).flatMap(([permission, level]) => {
+    const actual = credential.permissions?.[permission];
+    return actual === level || actual === 'admin' ? [] : [`${permission}:${level}`];
+  });
+}
+
+function permissionDiagnostics(
+  credential: GitHubCredential,
+  repository: string,
+): ToolDiagnostic[] {
+  const details: Record<string, string | number | boolean | null> = {
+    identityKind: credential.kind,
+    repository,
+    repositoryCovered: true,
+  };
+  if (credential.identity.appId) details.appId = credential.identity.appId;
+  if (credential.identity.appSlug) details.appSlug = credential.identity.appSlug;
+  if (credential.identity.installationId) details.installationId = credential.identity.installationId;
+  if (credential.identity.account) details.account = credential.identity.account;
+  if (credential.repositorySelection) details.repositorySelection = credential.repositorySelection;
+  for (const permission of ['contents', 'pull_requests', 'issues', 'checks', 'actions', 'commit_statuses', 'deployments']) {
+    if (credential.permissions?.[permission]) details[`permission.${permission}`] = credential.permissions[permission];
+  }
+  return [{
+    level: credential.kind === 'app-installation' ? 'info' : 'warning',
+    source: 'github',
+    message: credential.kind === 'app-installation'
+      ? 'Repository-scoped GitHub App installation permission evidence'
+      : 'Legacy static-token repository-role evidence; operation permissions are not independently verifiable',
+    details,
+  }];
 }
 
 function githubChecks(

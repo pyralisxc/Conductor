@@ -6,8 +6,11 @@ Domain types, policy engine, provider contracts, deterministic next-action logic
 ## Priority foundation — Tool Runtime v0
 Stable capability discovery, project preflight, normalized tool failures, execution receipts, and mutation idempotency. Establish this execution boundary before adding advanced orchestration, delegation, or session machinery.
 
-## Phase 1 — GitHub kernel
-Private GitHub App, webhook receiver, issue/PR adapter, branch manager, idempotent event ingestion, project policy.
+## Phase 1A — GitHub identity foundation
+Private Conductor GitHub App, installation discovery, repository-scoped short-lived tokens, operation-aware permission preflight, owner allowlist, and portfolio battle test.
+
+## Phase 1B — GitHub event kernel
+Webhook receiver, signature verification, delivery idempotency, issue/PR/check/workflow projections, permission reconciliation, and structured escalation.
 
 ## Phase 2 — Preview integrator
 `ORCHESTRATION.md`, `preview` branch, work branches from Preview, Preview PRs, manifest generation, safe repair/revert.
@@ -21,6 +24,8 @@ Vercel Workflow adapter, suspend on CI/deployment/review, event wakeups, retry/r
 Mission Control, Project Cockpit, Founder Control Center, Preview Cockpit, Work Detail, Provider/Worker health.
 
 Build real UI only after the read model has live data.
+
+The shared Work Envelope and project-open projection bridge Dev OS authorization, Development Intelligence reality, Conductor capability, and ASC presentation without transferring semantic ownership.
 
 ## Phase 5 — Development Intelligence
 Project mapping, main/Preview diff, overlap/blast-radius hooks, degraded mode.
