@@ -132,7 +132,13 @@ test('Development Intelligence provider verifies MCP discovery and project statu
       }
       return Response.json({
         jsonrpc: '2.0', id: body.id,
-        result: { structuredContent: { project: 'pyralisxc/CardForge', upstreamSha: 'abc' } },
+        result: {
+          structuredContent: {
+            project: 'pyralisxc/CardForge',
+            upstreamSha: 'abc',
+            graph: { revision: 'abc' },
+          },
+        },
       });
     },
   });
@@ -141,6 +147,49 @@ test('Development Intelligence provider verifies MCP discovery and project statu
   assert.equal((await provider.preflightProject({ id: 'cardforge', repository: 'pyralisxc/CardForge' }))[0]?.status, 'ready');
   assert.equal(requests.every((request) => request.authorization === 'Bearer machine-token'), true);
   assert.equal(requests[1]?.body.params.arguments.project, 'pyralisxc/CardForge');
+});
+
+test('Development Intelligence preflight fails closed when project source or graph is unavailable', async () => {
+  const statuses = [
+    {
+      upstreamSha: null,
+      upstreamError: 'git failed: HTTP 403: Write access to repository not granted',
+      graph: null,
+      graphError: 'git failed: HTTP 403: Write access to repository not granted',
+    },
+    {
+      upstreamSha: 'abc',
+      upstreamError: null,
+      graph: null,
+      graphError: 'analyzer failed to build the project graph',
+    },
+  ];
+
+  const provider = new DevelopmentIntelligenceProvider({
+    endpoint: 'https://devint.example.com/mcp',
+    token: 'machine-token',
+    fetch: async () => Response.json({
+      jsonrpc: '2.0',
+      id: 'conductor',
+      result: { structuredContent: statuses.shift() },
+    }),
+  });
+
+  const denied = (await provider.preflightProject({
+    id: 'development-os',
+    repository: 'pyralisxc/Development-OS',
+  }))[0];
+  assert.equal(denied?.status, 'blocked');
+  assert.equal(denied?.error?.code, 'PERMISSION_DENIED');
+  assert.match(denied?.summary ?? '', /cannot read pyralisxc\/Development-OS/);
+
+  const failedGraph = (await provider.preflightProject({
+    id: 'development-os',
+    repository: 'pyralisxc/Development-OS',
+  }))[0];
+  assert.equal(failedGraph?.status, 'unavailable');
+  assert.equal(failedGraph?.error?.code, 'COMMAND_FAILED');
+  assert.match(failedGraph?.summary ?? '', /cannot inspect pyralisxc\/Development-OS/);
 });
 
 test('unconfigured Development Intelligence is explicit and read-only', async () => {

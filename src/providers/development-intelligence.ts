@@ -111,16 +111,16 @@ export class DevelopmentIntelligenceProvider implements ProjectPreflightProvider
         return [failedIntelligenceCheck('TOOL_UNAVAILABLE', message)];
       }
       const status = result?.structuredContent;
+      const projectFailure = developmentIntelligenceProjectFailure(status, projectIdentity);
+      if (projectFailure) {
+        return [failedIntelligenceCheck(projectFailure.code, projectFailure.message)];
+      }
       return [{
         check: 'development-intelligence.read',
         status: 'ready',
         provider: this.id,
         summary: `Development Intelligence can inspect ${projectIdentity}`,
-        diagnostics: status?.upstreamError || status?.graphError ? [{
-          level: 'info',
-          source: this.id,
-          message: 'Development Intelligence access is ready; project status contains currentness diagnostics',
-        }] : [],
+        diagnostics: [],
       }];
     } catch (error) {
       const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', this.id);
@@ -167,10 +167,67 @@ function failedIntelligenceCheck(
   const error = normalizeToolError({ code, message }, code, 'development-intelligence');
   return {
     check: 'development-intelligence.read',
-    status: code === 'AUTH_REQUIRED' ? 'blocked' : 'unavailable',
+    status: code === 'AUTH_REQUIRED' || code === 'PERMISSION_DENIED' || code === 'NOT_FOUND'
+      ? 'blocked'
+      : 'unavailable',
     provider: 'development-intelligence',
     summary: message,
     error,
     diagnostics: error.diagnostics,
   };
+}
+
+function developmentIntelligenceProjectFailure(
+  status: Record<string, unknown> | undefined,
+  projectIdentity: string,
+): { code: import('../runtime/types.js').ToolErrorCode; message: string } | undefined {
+  if (!status) {
+    return {
+      code: 'TOOL_UNAVAILABLE',
+      message: `Development Intelligence returned no project status for ${projectIdentity}`,
+    };
+  }
+
+  const upstreamError = readableStatusError(status.upstreamError);
+  if (upstreamError) {
+    return {
+      code: classifyStatusError(upstreamError),
+      message: `Development Intelligence cannot read ${projectIdentity}: ${upstreamError}`,
+    };
+  }
+
+  const graphError = readableStatusError(status.graphError);
+  if (graphError) {
+    return {
+      code: 'COMMAND_FAILED',
+      message: `Development Intelligence cannot inspect ${projectIdentity}: ${graphError}`,
+    };
+  }
+
+  if (!status.upstreamSha || !status.graph) {
+    return {
+      code: 'TOOL_UNAVAILABLE',
+      message: `Development Intelligence has no usable project graph for ${projectIdentity}`,
+    };
+  }
+
+  return undefined;
+}
+
+function readableStatusError(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (value instanceof Error && value.message.trim()) return value.message.trim();
+  if (typeof value === 'object' && value !== null && 'message' in value) {
+    const message = (value as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  }
+  return undefined;
+}
+
+function classifyStatusError(message: string): import('../runtime/types.js').ToolErrorCode {
+  if (/\b403\b|permission|access denied|not granted/i.test(message)) return 'PERMISSION_DENIED';
+  if (/\b401\b|unauthenticated|authentication/i.test(message)) return 'AUTH_REQUIRED';
+  if (/\b404\b|not found/i.test(message)) return 'NOT_FOUND';
+  if (/timeout|timed out|temporar|rate limit|\b429\b|\b5\d\d\b/i.test(message)) return 'TRANSIENT';
+  return 'TOOL_UNAVAILABLE';
 }
