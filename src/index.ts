@@ -9,6 +9,7 @@ export * from './config/runtime.js';
 export * from './runtime/types.js';
 export * from './runtime/errors.js';
 export * from './runtime/idempotency.js';
+export * from './runtime/redis-idempotency.js';
 export * from './runtime/runtime.js';
 export * from './transport/auth.js';
 export * from './transport/oauth.js';

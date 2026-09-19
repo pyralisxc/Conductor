@@ -95,7 +95,7 @@ The initial code is intentionally a small provider-neutral core. It should be ex
 
 ## Tool runtime
 
-The v0 runtime now includes a thin authenticated Streamable HTTP MCP adapter, concrete GitHub and local-workspace preflight probes, strict project allowlisting, and explicit unavailable state for the not-yet-deployed Development Intelligence adapter.
+The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery with explicit project overrides, intent-aware preflight, a read-only Development Intelligence MCP adapter, and optionally enabled bounded GitHub mutations backed by durable idempotency state.
 
 See `docs/TOOL_RUNTIME_V0.md` for the stable contract and `docs/MCP_RUNTIME.md` for deployment, OAuth, and ChatGPT connection requirements.
 

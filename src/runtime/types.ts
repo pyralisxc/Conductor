@@ -2,6 +2,8 @@ export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as cons
 
 export type ToolOperationName = 'capabilities' | 'preflight_project';
 
+export type PreflightIntent = 'inspect' | 'develop' | 'execute';
+
 export type MutationOperationName =
   | 'git.branch.create'
   | 'git.commit.create'
@@ -59,9 +61,9 @@ export interface NormalizedToolError {
 }
 
 export interface ToolDefinition {
-  name: ToolOperationName;
+  name: RuntimeOperationName;
   description: string;
-  mutates: false;
+  mutates: boolean;
 }
 
 export interface CapabilityAvailability {
@@ -94,6 +96,44 @@ export interface ProjectReference {
   ref?: string;
 }
 
+export interface CreateBranchInput {
+  project: ProjectReference;
+  branch: string;
+  fromSha: string;
+  idempotencyKey: string;
+}
+
+export interface CreateCommitFile {
+  path: string;
+  content: string;
+}
+
+export interface CreateCommitInput {
+  project: ProjectReference;
+  branch: string;
+  expectedHeadSha: string;
+  message: string;
+  files: CreateCommitFile[];
+  idempotencyKey: string;
+}
+
+export interface CreatePullRequestInput {
+  project: ProjectReference;
+  head: string;
+  base: 'preview';
+  title: string;
+  body?: string;
+  draft?: boolean;
+  idempotencyKey: string;
+}
+
+export interface CommentPullRequestInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  body: string;
+  idempotencyKey: string;
+}
+
 export type PreflightCheckId =
   | 'repository.access'
   | 'github.read'
@@ -115,6 +155,7 @@ export interface PreflightCheck {
 export interface ProjectPreflight {
   contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
   project: ProjectReference;
+  intent: PreflightIntent;
   status: 'ready' | 'degraded' | 'blocked';
   checks: PreflightCheck[];
 }

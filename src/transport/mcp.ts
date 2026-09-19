@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import * as z from 'zod/v4';
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
+import { CONDUCTOR_WRITE_SCOPE } from './auth.js';
 
 const diagnosticSchema = z.object({
   level: z.enum(['info', 'warning', 'error']),
@@ -27,7 +28,10 @@ const errorSchema = z.object({
 const receiptBase = {
   contractVersion: z.literal('conductor.tool-runtime.v0'),
   operationId: z.string(),
-  operation: z.enum(['capabilities', 'preflight_project']),
+  operation: z.enum([
+    'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
+    'pull-request.create', 'pull-request.comment.create',
+  ]),
   target: z.object({
     kind: z.enum(['runtime', 'project', 'repository', 'workspace']),
     id: z.string(),
@@ -61,9 +65,12 @@ const capabilitiesReceiptSchema = z.union([
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
       operations: z.array(z.object({
-        name: z.enum(['capabilities', 'preflight_project']),
+        name: z.enum([
+          'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
+          'pull-request.create', 'pull-request.comment.create',
+        ]),
         description: z.string(),
-        mutates: z.literal(false),
+        mutates: z.boolean(),
       })),
       capabilities: z.array(capabilitySchema),
       providers: z.array(z.object({
@@ -77,7 +84,7 @@ const capabilitiesReceiptSchema = z.union([
 ]);
 
 const projectSchema = z.object({
-  id: z.string().min(1).describe('Allowlisted Conductor project ID'),
+  id: z.string().min(1).describe('Project alias, repository name, or authorized owner/repository'),
   repository: z.string().optional().describe('Optional expected owner/repository'),
   workspace: z.string().optional().describe('Optional expected absolute workspace path'),
   ref: z.string().optional().describe('Git ref to verify'),
@@ -90,6 +97,7 @@ const preflightReceiptSchema = z.union([
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
       project: projectSchema,
+      intent: z.enum(['inspect', 'develop', 'execute']),
       status: z.enum(['ready', 'degraded', 'blocked']),
       checks: z.array(z.object({
         check: z.string(),
@@ -105,6 +113,33 @@ const preflightReceiptSchema = z.union([
 ]);
 
 const oauthSecurity = [{ type: 'oauth2', scopes: ['conductor.read'] }];
+const oauthWriteSecurity = [{ type: 'oauth2', scopes: ['conductor.read', 'conductor.write'] }];
+
+const idempotencySchema = z.object({
+  key: z.string(),
+  fingerprint: z.string(),
+  replayed: z.boolean(),
+});
+
+const mutationReceiptSchema = z.union([
+  z.object({
+    ...receiptBase,
+    status: z.literal('succeeded'),
+    result: z.record(z.string(), z.unknown()),
+    identifiers: z.object({
+      branch: z.string().optional(),
+      commitSha: z.string().optional(),
+      pullRequestNumber: z.number().optional(),
+      issueNumber: z.number().optional(),
+      commentId: z.string().optional(),
+      workflowRunId: z.string().optional(),
+    }).optional(),
+    idempotency: idempotencySchema,
+  }),
+  z.object({ ...failedReceiptSchema.shape, idempotency: idempotencySchema.optional() }),
+]);
+
+const mutationOutputSchema = z.object({ receipt: mutationReceiptSchema });
 
 export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServer {
   const server = new McpServer(
@@ -131,7 +166,10 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
   server.registerTool('preflight_project', {
     title: 'Preflight a development project',
     description: 'Verify allowlisted repository, GitHub read/write, workspace, shell, tests, and read-only Development Intelligence access before development work begins.',
-    inputSchema: z.object({ project: projectSchema }),
+    inputSchema: z.object({
+      project: projectSchema,
+      intent: z.enum(['inspect', 'develop', 'execute']).default('develop'),
+    }),
     outputSchema: z.object({ receipt: preflightReceiptSchema }),
     annotations: {
       readOnlyHint: true,
@@ -140,9 +178,90 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       openWorldHint: false,
     },
     _meta: { securitySchemes: oauthSecurity },
-  }, async ({ project }) => result(await runtime.preflightProject(project)));
+  }, async ({ project, intent }) => result(await runtime.preflightProject(project, intent)));
+
+  if (runtime.mutationsEnabled) {
+    server.registerTool('git.branch.create', {
+      title: 'Create a work branch',
+      description: 'Create one work/* branch from an exact full Git SHA. Requires durable idempotency and conductor.write.',
+      inputSchema: z.object({
+        project: projectSchema,
+        branch: z.string().min(6),
+        fromSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.createBranch(input));
+    });
+
+    server.registerTool('git.commit.create', {
+      title: 'Commit files to a work branch',
+      description: 'Create one bounded commit and advance a work/* branch only when its head matches expectedHeadSha.',
+      inputSchema: z.object({
+        project: projectSchema,
+        branch: z.string().min(6),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        message: z.string().min(1).max(500),
+        files: z.array(z.object({ path: z.string().min(1).max(1024), content: z.string().max(1024 * 1024) })).min(1).max(100),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.createCommit(input));
+    });
+
+    server.registerTool('pull-request.create', {
+      title: 'Open a pull request to preview',
+      description: 'Open a work/* pull request targeting preview. Main promotion is intentionally unavailable.',
+      inputSchema: z.object({
+        project: projectSchema,
+        head: z.string().min(6),
+        base: z.literal('preview'),
+        title: z.string().min(1).max(256),
+        body: z.string().optional(),
+        draft: z.boolean().optional(),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.createPullRequest(input));
+    });
+
+    server.registerTool('pull-request.comment.create', {
+      title: 'Comment on a pull request',
+      description: 'Add one idempotent comment to a pull request in an authorized repository.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+        body: z.string().min(1),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.commentPullRequest(input));
+    });
+  }
 
   return server;
+}
+
+function requireWriteScope(scopes?: string[]): void {
+  if (!scopes?.includes(CONDUCTOR_WRITE_SCOPE)) {
+    throw new Error('This operation requires the conductor.write OAuth scope');
+  }
 }
 
 function result(receipt: object) {
