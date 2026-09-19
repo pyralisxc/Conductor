@@ -53,6 +53,7 @@ See `docs/PROVIDERS.md` for alternatives and cost posture.
 ├── ORCHESTRATION.example.md
 ├── docs/
 │   ├── CRYSTAL.md
+│   ├── TOOL_RUNTIME_V0.md
 │   ├── OWNER_CONSOLE.md
 │   ├── PROVIDERS.md
 │   ├── STATE_MODEL.md
@@ -65,7 +66,13 @@ See `docs/PROVIDERS.md` for alternatives and cost posture.
 │   │   ├── types.ts
 │   │   └── policy.ts
 │   ├── providers/
-│   │   └── contracts.ts
+│   │   ├── contracts.ts
+│   │   └── runtime.ts
+│   ├── runtime/
+│   │   ├── types.ts
+│   │   ├── errors.ts
+│   │   ├── idempotency.ts
+│   │   └── runtime.ts
 │   ├── workflow/
 │   │   └── decide-next.ts
 │   ├── owner-console/
