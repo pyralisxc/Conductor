@@ -7,10 +7,16 @@ import type {
   CreateCommitInput,
   CreatePullRequestInput,
   CommentPullRequestInput,
+  GetPullRequestStatusInput,
+  PullRequestStatus,
+  UpdatePullRequestLabelsInput,
+  MergeIntegrationPullRequestInput,
+  PromotePullRequestInput,
+  PullRequestMergeMethod,
   ToolDiagnostic,
 } from '../runtime/types.js';
 import { normalizeToolError } from '../runtime/errors.js';
-import type { ProjectMutationProvider, ProjectPreflightProvider } from './runtime.js';
+import type { ProjectMutationProvider, ProjectPreflightProvider, PullRequestReadProvider } from './runtime.js';
 import {
   StaticGitHubCredentialProvider,
   type GitHubCredential,
@@ -29,6 +35,50 @@ interface GitHubRepositoryResponse {
   };
 }
 
+interface GitHubPullRequestResponse {
+  number: number;
+  html_url: string;
+  state: string;
+  draft?: boolean;
+  merged?: boolean;
+  mergeable?: boolean | null;
+  mergeable_state?: string | null;
+  head: { ref: string; sha: string };
+  base: { ref: string; sha: string };
+  labels?: Array<{ name?: string | null }>;
+}
+
+interface GitHubCheckRunsResponse {
+  check_runs: Array<{
+    id: number;
+    name: string;
+    status: string;
+    conclusion: string | null;
+    details_url?: string | null;
+    app?: { slug?: string | null; name?: string | null } | null;
+  }>;
+}
+
+interface GitHubWorkflowRunsResponse {
+  workflow_runs: Array<{
+    id: number;
+    name?: string | null;
+    status: string;
+    conclusion: string | null;
+    html_url?: string | null;
+  }>;
+}
+
+interface GitHubLabelResponse {
+  name: string;
+}
+
+interface GitHubMergeResponse {
+  sha?: string | null;
+  merged: boolean;
+  message: string;
+}
+
 export interface GitHubProjectConfiguration {
   id: string;
   repository: string;
@@ -44,7 +94,7 @@ export interface GitHubRuntimeProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectMutationProvider {
+export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectMutationProvider, PullRequestReadProvider {
   readonly id = 'github';
   private readonly credentials?: GitHubCredentialProvider;
   private readonly projects: ReadonlyMap<string, GitHubProjectConfiguration>;
@@ -190,6 +240,81 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     }
   }
 
+  async getPullRequestStatus(input: GetPullRequestStatusInput): Promise<PullRequestStatus> {
+    const { repository, credential } = await this.readableRepository(input.project, {
+      pull_requests: 'read',
+      checks: 'read',
+      actions: 'read',
+    });
+    assertPullRequestNumber(input.pullRequestNumber);
+    const pull = await this.request<GitHubPullRequestResponse>(
+      repository,
+      `/pulls/${input.pullRequestNumber}`,
+      {},
+      credential,
+    );
+    const [checkRuns, workflowRuns] = await Promise.all([
+      this.request<GitHubCheckRunsResponse>(
+        repository,
+        `/commits/${encodeURIComponent(pull.head.sha)}/check-runs?per_page=100`,
+        {},
+        credential,
+      ),
+      this.request<GitHubWorkflowRunsResponse>(
+        repository,
+        `/actions/runs?head_sha=${encodeURIComponent(pull.head.sha)}&per_page=100`,
+        {},
+        credential,
+      ),
+    ]);
+    const items = checkRuns.check_runs.map((check) => ({
+      id: check.id,
+      name: check.name,
+      status: check.status,
+      conclusion: check.conclusion,
+      detailsUrl: check.details_url ?? null,
+      app: check.app?.slug ?? check.app?.name ?? null,
+    }));
+    const pending = items.filter((check) => check.status !== 'completed').length;
+    const successful = items.filter((check) => check.conclusion === 'success').length;
+    const neutral = items.filter((check) => check.conclusion === 'neutral').length;
+    const skipped = items.filter((check) => check.conclusion === 'skipped').length;
+    const failed = items.filter((check) =>
+      check.status === 'completed'
+      && check.conclusion !== null
+      && !['success', 'neutral', 'skipped'].includes(check.conclusion)
+    ).length;
+    return {
+      repository,
+      pullRequestNumber: pull.number,
+      url: pull.html_url,
+      state: pull.state,
+      draft: pull.draft ?? false,
+      merged: pull.merged ?? false,
+      mergeable: pull.mergeable ?? null,
+      mergeableState: pull.mergeable_state ?? null,
+      head: pull.head,
+      base: pull.base,
+      labels: (pull.labels ?? []).flatMap((label) => label.name ? [label.name] : []),
+      checks: {
+        total: items.length,
+        pending,
+        successful,
+        failed,
+        neutral,
+        skipped,
+        items,
+      },
+      workflowRuns: workflowRuns.workflow_runs.map((run) => ({
+        id: run.id,
+        name: run.name ?? `workflow-${run.id}`,
+        status: run.status,
+        conclusion: run.conclusion,
+        url: run.html_url ?? null,
+      })),
+    };
+  }
+
   async createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }> {
     const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
     assertWorkBranch(input.branch);
@@ -287,6 +412,115 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     };
   }
 
+  async updatePullRequestLabels(input: UpdatePullRequestLabelsInput): Promise<{ repository: string; pullRequestNumber: number; labels: string[] }> {
+    const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
+    assertPullRequestNumber(input.pullRequestNumber);
+    const add = normalizedLabels(input.add);
+    const remove = new Set(normalizedLabels(input.remove).map((label) => label.toLowerCase()));
+    if (!add.length && !remove.size) throw { code: 'CONFLICT', message: 'At least one label must be added or removed' };
+    const current = await this.request<GitHubLabelResponse[]>(
+      repository,
+      `/issues/${input.pullRequestNumber}/labels?per_page=100`,
+      {},
+      credential,
+    );
+    const next = new Map(current.map((label) => [label.name.toLowerCase(), label.name]));
+    for (const label of remove) next.delete(label);
+    for (const label of add) next.set(label.toLowerCase(), label);
+    const updated = await this.request<GitHubLabelResponse[]>(
+      repository,
+      `/issues/${input.pullRequestNumber}/labels`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ labels: [...next.values()].sort((a, b) => a.localeCompare(b)) }),
+      },
+      credential,
+    );
+    return {
+      repository,
+      pullRequestNumber: input.pullRequestNumber,
+      labels: updated.map((label) => label.name).sort((a, b) => a.localeCompare(b)),
+    };
+  }
+
+  async mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }> {
+    const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
+    const pull = await this.mergeCandidate(repository, credential, input.pullRequestNumber, input.expectedHeadSha, input.expectedBaseSha);
+    const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+    const protectedBases = new Set(
+      ['main', 'master', repositoryInfo.default_branch]
+        .filter((value): value is string => Boolean(value))
+        .map((value) => value.toLowerCase()),
+    );
+    if (protectedBases.has(pull.base.ref.toLowerCase())) {
+      throw { code: 'PERMISSION_DENIED', message: `Integration merge cannot target accepted/default branch ${pull.base.ref}` };
+    }
+    return await this.mergePullRequest(repository, credential, pull, input.mergeMethod ?? 'squash');
+  }
+
+  async promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string }> {
+    const approvalReference = input.approvalReference.trim();
+    if (!approvalReference) throw { code: 'PERMISSION_DENIED', message: 'Promotion requires a non-empty owner approval reference' };
+    const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
+    const pull = await this.mergeCandidate(repository, credential, input.pullRequestNumber, input.expectedHeadSha, input.expectedBaseSha);
+    const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+    if (!repositoryInfo.default_branch || pull.base.ref.toLowerCase() !== repositoryInfo.default_branch.toLowerCase()) {
+      throw { code: 'PERMISSION_DENIED', message: `Promotion may only target repository default branch ${repositoryInfo.default_branch ?? '(unknown)'}` };
+    }
+    const merged = await this.mergePullRequest(repository, credential, pull, input.mergeMethod ?? 'squash');
+    return { ...merged, approvalReference };
+  }
+
+  private async mergeCandidate(
+    repository: string,
+    credential: GitHubCredential,
+    pullRequestNumber: number,
+    expectedHeadSha: string,
+    expectedBaseSha: string,
+  ): Promise<GitHubPullRequestResponse> {
+    assertPullRequestNumber(pullRequestNumber);
+    assertSha(expectedHeadSha, 'expectedHeadSha');
+    assertSha(expectedBaseSha, 'expectedBaseSha');
+    const pull = await this.request<GitHubPullRequestResponse>(repository, `/pulls/${pullRequestNumber}`, {}, credential);
+    if (pull.state !== 'open' || pull.merged) throw { code: 'CONFLICT', message: `Pull request #${pullRequestNumber} is not open and mergeable as a candidate` };
+    if (pull.draft) throw { code: 'CONFLICT', message: `Pull request #${pullRequestNumber} is still a draft` };
+    if (pull.head.sha !== expectedHeadSha) {
+      throw { code: 'CONFLICT', message: `Pull-request head changed from expected ${expectedHeadSha} to ${pull.head.sha}` };
+    }
+    if (pull.base.sha !== expectedBaseSha) {
+      throw { code: 'CONFLICT', message: `Pull-request base changed from expected ${expectedBaseSha} to ${pull.base.sha}` };
+    }
+    assertMergeSourceBranch(pull.head.ref);
+    return pull;
+  }
+
+  private async mergePullRequest(
+    repository: string,
+    credential: GitHubCredential,
+    pull: GitHubPullRequestResponse,
+    mergeMethod: PullRequestMergeMethod,
+  ): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }> {
+    const response = await this.request<GitHubMergeResponse>(
+      repository,
+      `/pulls/${pull.number}/merge`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ sha: pull.head.sha, merge_method: mergeMethod }),
+      },
+      credential,
+    );
+    if (!response.merged || !response.sha) {
+      throw { code: 'CONFLICT', message: response.message || `GitHub did not merge pull request #${pull.number}` };
+    }
+    return {
+      repository,
+      pullRequestNumber: pull.number,
+      merged: true,
+      mergeCommitSha: response.sha,
+      message: response.message,
+    };
+  }
+
   resolveProject(project: ProjectReference): { project: GitHubProjectConfiguration } | {
     error: string;
     code: 'NOT_FOUND' | 'CONFLICT';
@@ -340,6 +574,27 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     };
   }
 
+  private async readableRepository(
+    project: ProjectReference,
+    requiredPermissions: Record<string, 'read' | 'write'>,
+  ): Promise<{ repository: string; credential: GitHubCredential }> {
+    if (!this.credentials) throw { code: 'AUTH_REQUIRED', message: 'GitHub authentication is not configured' };
+    const resolution = this.resolveProject(project);
+    if ('error' in resolution) throw { code: resolution.code, message: resolution.error };
+    const repository = resolution.project.repository;
+    const credential = await this.credentials.getCredential(repository);
+    if (credential.kind === 'app-installation') {
+      const missing = missingPermissions(credential, requiredPermissions);
+      if (missing.length > 0) {
+        throw {
+          code: 'PERMISSION_DENIED',
+          message: `GitHub App installation lacks required permissions for ${repository}: ${missing.join(', ')}`,
+        };
+      }
+    }
+    return { repository, credential };
+  }
+
   private async writableRepository(
     project: ProjectReference,
     requiredPermissions: Record<string, 'write'>,
@@ -378,6 +633,22 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     });
     if (!response.ok) throw await githubResponseError(response);
     return await response.json() as Result;
+  }
+}
+
+function assertPullRequestNumber(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1) throw { code: 'CONFLICT', message: 'pullRequestNumber must be a positive integer' };
+}
+
+function normalizedLabels(values?: string[]): string[] {
+  const labels = (values ?? []).map((value) => value.trim()).filter(Boolean);
+  if (labels.some((label) => label.length > 100)) throw { code: 'CONFLICT', message: 'Labels must be 100 characters or fewer' };
+  return [...new Map(labels.map((label) => [label.toLowerCase(), label])).values()];
+}
+
+function assertMergeSourceBranch(branch: string): void {
+  if (!/^(?:work|repair|audit|release)\/[A-Za-z0-9._/-]+$/.test(branch) || branch.includes('..') || branch.endsWith('/')) {
+    throw { code: 'PERMISSION_DENIED', message: 'Conductor merge sources must be work/*, repair/*, audit/*, or release/* branches' };
   }
 }
 
@@ -503,11 +774,12 @@ function missingDevelopPermissions(credential: GitHubCredential): string[] {
 
 function missingPermissions(
   credential: GitHubCredential,
-  required: Readonly<Record<string, 'write'>>,
+  required: Readonly<Record<string, 'read' | 'write'>>,
 ): string[] {
   return Object.entries(required).flatMap(([permission, level]) => {
     const actual = credential.permissions?.[permission];
-    return actual === level || actual === 'admin' ? [] : [`${permission}:${level}`];
+    const sufficient = actual === 'admin' || actual === 'write' || (level === 'read' && actual === 'read');
+    return sufficient ? [] : [`${permission}:${level}`];
   });
 }
 
@@ -566,6 +838,7 @@ async function githubResponseError(response: Response): Promise<unknown> {
     }] : undefined,
   };
 }
+
 
 
 

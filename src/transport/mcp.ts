@@ -29,8 +29,9 @@ const receiptBase = {
   contractVersion: z.literal('conductor.tool-runtime.v0'),
   operationId: z.string(),
   operation: z.enum([
-    'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
-    'pull-request.create', 'pull-request.comment.create',
+    'capabilities', 'preflight_project', 'pull-request.status', 'git.branch.create', 'git.commit.create',
+    'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
+    'pull-request.merge.integration', 'pull-request.merge.promote',
   ]),
   target: z.object({
     kind: z.enum(['runtime', 'project', 'repository', 'workspace']),
@@ -66,8 +67,9 @@ const capabilitiesReceiptSchema = z.union([
       contractVersion: z.literal('conductor.tool-runtime.v0'),
       operations: z.array(z.object({
         name: z.enum([
-          'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
-          'pull-request.create', 'pull-request.comment.create',
+          'capabilities', 'preflight_project', 'pull-request.status', 'git.branch.create', 'git.commit.create',
+          'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
+    'pull-request.merge.integration', 'pull-request.merge.promote',
         ]),
         description: z.string(),
         mutates: z.boolean(),
@@ -133,6 +135,7 @@ const mutationReceiptSchema = z.union([
       issueNumber: z.number().optional(),
       commentId: z.string().optional(),
       workflowRunId: z.string().optional(),
+      mergeCommitSha: z.string().optional(),
     }).optional(),
     idempotency: idempotencySchema,
   }),
@@ -179,6 +182,23 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     },
     _meta: { securitySchemes: oauthSecurity },
   }, async ({ project, intent }) => result(await runtime.preflightProject(project, intent)));
+
+  if (runtime.pullRequestReadEnabled) {
+    server.registerTool('pull-request.status', {
+      title: 'Read pull request status',
+      description: 'Read one pull request with exact head/base SHAs, labels, check runs, and workflow runs. Use before merge or CI decisions.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+      }),
+      outputSchema: z.object({ receipt: z.union([
+        z.object({ ...receiptBase, status: z.literal('succeeded'), result: z.record(z.string(), z.unknown()) }),
+        failedReceiptSchema,
+      ]) }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.pullRequestStatus(input)));
+  }
 
   if (runtime.mutationsEnabled) {
     server.registerTool('git.branch.create', {
@@ -253,6 +273,64 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       requireWriteScope(extra.authInfo?.scopes);
       return result(await runtime.commentPullRequest(input));
     });
+
+
+    server.registerTool('pull-request.labels.update', {
+      title: 'Update pull request labels',
+      description: 'Add or remove labels while preserving unrelated labels. Requires conductor.write.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+        add: z.array(z.string().min(1).max(100)).max(50).optional(),
+        remove: z.array(z.string().min(1).max(100)).max(50).optional(),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.updatePullRequestLabels(input));
+    });
+
+    server.registerTool('pull-request.merge.integration', {
+      title: 'Merge an integration pull request',
+      description: 'Merge an exact PR head/base candidate into a non-default integration branch. Main/master/default branches are rejected.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('squash'),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.mergeIntegrationPullRequest(input));
+    });
+
+    server.registerTool('pull-request.merge.promote', {
+      title: 'Promote an approved pull request',
+      description: 'Merge an exact approved PR candidate into the repository default branch. Requires exact head SHA, exact base SHA, and an owner approval reference.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        approvalReference: z.string().min(1).max(500),
+        mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('squash'),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.promotePullRequest(input));
+    });
   }
 
   return server;
@@ -270,6 +348,7 @@ function result(receipt: object) {
     content: [{ type: 'text' as const, text: JSON.stringify(receipt) }],
   };
 }
+
 
 
 
