@@ -446,7 +446,6 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   async mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }> {
     const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
     const pull = await this.mergeCandidate(repository, credential, input.pullRequestNumber, input.expectedHeadSha, input.expectedBaseSha);
-    assertIntegrationSourceBranch(pull.head.ref);
     const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
     const protectedBases = new Set(
       ['main', 'master', repositoryInfo.default_branch]
@@ -456,6 +455,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     if (protectedBases.has(pull.base.ref.toLowerCase())) {
       throw { code: 'PERMISSION_DENIED', message: `Integration merge cannot target accepted/default branch ${pull.base.ref}` };
     }
+    assertIntegrationSourceBranch(pull.head.ref);
     return await this.mergePullRequest(repository, credential, pull, input.mergeMethod ?? 'squash');
   }
 
@@ -853,6 +853,7 @@ async function githubResponseError(response: Response): Promise<unknown> {
     }] : undefined,
   };
 }
+
 
 
 
