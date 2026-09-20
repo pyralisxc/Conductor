@@ -33,7 +33,7 @@ Example:
 ]
 ```
 
-The preferred GitHub adapter identity is a private GitHub App. For each repository, Conductor discovers the covering installation, mints a short-lived token restricted to that repository, and verifies the effective permissions required by its bounded mutation operations. App-backed Develop readiness requires `contents:write`, `pull_requests:write`, and `issues:write` while those operations are exposed.
+The preferred GitHub adapter identity is a private GitHub App. For each repository, Conductor discovers the covering installation, mints a short-lived token restricted to that repository, and verifies the effective permissions required by each operation. App-backed Develop readiness requires `contents:write`, `pull_requests:write`, and `issues:write`. Pull-request status additionally requires `checks:read` and `actions:read`; label updates require `issues:write`; merges require `contents:write`.
 
 `GITHUB_TOKEN` remains a migration fallback. Repository-level `permissions.push` is not proof that a fine-grained token can perform every advertised Git Data, pull-request, or issue-comment mutation, so static-token write preflight is intentionally degraded rather than operation-verified.
 
@@ -74,6 +74,8 @@ Deploy behind HTTPS or build the included container. Confirm `/health`, both dis
 ## Deliberate limits
 
 - No anonymous or static shared-secret mode.
-- No arbitrary shell, generic provider dispatch, force-push, merge, or main-promotion tool.
+- No arbitrary shell, generic provider dispatch, force-push, or repository-admin tool.
+- Merge is bounded to pull requests with exact head/base SHAs. Integration merge rejects `main`, `master`, and the repository default branch. Default-branch promotion requires a caller-supplied owner approval reference and exact candidate identity; the runtime does not infer approval.
 - Mutation operations are absent unless explicitly enabled with durable atomic idempotency state.
 - No multi-agent, handoff, scheduler, or session subsystem is added here.
+

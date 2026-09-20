@@ -331,6 +331,193 @@ test('GitHub provider opens work pull requests against explicit repository-nativ
   );
 });
 
+test('GitHub provider returns exact PR identity plus checks and workflow runs', async () => {
+  const headSha = 'a'.repeat(40);
+  const baseSha = 'b'.repeat(40);
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: {
+            contents: 'write', pull_requests: 'write', issues: 'write',
+            checks: 'read', actions: 'read',
+          },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/pulls/12')) return Response.json({
+        number: 12,
+        html_url: 'https://github.com/pyralisxc/CardForge/pull/12',
+        state: 'open',
+        draft: false,
+        merged: false,
+        mergeable: true,
+        mergeable_state: 'clean',
+        head: { ref: 'work/cf-cleanup', sha: headSha },
+        base: { ref: 'vercel-preview', sha: baseSha },
+        labels: [{ name: 'seal-b' }],
+      });
+      if (url.includes(`/commits/${headSha}/check-runs`)) return Response.json({
+        check_runs: [
+          { id: 1, name: 'verify', status: 'completed', conclusion: 'success', details_url: 'https://checks/1', app: { slug: 'github-actions' } },
+          { id: 2, name: 'Vercel', status: 'in_progress', conclusion: null, details_url: 'https://checks/2', app: { slug: 'vercel' } },
+        ],
+      });
+      if (url.includes('/actions/runs?')) return Response.json({
+        workflow_runs: [{ id: 9, name: 'verify', status: 'completed', conclusion: 'success', html_url: 'https://actions/9' }],
+      });
+      throw new Error(`Unexpected request ${url}`);
+    },
+  });
+
+  const status = await provider.getPullRequestStatus({
+    project: { id: 'pyralisxc/CardForge' },
+    pullRequestNumber: 12,
+  });
+  assert.equal(status.head.sha, headSha);
+  assert.equal(status.base.sha, baseSha);
+  assert.deepEqual(status.labels, ['seal-b']);
+  assert.equal(status.checks.total, 2);
+  assert.equal(status.checks.pending, 1);
+  assert.equal(status.checks.successful, 1);
+  assert.equal(status.workflowRuns[0]?.id, 9);
+});
+
+test('GitHub provider updates PR labels without erasing unrelated labels', async () => {
+  const requests: Array<{ method: string; body?: any }> = [];
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { issues: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (_input, init) => {
+      const method = init?.method ?? 'GET';
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      requests.push({ method, body });
+      if (method === 'GET') return Response.json([{ name: 'existing' }, { name: 'remove-me' }]);
+      if (method === 'PUT') return Response.json([{ name: 'existing' }, { name: 'seal-b' }]);
+      throw new Error(`Unexpected method ${method}`);
+    },
+  });
+
+  const result = await provider.updatePullRequestLabels({
+    project: { id: 'pyralisxc/Development-Intelligence' },
+    pullRequestNumber: 26,
+    add: ['seal-b'],
+    remove: ['remove-me'],
+    idempotencyKey: 'labels:di:26:seal',
+  });
+  assert.deepEqual(result.labels, ['existing', 'seal-b']);
+  assert.deepEqual(requests.at(-1)?.body?.labels, ['existing', 'seal-b']);
+});
+
+test('GitHub provider separates integration merge from accepted-branch promotion', async () => {
+  const headSha = 'a'.repeat(40);
+  const integrationBaseSha = 'b'.repeat(40);
+  const defaultBaseSha = 'c'.repeat(40);
+  const mergeRequests: any[] = [];
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      if (url.endsWith('/pulls/12') && method === 'GET') return Response.json({
+        number: 12, html_url: 'https://github.com/pyralisxc/CardForge/pull/12', state: 'open',
+        draft: false, merged: false, head: { ref: 'work/cf-cleanup', sha: headSha },
+        base: { ref: 'vercel-preview', sha: integrationBaseSha },
+      });
+      if (url.endsWith('/pulls/13') && method === 'GET') return Response.json({
+        number: 13, html_url: 'https://github.com/pyralisxc/CardForge/pull/13', state: 'open',
+        draft: false, merged: false, head: { ref: 'vercel-preview', sha: headSha },
+        base: { ref: 'main', sha: defaultBaseSha },
+      });
+      if (/\/repos\/pyralisxc\/CardForge$/u.test(url) && method === 'GET') return Response.json({
+        full_name: 'pyralisxc/CardForge', default_branch: 'main',
+      });
+      if (url.endsWith('/merge') && method === 'PUT') {
+        mergeRequests.push(body);
+        return Response.json({ merged: true, sha: 'd'.repeat(40), message: 'merged' });
+      }
+      throw new Error(`Unexpected request ${method} ${url}`);
+    },
+  });
+
+  const integration = await provider.mergeIntegrationPullRequest({
+    project: { id: 'pyralisxc/CardForge' },
+    pullRequestNumber: 12,
+    expectedHeadSha: headSha,
+    expectedBaseSha: integrationBaseSha,
+    mergeMethod: 'squash',
+    idempotencyKey: 'merge:cf:12:integration',
+  });
+  assert.equal(integration.merged, true);
+  assert.deepEqual(mergeRequests[0], { sha: headSha, merge_method: 'squash' });
+
+  await assert.rejects(
+    provider.mergeIntegrationPullRequest({
+      project: { id: 'pyralisxc/CardForge' },
+      pullRequestNumber: 13,
+      expectedHeadSha: headSha,
+      expectedBaseSha: defaultBaseSha,
+      idempotencyKey: 'merge:cf:13:wrong-lane',
+    }),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /accepted\/default branch main/.test(error.message),
+  );
+
+  const promoted = await provider.promotePullRequest({
+    project: { id: 'pyralisxc/CardForge' },
+    pullRequestNumber: 13,
+    expectedHeadSha: headSha,
+    expectedBaseSha: defaultBaseSha,
+    approvalReference: 'owner approved exact candidate in interactive session',
+    idempotencyKey: 'merge:cf:13:promotion',
+  });
+  assert.equal(promoted.merged, true);
+  assert.match(promoted.approvalReference, /owner approved/);
+
+  await assert.rejects(
+    provider.promotePullRequest({
+      project: { id: 'pyralisxc/CardForge' },
+      pullRequestNumber: 13,
+      expectedHeadSha: 'e'.repeat(40),
+      expectedBaseSha: defaultBaseSha,
+      approvalReference: 'owner approved',
+      idempotencyKey: 'merge:cf:13:stale',
+    }),
+    (error: any) => error?.code === 'CONFLICT' && /head changed/.test(error.message),
+  );
+});
+
 test('workspace provider verifies an allowlisted workspace, shell, and test script', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'conductor-workspace-'));
   await writeFile(join(workspace, 'package.json'), JSON.stringify({
@@ -445,6 +632,8 @@ test('unconfigured Development Intelligence is explicit and read-only', async ()
   const checks = await provider.preflightProject({ id: 'conductor' });
   assert.equal(checks[0]?.error?.code, 'TOOL_UNAVAILABLE');
 });
+
+
 
 
 

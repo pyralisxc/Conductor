@@ -87,6 +87,19 @@ A promotion approval binds to the exact Preview candidate SHA. The promotion rec
 
 GitHub webhooks keep projections current but are not repository authority. Conductor verifies signatures, deduplicates delivery IDs, processes asynchronously, tolerates repetition and reordering, and reconciles against current GitHub state.
 
+## Pull-request execution kernel
+
+The GitHub provider exposes four distinct concerns instead of one generic merge power:
+
+- **status** — read exact PR head/base identity, labels, check runs, and workflow runs;
+- **labels** — add/remove PR labels while preserving unrelated labels;
+- **integration merge** — merge an exact candidate into a non-accepted integration branch;
+- **promotion merge** — execute an exact explicitly approved candidate into the repository default branch.
+
+Opening a PR remains a proposal and does not authorize its merge. Integration merge rejects `main`, `master`, and the repository default branch. Promotion requires exact head/base SHAs plus an owner approval reference; stale identity fails closed.
+
+The current approval reference is an audit field supplied by the authorized interactive caller. It is not a cryptographic proof of human intent. The shared authorization/Work Envelope layer remains responsible for ensuring the caller invokes promotion only after current explicit owner approval.
+
 ## Delivery order
 
 1. GitHub App identity and operation-aware preflight.
@@ -96,3 +109,4 @@ GitHub webhooks keep projections current but are not repository authority. Condu
 5. Project-open projection and measured workflow compression.
 
 CardForge is the first canary; every contract remains portfolio-native.
+

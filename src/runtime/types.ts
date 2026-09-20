@@ -1,6 +1,6 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
 
-export type ToolOperationName = 'capabilities' | 'preflight_project';
+export type ToolOperationName = 'capabilities' | 'preflight_project' | 'pull-request.status';
 
 export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
@@ -9,7 +9,10 @@ export type MutationOperationName =
   | 'git.commit.create'
   | 'git.push'
   | 'pull-request.create'
-  | 'pull-request.comment.create';
+  | 'pull-request.comment.create'
+  | 'pull-request.labels.update'
+  | 'pull-request.merge.integration'
+  | 'pull-request.merge.promote';
 
 export type RuntimeOperationName =
   | ToolOperationName
@@ -134,6 +137,81 @@ export interface CommentPullRequestInput {
   idempotencyKey: string;
 }
 
+export type PullRequestMergeMethod = 'merge' | 'squash' | 'rebase';
+
+export interface GetPullRequestStatusInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+}
+
+export interface PullRequestCheckState {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  detailsUrl: string | null;
+  app: string | null;
+}
+
+export interface PullRequestWorkflowRunState {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  url: string | null;
+}
+
+export interface PullRequestStatus {
+  repository: string;
+  pullRequestNumber: number;
+  url: string;
+  state: string;
+  draft: boolean;
+  merged: boolean;
+  mergeable: boolean | null;
+  mergeableState: string | null;
+  head: { ref: string; sha: string };
+  base: { ref: string; sha: string };
+  labels: string[];
+  checks: {
+    total: number;
+    pending: number;
+    successful: number;
+    failed: number;
+    neutral: number;
+    skipped: number;
+    items: PullRequestCheckState[];
+  };
+  workflowRuns: PullRequestWorkflowRunState[];
+}
+
+export interface UpdatePullRequestLabelsInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  add?: string[];
+  remove?: string[];
+  idempotencyKey: string;
+}
+
+export interface MergeIntegrationPullRequestInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  expectedHeadSha: string;
+  expectedBaseSha: string;
+  mergeMethod?: PullRequestMergeMethod;
+  idempotencyKey: string;
+}
+
+export interface PromotePullRequestInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  expectedHeadSha: string;
+  expectedBaseSha: string;
+  approvalReference: string;
+  mergeMethod?: PullRequestMergeMethod;
+  idempotencyKey: string;
+}
+
 export type PreflightCheckId =
   | 'repository.access'
   | 'github.read'
@@ -173,6 +251,7 @@ export interface ExecutionIdentifiers {
   issueNumber?: number;
   commentId?: string;
   workflowRunId?: string;
+  mergeCommitSha?: string;
 }
 
 export interface ReceiptBase {
@@ -204,5 +283,6 @@ export interface FailedExecutionReceipt extends ReceiptBase {
 export type ExecutionReceipt<Result> =
   | SuccessfulExecutionReceipt<Result>
   | FailedExecutionReceipt;
+
 
 

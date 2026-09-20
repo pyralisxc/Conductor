@@ -4,6 +4,7 @@ import {
   type ToolRuntimeProvider,
   type ProjectMutationProvider,
   type ProjectReferenceResolver,
+  type PullRequestReadProvider,
 } from '../providers/runtime.js';
 import { normalizeToolError } from './errors.js';
 import {
@@ -24,6 +25,11 @@ import {
   type CreateCommitInput,
   type CreatePullRequestInput,
   type CommentPullRequestInput,
+  type GetPullRequestStatusInput,
+  type PullRequestStatus,
+  type UpdatePullRequestLabelsInput,
+  type MergeIntegrationPullRequestInput,
+  type PromotePullRequestInput,
 } from './types.js';
 import { IdempotentMutationExecutor } from './idempotency.js';
 
@@ -40,11 +46,20 @@ const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   },
 ];
 
+const PULL_REQUEST_READ_DEFINITION: ToolDefinition = {
+  name: 'pull-request.status',
+  description: 'Read one pull request with exact head/base identity plus observed check and workflow state.',
+  mutates: false,
+};
+
 const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'git.branch.create', description: 'Create a work/* branch from an exact Git SHA.', mutates: true },
   { name: 'git.commit.create', description: 'Create files in one commit and advance an existing work/* branch from an expected head SHA.', mutates: true },
   { name: 'pull-request.create', description: 'Open a work/* pull request targeting preview.', mutates: true },
   { name: 'pull-request.comment.create', description: 'Add a comment to a pull request.', mutates: true },
+  { name: 'pull-request.labels.update', description: 'Add/remove pull-request labels while preserving unrelated labels.', mutates: true },
+  { name: 'pull-request.merge.integration', description: 'Merge an exact PR candidate into a non-accepted integration branch.', mutates: true },
+  { name: 'pull-request.merge.promote', description: 'Promote an exact explicitly approved PR candidate into the repository default branch.', mutates: true },
 ];
 
 const REQUIRED_PREFLIGHT_CHECKS: Record<PreflightIntent, readonly PreflightCheckId[]> = {
@@ -63,6 +78,7 @@ export interface ConductorToolRuntimeOptions {
   mutationProvider?: ProjectMutationProvider;
   mutationExecutor?: IdempotentMutationExecutor;
   projectResolver?: ProjectReferenceResolver;
+  pullRequestProvider?: PullRequestReadProvider;
 }
 
 export class ConductorToolRuntime {
@@ -72,6 +88,7 @@ export class ConductorToolRuntime {
   private readonly mutationProvider?: ProjectMutationProvider;
   private readonly mutationExecutor?: IdempotentMutationExecutor;
   private readonly projectResolver?: ProjectReferenceResolver;
+  private readonly pullRequestProvider?: PullRequestReadProvider;
 
   constructor(options: ConductorToolRuntimeOptions = {}) {
     this.providers = options.providers ?? [];
@@ -81,10 +98,15 @@ export class ConductorToolRuntime {
     this.mutationProvider = options.mutationProvider;
     this.mutationExecutor = options.mutationExecutor;
     this.projectResolver = options.projectResolver;
+    this.pullRequestProvider = options.pullRequestProvider;
   }
 
   get mutationsEnabled(): boolean {
     return Boolean(this.mutationProvider && this.mutationExecutor);
+  }
+
+  get pullRequestReadEnabled(): boolean {
+    return Boolean(this.pullRequestProvider);
   }
 
   async capabilities(): Promise<ExecutionReceipt<CapabilityReport>> {
@@ -136,6 +158,7 @@ export class ConductorToolRuntime {
             contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
             operations: [
               ...TOOL_DEFINITIONS,
+              ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
               ...(this.mutationsEnabled ? MUTATION_DEFINITIONS : []),
             ],
             capabilities,
@@ -143,6 +166,18 @@ export class ConductorToolRuntime {
           },
           diagnostics,
         };
+      },
+    );
+  }
+
+  async pullRequestStatus(input: GetPullRequestStatusInput): Promise<ExecutionReceipt<PullRequestStatus>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'pull-request.status',
+      { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
+      async () => {
+        if (!this.pullRequestProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'Pull-request read provider is not configured' };
+        return { result: await this.pullRequestProvider.getPullRequestStatus({ ...input, project: resolvedProject }) };
       },
     );
   }
@@ -175,6 +210,27 @@ export class ConductorToolRuntime {
         result,
         identifiers: { pullRequestNumber: result.pullRequestNumber, commentId: result.commentId },
       };
+    });
+  }
+
+  async updatePullRequestLabels(input: UpdatePullRequestLabelsInput) {
+    return await this.executeMutation(input, 'pull-request.labels.update', async (provider) => {
+      const result = await provider.updatePullRequestLabels(input);
+      return { result, identifiers: { pullRequestNumber: result.pullRequestNumber } };
+    });
+  }
+
+  async mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput) {
+    return await this.executeMutation(input, 'pull-request.merge.integration', async (provider) => {
+      const result = await provider.mergeIntegrationPullRequest(input);
+      return { result, identifiers: { pullRequestNumber: result.pullRequestNumber, mergeCommitSha: result.mergeCommitSha } };
+    });
+  }
+
+  async promotePullRequest(input: PromotePullRequestInput) {
+    return await this.executeMutation(input, 'pull-request.merge.promote', async (provider) => {
+      const result = await provider.promotePullRequest(input);
+      return { result, identifiers: { pullRequestNumber: result.pullRequestNumber, mergeCommitSha: result.mergeCommitSha } };
     });
   }
 
@@ -350,3 +406,4 @@ export class ConductorToolRuntime {
 function mutationFingerprint(operation: string, input: unknown): string {
   return `sha256:${createHash('sha256').update(JSON.stringify({ operation, input })).digest('hex')}`;
 }
+

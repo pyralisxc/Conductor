@@ -28,6 +28,8 @@ Ordinary Preview workers must not receive production secrets.
 
 Require explicit owner action before main promotion, destructive migration, irreversible provider mutation, material billing/payment change, operations affecting real customer data beyond an accepted runbook, material security/permission semantics, or other project-declared consequential boundaries.
 
+Mechanical execution may follow that approval. `pull-request.merge.promote` is therefore not autonomous release authority: it requires the exact PR head SHA, exact base SHA, repository-default target, and an owner approval reference. Conductor refuses stale candidates and preserves the merge commit SHA in its receipt.
+
 ## Self-hosted runner
 
 Do not execute arbitrary untrusted public PR code on a personal/local runner.
@@ -43,3 +45,4 @@ Use stable work, delegation, integration, release candidate, and webhook-deliver
 Every meaningful automated mutation retains triggering event, governing policy, evidence/reason, resulting state, and owner override path.
 
 Authorization grants, invalidations, exact consequential approvals, and execution receipts are durable. The combined Work Envelope remains an ephemeral, reconstructable projection.
+
