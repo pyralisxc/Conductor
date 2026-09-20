@@ -446,6 +446,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   async mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }> {
     const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
     const pull = await this.mergeCandidate(repository, credential, input.pullRequestNumber, input.expectedHeadSha, input.expectedBaseSha);
+    assertIntegrationSourceBranch(pull.head.ref);
     const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
     const protectedBases = new Set(
       ['main', 'master', repositoryInfo.default_branch]
@@ -463,6 +464,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     if (!approvalReference) throw { code: 'PERMISSION_DENIED', message: 'Promotion requires a non-empty owner approval reference' };
     const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
     const pull = await this.mergeCandidate(repository, credential, input.pullRequestNumber, input.expectedHeadSha, input.expectedBaseSha);
+    assertPromotionSourceBranch(pull.head.ref);
     const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
     if (!repositoryInfo.default_branch || pull.base.ref.toLowerCase() !== repositoryInfo.default_branch.toLowerCase()) {
       throw { code: 'PERMISSION_DENIED', message: `Promotion may only target repository default branch ${repositoryInfo.default_branch ?? '(unknown)'}` };
@@ -490,7 +492,6 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     if (pull.base.sha !== expectedBaseSha) {
       throw { code: 'CONFLICT', message: `Pull-request base changed from expected ${expectedBaseSha} to ${pull.base.sha}` };
     }
-    assertMergeSourceBranch(pull.head.ref);
     return pull;
   }
 
@@ -646,9 +647,23 @@ function normalizedLabels(values?: string[]): string[] {
   return [...new Map(labels.map((label) => [label.toLowerCase(), label])).values()];
 }
 
-function assertMergeSourceBranch(branch: string): void {
-  if (!/^(?:work|repair|audit|release)\/[A-Za-z0-9._/-]+$/.test(branch) || branch.includes('..') || branch.endsWith('/')) {
-    throw { code: 'PERMISSION_DENIED', message: 'Conductor merge sources must be work/*, repair/*, audit/*, or release/* branches' };
+function safeMergeBranch(branch: string): boolean {
+  return /^[A-Za-z0-9._/-]+$/.test(branch) && !branch.includes('..') && !branch.startsWith('/') && !branch.endsWith('/');
+}
+
+function assertIntegrationSourceBranch(branch: string): void {
+  if (!safeMergeBranch(branch) || !/^(?:work|repair|audit)\//.test(branch)) {
+    throw { code: 'PERMISSION_DENIED', message: 'Integration merge sources must be work/*, repair/*, or audit/* branches' };
+  }
+}
+
+function assertPromotionSourceBranch(branch: string): void {
+  if (!safeMergeBranch(branch) || !(
+    branch === 'preview'
+    || branch === 'vercel-preview'
+    || /^(?:release|work)\//.test(branch)
+  )) {
+    throw { code: 'PERMISSION_DENIED', message: 'Promotion sources must be preview, vercel-preview, release/*, or explicitly approved work/* branches' };
   }
 }
 
@@ -838,6 +853,7 @@ async function githubResponseError(response: Response): Promise<unknown> {
     }] : undefined,
   };
 }
+
 
 
 

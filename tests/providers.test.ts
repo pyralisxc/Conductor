@@ -458,7 +458,7 @@ test('GitHub provider separates integration merge from accepted-branch promotion
       });
       if (url.endsWith('/pulls/13') && method === 'GET') return Response.json({
         number: 13, html_url: 'https://github.com/pyralisxc/CardForge/pull/13', state: 'open',
-        draft: false, merged: false, head: { ref: 'release/cf-candidate', sha: headSha },
+        draft: false, merged: false, head: { ref: 'vercel-preview', sha: headSha },
         base: { ref: 'main', sha: defaultBaseSha },
       });
       if (/\/repos\/pyralisxc\/CardForge$/u.test(url) && method === 'GET') return Response.json({
@@ -632,6 +632,7 @@ test('unconfigured Development Intelligence is explicit and read-only', async ()
   const checks = await provider.preflightProject({ id: 'conductor' });
   assert.equal(checks[0]?.error?.code, 'TOOL_UNAVAILABLE');
 });
+
 
 
 
