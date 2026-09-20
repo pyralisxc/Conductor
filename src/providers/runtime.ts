@@ -13,7 +13,7 @@ import type {
   PromotePullRequestInput,
   GetWorkItemStatusInput,
   ListWorkItemsInput,
-  WorkItem,
+  WorkItemRecord,
   WorkItemList,
   CreateWorkItemInput,
   UpdateWorkItemStatusInput,
@@ -37,13 +37,13 @@ export interface PullRequestReadProvider extends RuntimeCapabilityProvider {
 }
 
 export interface WorkItemReadProvider extends RuntimeCapabilityProvider {
-  getWorkItemStatus(input: GetWorkItemStatusInput): Promise<WorkItem>;
+  getWorkItemStatus(input: GetWorkItemStatusInput): Promise<WorkItemRecord>;
   listWorkItems(input: ListWorkItemsInput): Promise<WorkItemList>;
 }
 
 export interface WorkItemMutationProvider extends WorkItemReadProvider {
-  createWorkItem(input: CreateWorkItemInput): Promise<WorkItem>;
-  updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItem>;
+  createWorkItem(input: CreateWorkItemInput): Promise<WorkItemRecord>;
+  updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItemRecord>;
 }
 
 export interface ProjectMutationProvider extends RuntimeCapabilityProvider {

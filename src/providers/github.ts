@@ -16,7 +16,7 @@ import type {
   ToolDiagnostic,
   GetWorkItemStatusInput,
   ListWorkItemsInput,
-  WorkItem,
+  WorkItemRecord,
   WorkItemList,
   WorkItemStatus,
   MutableWorkItemStatus,
@@ -401,7 +401,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
 
-  async getWorkItemStatus(input: GetWorkItemStatusInput): Promise<WorkItem> {
+  async getWorkItemStatus(input: GetWorkItemStatusInput): Promise<WorkItemRecord> {
     const { repository, credential } = await this.readableRepository(input.project, { issues: 'read' });
     assertIssueNumber(input.issueNumber);
     const issue = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {}, credential);
@@ -430,7 +430,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     };
   }
 
-  async createWorkItem(input: CreateWorkItemInput): Promise<WorkItem> {
+  async createWorkItem(input: CreateWorkItemInput): Promise<WorkItemRecord> {
     const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
     const title = input.title.trim();
     if (!title) throw { code: 'CONFLICT', message: 'Work-item title must not be empty' };
@@ -452,7 +452,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     return workItemFromIssue(repository, created);
   }
 
-  async updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItem> {
+  async updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItemRecord> {
     const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
     assertIssueNumber(input.issueNumber);
     const current = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {}, credential);
@@ -812,7 +812,7 @@ function deriveWorkItemStatus(issue: GitHubIssueResponse): {
   return { status: 'unknown', source: 'conflict' };
 }
 
-function workItemFromIssue(repository: string, issue: GitHubIssueResponse): WorkItem {
+function workItemFromIssue(repository: string, issue: GitHubIssueResponse): WorkItemRecord {
   const derived = deriveWorkItemStatus(issue);
   return {
     repository,

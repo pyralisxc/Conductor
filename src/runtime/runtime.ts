@@ -33,7 +33,7 @@ import {
   type PromotePullRequestInput,
   type GetWorkItemStatusInput,
   type ListWorkItemsInput,
-  type WorkItem,
+  type WorkItemRecord,
   type WorkItemList,
   type CreateWorkItemInput,
   type UpdateWorkItemStatusInput,
@@ -213,7 +213,7 @@ export class ConductorToolRuntime {
   }
 
 
-  async workItemStatus(input: GetWorkItemStatusInput): Promise<ExecutionReceipt<WorkItem>> {
+  async workItemStatus(input: GetWorkItemStatusInput): Promise<ExecutionReceipt<WorkItemRecord>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
     return await this.executeRead(
       'work-item.status',

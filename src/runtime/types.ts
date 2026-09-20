@@ -207,7 +207,7 @@ export type MutableWorkItemStatus = Exclude<WorkItemStatus, 'unknown'>;
 export type NewWorkItemStatus = Exclude<MutableWorkItemStatus, 'done'>;
 export type WorkItemStatusSource = 'label' | 'issue-state' | 'default' | 'conflict';
 
-export interface WorkItem {
+export interface WorkItemRecord {
   repository: string;
   issueNumber: number;
   url: string;
@@ -223,7 +223,7 @@ export interface WorkItem {
 
 export interface WorkItemList {
   repository: string;
-  items: WorkItem[];
+  items: WorkItemRecord[];
   truncated: boolean;
 }
 
