@@ -14,9 +14,17 @@ import type {
   PromotePullRequestInput,
   PullRequestMergeMethod,
   ToolDiagnostic,
+  GetWorkItemStatusInput,
+  ListWorkItemsInput,
+  WorkItem,
+  WorkItemList,
+  WorkItemStatus,
+  MutableWorkItemStatus,
+  CreateWorkItemInput,
+  UpdateWorkItemStatusInput,
 } from '../runtime/types.js';
 import { normalizeToolError } from '../runtime/errors.js';
-import type { ProjectMutationProvider, ProjectPreflightProvider, PullRequestReadProvider } from './runtime.js';
+import type { ProjectMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, WorkItemMutationProvider } from './runtime.js';
 import {
   StaticGitHubCredentialProvider,
   type GitHubCredential,
@@ -46,6 +54,18 @@ interface GitHubPullRequestResponse {
   head: { ref: string; sha: string };
   base: { ref: string; sha: string };
   labels?: Array<{ name?: string | null }>;
+}
+
+interface GitHubIssueResponse {
+  number: number;
+  html_url: string;
+  title: string;
+  body?: string | null;
+  state: string;
+  labels?: Array<string | { name?: string | null }>;
+  created_at: string;
+  updated_at: string;
+  pull_request?: unknown;
 }
 
 interface GitHubCheckRunsResponse {
@@ -94,7 +114,7 @@ export interface GitHubRuntimeProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectMutationProvider, PullRequestReadProvider {
+export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectMutationProvider, PullRequestReadProvider, WorkItemMutationProvider {
   readonly id = 'github';
   private readonly credentials?: GitHubCredentialProvider;
   private readonly projects: ReadonlyMap<string, GitHubProjectConfiguration>;
@@ -122,6 +142,8 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
         unavailableCapability('github.write', 'write', 'AUTH_REQUIRED'),
         unavailableCapability('repository.read', 'read', 'AUTH_REQUIRED'),
         unavailableCapability('repository.write', 'write', 'AUTH_REQUIRED'),
+        unavailableCapability('work-item.read', 'read', 'AUTH_REQUIRED'),
+        unavailableCapability('work-item.write', 'write', 'AUTH_REQUIRED'),
       ];
     }
 
@@ -149,6 +171,8 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
       unverifiedCapability('repository.write', 'write', projectSpecific),
       availableCapability('pull-request.read', 'read'),
       unverifiedCapability('pull-request.write', 'write', projectSpecific),
+      availableCapability('work-item.read', 'read'),
+      unverifiedCapability('work-item.write', 'write', projectSpecific),
       availableCapability('ci.read', 'read'),
     ];
   }
@@ -374,6 +398,104 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
       body: JSON.stringify({ sha: commit.sha, force: false }),
     }, credential);
     return { repository, branch: input.branch, commitSha: commit.sha };
+  }
+
+
+  async getWorkItemStatus(input: GetWorkItemStatusInput): Promise<WorkItem> {
+    const { repository, credential } = await this.readableRepository(input.project, { issues: 'read' });
+    assertIssueNumber(input.issueNumber);
+    const issue = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {}, credential);
+    assertIssueIsWorkItem(issue);
+    return workItemFromIssue(repository, issue);
+  }
+
+  async listWorkItems(input: ListWorkItemsInput): Promise<WorkItemList> {
+    const { repository, credential } = await this.readableRepository(input.project, { issues: 'read' });
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
+    const statuses = input.statuses?.length ? new Set(input.statuses) : undefined;
+    const issues = await this.request<GitHubIssueResponse[]>(
+      repository,
+      '/issues?state=all&per_page=100&sort=updated&direction=desc',
+      {},
+      credential,
+    );
+    const filtered = issues
+      .filter((issue) => !issue.pull_request)
+      .map((issue) => workItemFromIssue(repository, issue))
+      .filter((item) => !statuses || statuses.has(item.status));
+    return {
+      repository,
+      items: filtered.slice(0, limit),
+      truncated: filtered.length > limit,
+    };
+  }
+
+  async createWorkItem(input: CreateWorkItemInput): Promise<WorkItem> {
+    const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
+    const title = input.title.trim();
+    if (!title) throw { code: 'CONFLICT', message: 'Work-item title must not be empty' };
+    if (title.length > 256) throw { code: 'CONFLICT', message: 'Work-item title must be 256 characters or fewer' };
+    const status = input.status ?? 'backlog';
+    const labels = normalizedLabels(input.labels);
+    if (labels.some(isWorkItemStatusLabel)) {
+      throw { code: 'CONFLICT', message: 'Work-item labels may not set reserved status:* labels directly' };
+    }
+    await this.ensureWorkItemStatusLabel(repository, credential, status);
+    const created = await this.request<GitHubIssueResponse>(repository, '/issues', {
+      method: 'POST',
+      body: JSON.stringify({
+        title,
+        body: input.body ?? '',
+        labels: [...labels, workItemStatusLabel(status)],
+      }),
+    }, credential);
+    return workItemFromIssue(repository, created);
+  }
+
+  async updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItem> {
+    const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
+    assertIssueNumber(input.issueNumber);
+    const current = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {}, credential);
+    assertIssueIsWorkItem(current);
+    await this.ensureWorkItemStatusLabel(repository, credential, input.status);
+    const labels = issueLabelNames(current).filter((label) => !isWorkItemStatusLabel(label));
+    const nextLabels = [...labels, workItemStatusLabel(input.status)].sort((a, b) => a.localeCompare(b));
+    const updated = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ state: input.status === 'done' ? 'closed' : 'open' }),
+    }, credential);
+    const updatedLabels = await this.request<GitHubLabelResponse[]>(repository, `/issues/${input.issueNumber}/labels`, {
+      method: 'PUT',
+      body: JSON.stringify({ labels: nextLabels }),
+    }, credential);
+    return workItemFromIssue(repository, {
+      ...updated,
+      labels: updatedLabels,
+    });
+  }
+
+  private async ensureWorkItemStatusLabel(
+    repository: string,
+    credential: GitHubCredential,
+    status: MutableWorkItemStatus,
+  ): Promise<void> {
+    const name = workItemStatusLabel(status);
+    const response = await this.fetch(
+      `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/labels/${encodeURIComponent(name)}`,
+      { headers: this.headers(credential.token) },
+    );
+    if (response.ok) return;
+    if (response.status !== 404) throw await githubResponseError(response);
+    const created = await this.fetch(`${this.apiBaseUrl}/repos/${encodeRepository(repository)}/labels`, {
+      method: 'POST',
+      headers: this.headers(credential.token),
+      body: JSON.stringify({
+        name,
+        color: workItemStatusColor(status),
+        description: `Conductor work status: ${status}`,
+      }),
+    });
+    if (!created.ok && created.status !== 422) throw await githubResponseError(created);
   }
 
   async createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }> {
@@ -637,6 +759,84 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 }
 
+
+const WORK_ITEM_STATUS_PREFIX = 'status:';
+const WORK_ITEM_STATUSES: readonly MutableWorkItemStatus[] = [
+  'backlog', 'ready', 'in-progress', 'blocked', 'review', 'done',
+];
+
+function workItemStatusLabel(status: MutableWorkItemStatus): string {
+  return `${WORK_ITEM_STATUS_PREFIX}${status}`;
+}
+
+function workItemStatusColor(status: MutableWorkItemStatus): string {
+  const colors: Record<MutableWorkItemStatus, string> = {
+    backlog: 'D0D7DE',
+    ready: '1F883D',
+    'in-progress': '0969DA',
+    blocked: 'CF222E',
+    review: '8250DF',
+    done: '6E7781',
+  };
+  return colors[status];
+}
+
+function isWorkItemStatusLabel(label: string): boolean {
+  return label.toLowerCase().startsWith(WORK_ITEM_STATUS_PREFIX);
+}
+
+function issueLabelNames(issue: GitHubIssueResponse): string[] {
+  return normalizedLabels((issue.labels ?? []).flatMap((label) => {
+    if (typeof label === 'string') return [label];
+    return label.name ? [label.name] : [];
+  }));
+}
+
+function deriveWorkItemStatus(issue: GitHubIssueResponse): {
+  status: WorkItemStatus;
+  source: import('../runtime/types.js').WorkItemStatusSource;
+} {
+  const statuses = issueLabelNames(issue)
+    .filter(isWorkItemStatusLabel)
+    .map((label) => label.slice(WORK_ITEM_STATUS_PREFIX.length).toLowerCase())
+    .filter((value): value is MutableWorkItemStatus => WORK_ITEM_STATUSES.includes(value as MutableWorkItemStatus));
+
+  if (issue.state === 'closed') {
+    if (statuses.length === 0) return { status: 'done', source: 'issue-state' };
+    if (statuses.length === 1 && statuses[0] === 'done') return { status: 'done', source: 'label' };
+    return { status: 'unknown', source: 'conflict' };
+  }
+
+  if (statuses.length === 0) return { status: 'backlog', source: 'default' };
+  if (statuses.length === 1 && statuses[0] !== 'done') return { status: statuses[0], source: 'label' };
+  return { status: 'unknown', source: 'conflict' };
+}
+
+function workItemFromIssue(repository: string, issue: GitHubIssueResponse): WorkItem {
+  const derived = deriveWorkItemStatus(issue);
+  return {
+    repository,
+    issueNumber: issue.number,
+    url: issue.html_url,
+    title: issue.title,
+    body: issue.body ?? '',
+    state: issue.state === 'closed' ? 'closed' : 'open',
+    status: derived.status,
+    statusSource: derived.source,
+    labels: issueLabelNames(issue).sort((a, b) => a.localeCompare(b)),
+    createdAt: issue.created_at,
+    updatedAt: issue.updated_at,
+  };
+}
+
+function assertIssueIsWorkItem(issue: GitHubIssueResponse): void {
+  if (issue.pull_request) throw { code: 'CONFLICT', message: `GitHub issue #${issue.number} is a pull request, not a work item` };
+}
+
+function assertIssueNumber(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1) throw { code: 'CONFLICT', message: 'issueNumber must be a positive integer' };
+}
+
 function assertPullRequestNumber(value: number): void {
   if (!Number.isSafeInteger(value) || value < 1) throw { code: 'CONFLICT', message: 'pullRequestNumber must be a positive integer' };
 }
@@ -853,10 +1053,3 @@ async function githubResponseError(response: Response): Promise<unknown> {
     }] : undefined,
   };
 }
-
-
-
-
-
-
-

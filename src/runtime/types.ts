@@ -1,6 +1,11 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
 
-export type ToolOperationName = 'capabilities' | 'preflight_project' | 'pull-request.status';
+export type ToolOperationName =
+  | 'capabilities'
+  | 'preflight_project'
+  | 'pull-request.status'
+  | 'work-item.status'
+  | 'work-item.list';
 
 export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
@@ -12,7 +17,9 @@ export type MutationOperationName =
   | 'pull-request.comment.create'
   | 'pull-request.labels.update'
   | 'pull-request.merge.integration'
-  | 'pull-request.merge.promote';
+  | 'pull-request.merge.promote'
+  | 'work-item.create'
+  | 'work-item.update-status';
 
 export type RuntimeOperationName =
   | ToolOperationName
@@ -33,6 +40,8 @@ export type DevelopmentCapability =
   | 'git.push'
   | 'pull-request.read'
   | 'pull-request.write'
+  | 'work-item.read'
+  | 'work-item.write'
   | 'ci.read'
   | 'development-intelligence.read';
 
@@ -185,6 +194,66 @@ export interface PullRequestStatus {
   workflowRuns: PullRequestWorkflowRunState[];
 }
 
+export type WorkItemStatus =
+  | 'backlog'
+  | 'ready'
+  | 'in-progress'
+  | 'blocked'
+  | 'review'
+  | 'done'
+  | 'unknown';
+
+export type MutableWorkItemStatus = Exclude<WorkItemStatus, 'unknown'>;
+export type NewWorkItemStatus = Exclude<MutableWorkItemStatus, 'done'>;
+export type WorkItemStatusSource = 'label' | 'issue-state' | 'default' | 'conflict';
+
+export interface WorkItem {
+  repository: string;
+  issueNumber: number;
+  url: string;
+  title: string;
+  body: string;
+  state: 'open' | 'closed';
+  status: WorkItemStatus;
+  statusSource: WorkItemStatusSource;
+  labels: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkItemList {
+  repository: string;
+  items: WorkItem[];
+  truncated: boolean;
+}
+
+export interface GetWorkItemStatusInput {
+  project: ProjectReference;
+  issueNumber: number;
+}
+
+export interface ListWorkItemsInput {
+  project: ProjectReference;
+  statuses?: WorkItemStatus[];
+  limit?: number;
+}
+
+export interface CreateWorkItemInput {
+  project: ProjectReference;
+  title: string;
+  body?: string;
+  status?: NewWorkItemStatus;
+  labels?: string[];
+  idempotencyKey: string;
+}
+
+export interface UpdateWorkItemStatusInput {
+  project: ProjectReference;
+  issueNumber: number;
+  status: MutableWorkItemStatus;
+  idempotencyKey: string;
+}
+
 export interface UpdatePullRequestLabelsInput {
   project: ProjectReference;
   pullRequestNumber: number;
@@ -283,6 +352,3 @@ export interface FailedExecutionReceipt extends ReceiptBase {
 export type ExecutionReceipt<Result> =
   | SuccessfulExecutionReceipt<Result>
   | FailedExecutionReceipt;
-
-
-
