@@ -19,7 +19,8 @@ export type MutationOperationName =
   | 'pull-request.merge.integration'
   | 'pull-request.merge.promote'
   | 'work-item.create'
-  | 'work-item.update-status';
+  | 'work-item.update-status'
+  | 'work-item.classification.update';
 
 export type RuntimeOperationName =
   | ToolOperationName
@@ -207,6 +208,30 @@ export type MutableWorkItemStatus = Exclude<WorkItemStatus, 'unknown'>;
 export type NewWorkItemStatus = Exclude<MutableWorkItemStatus, 'done'>;
 export type WorkItemStatusSource = 'label' | 'issue-state' | 'default' | 'conflict';
 
+export type WorkItemKind =
+  | 'bug'
+  | 'feature'
+  | 'investigation'
+  | 'improvement'
+  | 'maintenance'
+  | 'operations'
+  | 'unknown';
+
+export type MutableWorkItemKind = Exclude<WorkItemKind, 'unknown'>;
+
+export type WorkItemOrigin =
+  | 'human'
+  | 'agent-audit'
+  | 'di-finding'
+  | 'ci'
+  | 'runtime'
+  | 'dependency'
+  | 'user-feedback'
+  | 'unknown';
+
+export type MutableWorkItemOrigin = Exclude<WorkItemOrigin, 'unknown'>;
+export type WorkItemClassificationSource = 'label' | 'default' | 'conflict';
+
 export interface WorkItemRecord {
   repository: string;
   issueNumber: number;
@@ -216,6 +241,10 @@ export interface WorkItemRecord {
   state: 'open' | 'closed';
   status: WorkItemStatus;
   statusSource: WorkItemStatusSource;
+  kind: WorkItemKind;
+  kindSource: WorkItemClassificationSource;
+  origin: WorkItemOrigin;
+  originSource: WorkItemClassificationSource;
   labels: string[];
   createdAt: string;
   updatedAt: string;
@@ -235,6 +264,8 @@ export interface GetWorkItemStatusInput {
 export interface ListWorkItemsInput {
   project: ProjectReference;
   statuses?: WorkItemStatus[];
+  kinds?: WorkItemKind[];
+  origins?: WorkItemOrigin[];
   limit?: number;
 }
 
@@ -243,6 +274,8 @@ export interface CreateWorkItemInput {
   title: string;
   body?: string;
   status?: NewWorkItemStatus;
+  kind?: WorkItemKind;
+  origin?: WorkItemOrigin;
   labels?: string[];
   idempotencyKey: string;
 }
@@ -251,6 +284,14 @@ export interface UpdateWorkItemStatusInput {
   project: ProjectReference;
   issueNumber: number;
   status: MutableWorkItemStatus;
+  idempotencyKey: string;
+}
+
+export interface UpdateWorkItemClassificationInput {
+  project: ProjectReference;
+  issueNumber: number;
+  kind?: WorkItemKind;
+  origin?: WorkItemOrigin;
   idempotencyKey: string;
 }
 

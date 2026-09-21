@@ -11,6 +11,8 @@ v0 always exposes the core non-mutating runtime tools:
 - `capabilities()` reports the runtime operations, configured provider capabilities, access level, authentication state, and health actually available now.
 - `preflight_project(project, intent)` verifies only the surfaces required for `inspect`, `develop` (default), or `execute`.
 - `pull-request.status(project, pullRequestNumber)` is exposed when a GitHub PR provider is configured and returns exact head/base identity plus labels, check runs, and workflow runs.
+- `work-item.status(project, issueNumber)` reads one durable work item with normalized lifecycle status, kind, and origin.
+- `work-item.list(project, ...)` lists issue-backed work and can filter by normalized status, kind, and origin. Pull requests are excluded.
 
 When explicitly enabled with durable Redis idempotency state, it exposes bounded GitHub mutations:
 
@@ -21,6 +23,17 @@ When explicitly enabled with durable Redis idempotency state, it exposes bounded
 - `pull-request.labels.update` adds/removes labels while preserving unrelated labels.
 - `pull-request.merge.integration` merges only an exact head/base candidate from a bounded work/repair/audit/release source into a non-accepted integration branch.
 - `pull-request.merge.promote` merges only an exact head/base candidate into the repository default branch and requires a non-empty owner approval reference.
+- `work-item.create` creates durable issue-backed work with optional normalized status, kind, and origin.
+- `work-item.update-status` changes only lifecycle status; `done` closes the backing issue and active statuses reopen it.
+- `work-item.classification.update` changes kind and/or origin without changing lifecycle status. `unknown` clears that classification.
+
+The initial work-item vocabulary is deliberately small:
+
+- status: `backlog`, `ready`, `in-progress`, `blocked`, `review`, `done`;
+- kind: `bug`, `feature`, `investigation`, `improvement`, `maintenance`, `operations`;
+- origin: `human`, `agent-audit`, `di-finding`, `ci`, `runtime`, `dependency`, `user-feedback`.
+
+Missing or conflicting classification is reported as `unknown`; Conductor does not guess. GitHub encodes these dimensions as reserved `status:*`, `kind:*`, and `origin:*` labels while preserving unrelated native labels. Automation eligibility is intentionally not a work-item field.
 
 No generic “do anything” tool exists.
 
@@ -81,7 +94,3 @@ The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the confi
 - Receipts are stable and carry provider identifiers, including merge commit SHA when a merge succeeds.
 - Retrying the same mutation cannot repeat its side effect through the idempotency executor.
 - Existing orchestration policy and tests remain intact.
-
-
-
-

@@ -11,7 +11,22 @@ import {
 } from '../src/index.js';
 
 function githubProvider() {
-  const labels = new Set(['status:ready', 'status:in-progress', 'area:di']);
+  let currentLabels = ['status:ready', 'kind:investigation', 'origin:di-finding', 'area:di'];
+  let currentState = 'open';
+  let currentTitle = 'Improve semantic orientation';
+  let currentBody = 'Benchmark Game Studio Core.';
+
+  const issue = () => ({
+    number: 7,
+    html_url: 'https://github.com/pyralisxc/Development-Intelligence/issues/7',
+    title: currentTitle,
+    body: currentBody,
+    state: currentState,
+    labels: currentLabels.map((name) => ({ name })),
+    created_at: '2026-09-20T00:00:00Z',
+    updated_at: '2026-09-20T01:00:00Z',
+  });
+
   return new GitHubRuntimeProvider({
     credentials: {
       async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
@@ -30,72 +45,44 @@ function githubProvider() {
       const url = String(input);
       const method = init?.method ?? 'GET';
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-      if (url.includes('/labels/status%3A') && method === 'GET') return Response.json({ name: decodeURIComponent(url.split('/').at(-1)!) });
-      if (url.endsWith('/issues') && method === 'POST') {
-        for (const label of body.labels ?? []) labels.add(label);
-        return Response.json({
-          number: 7,
-          html_url: 'https://github.com/pyralisxc/Development-Intelligence/issues/7',
-          title: body.title,
-          body: body.body,
-          state: 'open',
-          labels: [...labels].filter((label) => (body.labels ?? []).includes(label)).map((name) => ({ name })),
-          created_at: '2026-09-20T00:00:00Z',
-          updated_at: '2026-09-20T00:00:00Z',
-        });
+
+      if (url.includes('/labels/') && method === 'GET') {
+        return Response.json({ name: decodeURIComponent(url.split('/').at(-1)!) });
       }
-      if (url.endsWith('/issues/7') && method === 'GET') return Response.json({
-        number: 7,
-        html_url: 'https://github.com/pyralisxc/Development-Intelligence/issues/7',
-        title: 'Improve semantic orientation',
-        body: 'Benchmark Game Studio Core.',
-        state: 'open',
-        labels: [{ name: 'status:ready' }, { name: 'area:di' }],
-        created_at: '2026-09-20T00:00:00Z',
-        updated_at: '2026-09-20T00:00:00Z',
-      });
+      if (url.endsWith('/labels') && method === 'POST') {
+        return Response.json(body, { status: 201 });
+      }
+      if (url.endsWith('/issues') && method === 'POST') {
+        currentTitle = body.title;
+        currentBody = body.body ?? '';
+        currentState = 'open';
+        currentLabels = body.labels ?? [];
+        return Response.json(issue(), { status: 201 });
+      }
+      if (url.endsWith('/issues/7') && method === 'GET') return Response.json(issue());
       if (url.includes('/issues?') && method === 'GET') return Response.json([
+        issue(),
         {
-          number: 7,
-          html_url: 'https://github.com/pyralisxc/Development-Intelligence/issues/7',
-          title: 'Improve semantic orientation',
-          body: 'Benchmark Game Studio Core.',
-          state: 'open',
-          labels: [{ name: 'status:ready' }, { name: 'area:di' }],
-          created_at: '2026-09-20T00:00:00Z',
-          updated_at: '2026-09-20T00:00:00Z',
-        },
-        {
+          ...issue(),
           number: 8,
           html_url: 'https://github.com/pyralisxc/Development-Intelligence/pull/8',
-          title: 'PR is not a work item',
-          body: '',
-          state: 'open',
-          labels: [],
-          created_at: '2026-09-20T00:00:00Z',
-          updated_at: '2026-09-20T00:00:00Z',
           pull_request: {},
         },
       ]);
-      if (url.endsWith('/issues/7') && method === 'PATCH') return Response.json({
-        number: 7,
-        html_url: 'https://github.com/pyralisxc/Development-Intelligence/issues/7',
-        title: 'Improve semantic orientation',
-        body: 'Benchmark Game Studio Core.',
-        state: body.state,
-        labels: [{ name: 'status:ready' }, { name: 'area:di' }],
-        created_at: '2026-09-20T00:00:00Z',
-        updated_at: '2026-09-20T01:00:00Z',
-      });
+      if (url.endsWith('/issues/7') && method === 'PATCH') {
+        currentState = body.state ?? currentState;
+        return Response.json(issue());
+      }
       if (url.endsWith('/issues/7/labels') && method === 'PUT') {
-        return Response.json((body.labels ?? []).map((name: string) => ({ name })));
+        currentLabels = body.labels ?? [];
+        return Response.json(currentLabels.map((name: string) => ({ name })));
       }
       throw new Error(`Unexpected request ${method} ${url}`);
     },
   });
 }
 
-test('GitHub issues normalize into provider-neutral work-item statuses', async () => {
+test('GitHub issues normalize lifecycle, kind, and origin without replacing native labels', async () => {
   const provider = githubProvider();
   const project = { id: 'pyralisxc/Development-Intelligence' };
 
@@ -104,16 +91,30 @@ test('GitHub issues normalize into provider-neutral work-item statuses', async (
     title: 'Improve semantic orientation',
     body: 'Benchmark Game Studio Core.',
     status: 'ready',
+    kind: 'investigation',
+    origin: 'di-finding',
     labels: ['area:di'],
     idempotencyKey: 'work-item:create:semantic-orientation',
   });
   assert.equal(created.status, 'ready');
+  assert.equal(created.kind, 'investigation');
+  assert.equal(created.origin, 'di-finding');
 
   const status = await provider.getWorkItemStatus({ project, issueNumber: 7 });
   assert.equal(status.status, 'ready');
   assert.equal(status.statusSource, 'label');
+  assert.equal(status.kind, 'investigation');
+  assert.equal(status.kindSource, 'label');
+  assert.equal(status.origin, 'di-finding');
+  assert.equal(status.originSource, 'label');
 
-  const listed = await provider.listWorkItems({ project, statuses: ['ready'], limit: 20 });
+  const listed = await provider.listWorkItems({
+    project,
+    statuses: ['ready'],
+    kinds: ['investigation'],
+    origins: ['di-finding'],
+    limit: 20,
+  });
   assert.equal(listed.items.length, 1);
   assert.equal(listed.items[0]?.issueNumber, 7);
 
@@ -124,10 +125,47 @@ test('GitHub issues normalize into provider-neutral work-item statuses', async (
     idempotencyKey: 'work-item:status:7:in-progress',
   });
   assert.equal(updated.status, 'in-progress');
+  assert.equal(updated.kind, 'investigation');
+  assert.equal(updated.origin, 'di-finding');
   assert.equal(updated.labels.includes('area:di'), true);
+
+  const classified = await provider.updateWorkItemClassification({
+    project,
+    issueNumber: 7,
+    kind: 'improvement',
+    origin: 'agent-audit',
+    idempotencyKey: 'work-item:classification:7:improvement',
+  });
+  assert.equal(classified.status, 'in-progress');
+  assert.equal(classified.kind, 'improvement');
+  assert.equal(classified.origin, 'agent-audit');
+  assert.equal(classified.labels.includes('area:di'), true);
+
+  const cleared = await provider.updateWorkItemClassification({
+    project,
+    issueNumber: 7,
+    kind: 'unknown',
+    idempotencyKey: 'work-item:classification:7:clear-kind',
+  });
+  assert.equal(cleared.kind, 'unknown');
+  assert.equal(cleared.kindSource, 'default');
+  assert.equal(cleared.origin, 'agent-audit');
 });
 
-test('runtime and MCP expose work-item reads and human-triggered status mutations', async () => {
+test('reserved classification labels cannot bypass normalized work-item fields', async () => {
+  const provider = githubProvider();
+  await assert.rejects(
+    provider.createWorkItem({
+      project: { id: 'pyralisxc/Development-Intelligence' },
+      title: 'Invalid direct classification',
+      labels: ['kind:bug'],
+      idempotencyKey: 'work-item:create:invalid-label',
+    }),
+    (error: any) => error?.code === 'CONFLICT' && /reserved/.test(error.message),
+  );
+});
+
+test('runtime and MCP expose human-directed work routing and classification', async () => {
   const provider = githubProvider();
   const runtime = new ConductorToolRuntime({
     providers: [provider],
@@ -140,7 +178,13 @@ test('runtime and MCP expose work-item reads and human-triggered status mutation
   assert.equal(capabilities.status, 'succeeded');
   if (capabilities.status === 'succeeded') {
     const names = capabilities.result.operations.map((operation) => operation.name);
-    for (const name of ['work-item.status', 'work-item.list', 'work-item.create', 'work-item.update-status']) {
+    for (const name of [
+      'work-item.status',
+      'work-item.list',
+      'work-item.create',
+      'work-item.update-status',
+      'work-item.classification.update',
+    ]) {
       assert.equal(names.includes(name as any), true);
     }
   }
@@ -152,7 +196,13 @@ test('runtime and MCP expose work-item reads and human-triggered status mutation
   await client.connect(clientTransport);
   const listed = await client.listTools();
   const names = listed.tools.map((tool) => tool.name);
-  for (const name of ['work-item.status', 'work-item.list', 'work-item.create', 'work-item.update-status']) {
+  for (const name of [
+    'work-item.status',
+    'work-item.list',
+    'work-item.create',
+    'work-item.update-status',
+    'work-item.classification.update',
+  ]) {
     assert.equal(names.includes(name), true);
   }
   await client.close();
