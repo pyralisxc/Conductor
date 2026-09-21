@@ -37,6 +37,7 @@ import {
   type WorkItemList,
   type CreateWorkItemInput,
   type UpdateWorkItemStatusInput,
+  type UpdateWorkItemClassificationInput,
 } from './types.js';
 import { IdempotentMutationExecutor } from './idempotency.js';
 
@@ -67,6 +68,7 @@ const WORK_ITEM_READ_DEFINITIONS: readonly ToolDefinition[] = [
 const WORK_ITEM_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'work-item.create', description: 'Create one durable work item in the owning project.', mutates: true },
   { name: 'work-item.update-status', description: 'Move one durable work item to an explicit normalized status.', mutates: true },
+  { name: 'work-item.classification.update', description: 'Update normalized work kind and/or origin without changing lifecycle status.', mutates: true },
 ];
 
 const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
@@ -248,6 +250,13 @@ export class ConductorToolRuntime {
   async updateWorkItemStatus(input: UpdateWorkItemStatusInput) {
     return await this.executeWorkItemMutation(input, 'work-item.update-status', async (provider) => {
       const result = await provider.updateWorkItemStatus(input);
+      return { result, identifiers: { issueNumber: result.issueNumber } };
+    });
+  }
+
+  async updateWorkItemClassification(input: UpdateWorkItemClassificationInput) {
+    return await this.executeWorkItemMutation(input, 'work-item.classification.update', async (provider) => {
+      const result = await provider.updateWorkItemClassification(input);
       return { result, identifiers: { issueNumber: result.issueNumber } };
     });
   }

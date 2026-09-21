@@ -32,7 +32,7 @@ const receiptBase = {
     'capabilities', 'preflight_project', 'pull-request.status', 'work-item.status', 'work-item.list',
     'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
     'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.promote',
-    'work-item.create', 'work-item.update-status',
+    'work-item.create', 'work-item.update-status', 'work-item.classification.update',
   ]),
   target: z.object({
     kind: z.enum(['runtime', 'project', 'repository', 'workspace']),
@@ -71,7 +71,7 @@ const capabilitiesReceiptSchema = z.union([
           'capabilities', 'preflight_project', 'pull-request.status', 'work-item.status', 'work-item.list',
           'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
           'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.promote',
-          'work-item.create', 'work-item.update-status',
+          'work-item.create', 'work-item.update-status', 'work-item.classification.update',
         ]),
         description: z.string(),
         mutates: z.boolean(),
@@ -155,6 +155,12 @@ const workItemWriteStatusSchema = z.enum([
 const newWorkItemStatusSchema = z.enum([
   'backlog', 'ready', 'in-progress', 'blocked', 'review',
 ]);
+const workItemKindSchema = z.enum([
+  'bug', 'feature', 'investigation', 'improvement', 'maintenance', 'operations', 'unknown',
+]);
+const workItemOriginSchema = z.enum([
+  'human', 'agent-audit', 'di-finding', 'ci', 'runtime', 'dependency', 'user-feedback', 'unknown',
+]);
 const readReceiptSchema = z.object({ receipt: z.union([
   z.object({ ...receiptBase, status: z.literal('succeeded'), result: z.record(z.string(), z.unknown()) }),
   failedReceiptSchema,
@@ -236,6 +242,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       inputSchema: z.object({
         project: projectSchema,
         statuses: z.array(workItemReadStatusSchema).max(7).optional(),
+        kinds: z.array(workItemKindSchema).max(7).optional(),
+        origins: z.array(workItemOriginSchema).max(8).optional(),
         limit: z.number().int().min(1).max(100).default(50),
       }),
       outputSchema: readReceiptSchema,
@@ -381,12 +389,14 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
   if (runtime.workItemMutationsEnabled) {
     server.registerTool('work-item.create', {
       title: 'Create a durable work item',
-      description: 'Create one durable work item in the owning project. GitHub Issues are the initial backing store; no scheduling or autonomous assignment occurs.',
+      description: 'Create one durable work item in the owning project. GitHub Issues are the initial backing store; no scheduling or autonomous assignment occurs. Bodies may start sparse; when known prefer Problem, Desired outcome, Evidence, Constraints, and Acceptance sections.',
       inputSchema: z.object({
         project: projectSchema,
         title: z.string().min(1).max(256),
         body: z.string().max(100000).optional(),
         status: newWorkItemStatusSchema.default('backlog'),
+        kind: workItemKindSchema.optional(),
+        origin: workItemOriginSchema.optional(),
         labels: z.array(z.string().min(1).max(100)).max(20).optional(),
         idempotencyKey: z.string().min(8).max(200),
       }),
@@ -396,6 +406,26 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     }, async (input, extra) => {
       requireWriteScope(extra.authInfo?.scopes);
       return result(await runtime.createWorkItem(input));
+    });
+
+    server.registerTool('work-item.classification.update', {
+      title: 'Classify a work item',
+      description: 'Update normalized work kind and/or origin. Use unknown to clear a classification; unrelated labels and lifecycle status are preserved.',
+      inputSchema: z.object({
+        project: projectSchema,
+        issueNumber: z.number().int().positive(),
+        kind: workItemKindSchema.optional(),
+        origin: workItemOriginSchema.optional(),
+        idempotencyKey: z.string().min(8).max(200),
+      }).refine((value) => value.kind !== undefined || value.origin !== undefined, {
+        message: 'At least one of kind or origin is required',
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.updateWorkItemClassification(input));
     });
 
     server.registerTool('work-item.update-status', {

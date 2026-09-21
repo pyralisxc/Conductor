@@ -20,8 +20,14 @@ import type {
   WorkItemList,
   WorkItemStatus,
   MutableWorkItemStatus,
+  WorkItemKind,
+  MutableWorkItemKind,
+  WorkItemOrigin,
+  MutableWorkItemOrigin,
+  WorkItemClassificationSource,
   CreateWorkItemInput,
   UpdateWorkItemStatusInput,
+  UpdateWorkItemClassificationInput,
 } from '../runtime/types.js';
 import { normalizeToolError } from '../runtime/errors.js';
 import type { ProjectMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, WorkItemMutationProvider } from './runtime.js';
@@ -413,6 +419,8 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     const { repository, credential } = await this.readableRepository(input.project, { issues: 'read' });
     const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
     const statuses = input.statuses?.length ? new Set(input.statuses) : undefined;
+    const kinds = input.kinds?.length ? new Set(input.kinds) : undefined;
+    const origins = input.origins?.length ? new Set(input.origins) : undefined;
     const issues = await this.request<GitHubIssueResponse[]>(
       repository,
       '/issues?state=all&per_page=100&sort=updated&direction=desc',
@@ -422,7 +430,9 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     const filtered = issues
       .filter((issue) => !issue.pull_request)
       .map((issue) => workItemFromIssue(repository, issue))
-      .filter((item) => !statuses || statuses.has(item.status));
+      .filter((item) => !statuses || statuses.has(item.status))
+      .filter((item) => !kinds || kinds.has(item.kind))
+      .filter((item) => !origins || origins.has(item.origin));
     return {
       repository,
       items: filtered.slice(0, limit),
@@ -436,17 +446,26 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     if (!title) throw { code: 'CONFLICT', message: 'Work-item title must not be empty' };
     if (title.length > 256) throw { code: 'CONFLICT', message: 'Work-item title must be 256 characters or fewer' };
     const status = input.status ?? 'backlog';
+    const kind = input.kind ?? 'unknown';
+    const origin = input.origin ?? 'unknown';
     const labels = normalizedLabels(input.labels);
-    if (labels.some(isWorkItemStatusLabel)) {
-      throw { code: 'CONFLICT', message: 'Work-item labels may not set reserved status:* labels directly' };
+    if (labels.some(isWorkItemReservedLabel)) {
+      throw { code: 'CONFLICT', message: 'Work-item labels may not set reserved status:*, kind:*, or origin:* labels directly' };
     }
     await this.ensureWorkItemStatusLabel(repository, credential, status);
+    if (kind !== 'unknown') await this.ensureWorkItemKindLabel(repository, credential, kind);
+    if (origin !== 'unknown') await this.ensureWorkItemOriginLabel(repository, credential, origin);
     const created = await this.request<GitHubIssueResponse>(repository, '/issues', {
       method: 'POST',
       body: JSON.stringify({
         title,
         body: input.body ?? '',
-        labels: [...labels, workItemStatusLabel(status)],
+        labels: [
+          ...labels,
+          workItemStatusLabel(status),
+          ...(kind === 'unknown' ? [] : [workItemKindLabel(kind)]),
+          ...(origin === 'unknown' ? [] : [workItemOriginLabel(origin)]),
+        ],
       }),
     }, credential);
     return workItemFromIssue(repository, created);
@@ -474,12 +493,92 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     });
   }
 
+  async updateWorkItemClassification(input: UpdateWorkItemClassificationInput): Promise<WorkItemRecord> {
+    const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
+    assertIssueNumber(input.issueNumber);
+    if (input.kind === undefined && input.origin === undefined) {
+      throw { code: 'CONFLICT', message: 'At least one of kind or origin must be provided' };
+    }
+    const current = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {}, credential);
+    assertIssueIsWorkItem(current);
+    let labels = issueLabelNames(current);
+
+    if (input.kind !== undefined) {
+      labels = labels.filter((label) => !isWorkItemKindLabel(label));
+      if (input.kind !== 'unknown') {
+        await this.ensureWorkItemKindLabel(repository, credential, input.kind);
+        labels.push(workItemKindLabel(input.kind));
+      }
+    }
+    if (input.origin !== undefined) {
+      labels = labels.filter((label) => !isWorkItemOriginLabel(label));
+      if (input.origin !== 'unknown') {
+        await this.ensureWorkItemOriginLabel(repository, credential, input.origin);
+        labels.push(workItemOriginLabel(input.origin));
+      }
+    }
+
+    const updatedLabels = await this.request<GitHubLabelResponse[]>(
+      repository,
+      `/issues/${input.issueNumber}/labels`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ labels: normalizedLabels(labels).sort((a, b) => a.localeCompare(b)) }),
+      },
+      credential,
+    );
+    return workItemFromIssue(repository, { ...current, labels: updatedLabels });
+  }
+
   private async ensureWorkItemStatusLabel(
     repository: string,
     credential: GitHubCredential,
     status: MutableWorkItemStatus,
   ): Promise<void> {
-    const name = workItemStatusLabel(status);
+    await this.ensureWorkItemLabel(
+      repository,
+      credential,
+      workItemStatusLabel(status),
+      workItemStatusColor(status),
+      `Conductor work status: ${status}`,
+    );
+  }
+
+  private async ensureWorkItemKindLabel(
+    repository: string,
+    credential: GitHubCredential,
+    kind: MutableWorkItemKind,
+  ): Promise<void> {
+    await this.ensureWorkItemLabel(
+      repository,
+      credential,
+      workItemKindLabel(kind),
+      workItemKindColor(kind),
+      `Conductor work kind: ${kind}`,
+    );
+  }
+
+  private async ensureWorkItemOriginLabel(
+    repository: string,
+    credential: GitHubCredential,
+    origin: MutableWorkItemOrigin,
+  ): Promise<void> {
+    await this.ensureWorkItemLabel(
+      repository,
+      credential,
+      workItemOriginLabel(origin),
+      workItemOriginColor(origin),
+      `Conductor work origin: ${origin}`,
+    );
+  }
+
+  private async ensureWorkItemLabel(
+    repository: string,
+    credential: GitHubCredential,
+    name: string,
+    color: string,
+    description: string,
+  ): Promise<void> {
     const response = await this.fetch(
       `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/labels/${encodeURIComponent(name)}`,
       { headers: this.headers(credential.token) },
@@ -489,11 +588,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     const created = await this.fetch(`${this.apiBaseUrl}/repos/${encodeRepository(repository)}/labels`, {
       method: 'POST',
       headers: this.headers(credential.token),
-      body: JSON.stringify({
-        name,
-        color: workItemStatusColor(status),
-        description: `Conductor work status: ${status}`,
-      }),
+      body: JSON.stringify({ name, color, description }),
     });
     if (!created.ok && created.status !== 422) throw await githubResponseError(created);
   }
@@ -761,12 +856,29 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
 
 
 const WORK_ITEM_STATUS_PREFIX = 'status:';
+const WORK_ITEM_KIND_PREFIX = 'kind:';
+const WORK_ITEM_ORIGIN_PREFIX = 'origin:';
+
 const WORK_ITEM_STATUSES: readonly MutableWorkItemStatus[] = [
   'backlog', 'ready', 'in-progress', 'blocked', 'review', 'done',
+];
+const WORK_ITEM_KINDS: readonly MutableWorkItemKind[] = [
+  'bug', 'feature', 'investigation', 'improvement', 'maintenance', 'operations',
+];
+const WORK_ITEM_ORIGINS: readonly MutableWorkItemOrigin[] = [
+  'human', 'agent-audit', 'di-finding', 'ci', 'runtime', 'dependency', 'user-feedback',
 ];
 
 function workItemStatusLabel(status: MutableWorkItemStatus): string {
   return `${WORK_ITEM_STATUS_PREFIX}${status}`;
+}
+
+function workItemKindLabel(kind: MutableWorkItemKind): string {
+  return `${WORK_ITEM_KIND_PREFIX}${kind}`;
+}
+
+function workItemOriginLabel(origin: MutableWorkItemOrigin): string {
+  return `${WORK_ITEM_ORIGIN_PREFIX}${origin}`;
 }
 
 function workItemStatusColor(status: MutableWorkItemStatus): string {
@@ -781,8 +893,36 @@ function workItemStatusColor(status: MutableWorkItemStatus): string {
   return colors[status];
 }
 
+function workItemKindColor(kind: MutableWorkItemKind): string {
+  const colors: Record<MutableWorkItemKind, string> = {
+    bug: 'CF222E',
+    feature: '8250DF',
+    investigation: '0969DA',
+    improvement: '1F883D',
+    maintenance: 'BF8700',
+    operations: '0E8A16',
+  };
+  return colors[kind];
+}
+
+function workItemOriginColor(_origin: MutableWorkItemOrigin): string {
+  return 'D4C5F9';
+}
+
 function isWorkItemStatusLabel(label: string): boolean {
   return label.toLowerCase().startsWith(WORK_ITEM_STATUS_PREFIX);
+}
+
+function isWorkItemKindLabel(label: string): boolean {
+  return label.toLowerCase().startsWith(WORK_ITEM_KIND_PREFIX);
+}
+
+function isWorkItemOriginLabel(label: string): boolean {
+  return label.toLowerCase().startsWith(WORK_ITEM_ORIGIN_PREFIX);
+}
+
+function isWorkItemReservedLabel(label: string): boolean {
+  return isWorkItemStatusLabel(label) || isWorkItemKindLabel(label) || isWorkItemOriginLabel(label);
 }
 
 function issueLabelNames(issue: GitHubIssueResponse): string[] {
@@ -812,8 +952,25 @@ function deriveWorkItemStatus(issue: GitHubIssueResponse): {
   return { status: 'unknown', source: 'conflict' };
 }
 
+function deriveClassification<T extends string>(
+  labels: string[],
+  prefix: string,
+  allowed: readonly T[],
+): { value: T | 'unknown'; source: WorkItemClassificationSource } {
+  const matching = labels.filter((label) => label.toLowerCase().startsWith(prefix));
+  if (matching.length === 0) return { value: 'unknown', source: 'default' };
+  if (matching.length !== 1) return { value: 'unknown', source: 'conflict' };
+  const value = matching[0]!.slice(prefix.length).toLowerCase();
+  return allowed.includes(value as T)
+    ? { value: value as T, source: 'label' }
+    : { value: 'unknown', source: 'conflict' };
+}
+
 function workItemFromIssue(repository: string, issue: GitHubIssueResponse): WorkItemRecord {
+  const labels = issueLabelNames(issue).sort((a, b) => a.localeCompare(b));
   const derived = deriveWorkItemStatus(issue);
+  const kind = deriveClassification(labels, WORK_ITEM_KIND_PREFIX, WORK_ITEM_KINDS);
+  const origin = deriveClassification(labels, WORK_ITEM_ORIGIN_PREFIX, WORK_ITEM_ORIGINS);
   return {
     repository,
     issueNumber: issue.number,
@@ -823,7 +980,11 @@ function workItemFromIssue(repository: string, issue: GitHubIssueResponse): Work
     state: issue.state === 'closed' ? 'closed' : 'open',
     status: derived.status,
     statusSource: derived.source,
-    labels: issueLabelNames(issue).sort((a, b) => a.localeCompare(b)),
+    kind: kind.value as WorkItemKind,
+    kindSource: kind.source,
+    origin: origin.value as WorkItemOrigin,
+    originSource: origin.source,
+    labels,
     createdAt: issue.created_at,
     updatedAt: issue.updated_at,
   };

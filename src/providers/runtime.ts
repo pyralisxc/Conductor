@@ -17,6 +17,7 @@ import type {
   WorkItemList,
   CreateWorkItemInput,
   UpdateWorkItemStatusInput,
+  UpdateWorkItemClassificationInput,
 } from '../runtime/types.js';
 
 export interface RuntimeCapabilityProvider {
@@ -44,6 +45,7 @@ export interface WorkItemReadProvider extends RuntimeCapabilityProvider {
 export interface WorkItemMutationProvider extends WorkItemReadProvider {
   createWorkItem(input: CreateWorkItemInput): Promise<WorkItemRecord>;
   updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItemRecord>;
+  updateWorkItemClassification(input: UpdateWorkItemClassificationInput): Promise<WorkItemRecord>;
 }
 
 export interface ProjectMutationProvider extends RuntimeCapabilityProvider {
