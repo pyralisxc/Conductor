@@ -29,9 +29,10 @@ const receiptBase = {
   contractVersion: z.literal('conductor.tool-runtime.v0'),
   operationId: z.string(),
   operation: z.enum([
-    'capabilities', 'preflight_project', 'pull-request.status', 'git.branch.create', 'git.commit.create',
-    'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
-    'pull-request.merge.integration', 'pull-request.merge.promote',
+    'capabilities', 'preflight_project', 'pull-request.status', 'work-item.status', 'work-item.list',
+    'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
+    'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.promote',
+    'work-item.create', 'work-item.update-status',
   ]),
   target: z.object({
     kind: z.enum(['runtime', 'project', 'repository', 'workspace']),
@@ -67,9 +68,10 @@ const capabilitiesReceiptSchema = z.union([
       contractVersion: z.literal('conductor.tool-runtime.v0'),
       operations: z.array(z.object({
         name: z.enum([
-          'capabilities', 'preflight_project', 'pull-request.status', 'git.branch.create', 'git.commit.create',
-          'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
-    'pull-request.merge.integration', 'pull-request.merge.promote',
+          'capabilities', 'preflight_project', 'pull-request.status', 'work-item.status', 'work-item.list',
+          'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
+          'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.promote',
+          'work-item.create', 'work-item.update-status',
         ]),
         description: z.string(),
         mutates: z.boolean(),
@@ -144,6 +146,20 @@ const mutationReceiptSchema = z.union([
 
 const mutationOutputSchema = z.object({ receipt: mutationReceiptSchema });
 
+const workItemReadStatusSchema = z.enum([
+  'backlog', 'ready', 'in-progress', 'blocked', 'review', 'done', 'unknown',
+]);
+const workItemWriteStatusSchema = z.enum([
+  'backlog', 'ready', 'in-progress', 'blocked', 'review', 'done',
+]);
+const newWorkItemStatusSchema = z.enum([
+  'backlog', 'ready', 'in-progress', 'blocked', 'review',
+]);
+const readReceiptSchema = z.object({ receipt: z.union([
+  z.object({ ...receiptBase, status: z.literal('succeeded'), result: z.record(z.string(), z.unknown()) }),
+  failedReceiptSchema,
+]) });
+
 export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServer {
   const server = new McpServer(
     { name: 'conductor', version: '0.1.0' },
@@ -198,6 +214,34 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthSecurity },
     }, async (input) => result(await runtime.pullRequestStatus(input)));
+  }
+
+
+  if (runtime.workItemReadEnabled) {
+    server.registerTool('work-item.status', {
+      title: 'Read work item status',
+      description: 'Read one durable project work item with a normalized Conductor status while preserving native GitHub issue identity and labels.',
+      inputSchema: z.object({
+        project: projectSchema,
+        issueNumber: z.number().int().positive(),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.workItemStatus(input)));
+
+    server.registerTool('work-item.list', {
+      title: 'List project work items',
+      description: 'List durable project work items, optionally filtered by normalized status. GitHub Issues are the initial backing store; pull requests are excluded.',
+      inputSchema: z.object({
+        project: projectSchema,
+        statuses: z.array(workItemReadStatusSchema).max(7).optional(),
+        limit: z.number().int().min(1).max(100).default(50),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.listWorkItems(input)));
   }
 
   if (runtime.mutationsEnabled) {
@@ -333,6 +377,45 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     });
   }
 
+
+  if (runtime.workItemMutationsEnabled) {
+    server.registerTool('work-item.create', {
+      title: 'Create a durable work item',
+      description: 'Create one durable work item in the owning project. GitHub Issues are the initial backing store; no scheduling or autonomous assignment occurs.',
+      inputSchema: z.object({
+        project: projectSchema,
+        title: z.string().min(1).max(256),
+        body: z.string().max(100000).optional(),
+        status: newWorkItemStatusSchema.default('backlog'),
+        labels: z.array(z.string().min(1).max(100)).max(20).optional(),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.createWorkItem(input));
+    });
+
+    server.registerTool('work-item.update-status', {
+      title: 'Update work item status',
+      description: 'Move one durable work item to an explicit normalized status. done closes the backing issue; any active status reopens it.',
+      inputSchema: z.object({
+        project: projectSchema,
+        issueNumber: z.number().int().positive(),
+        status: workItemWriteStatusSchema,
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.updateWorkItemStatus(input));
+    });
+  }
+
   return server;
 }
 
@@ -348,7 +431,3 @@ function result(receipt: object) {
     content: [{ type: 'text' as const, text: JSON.stringify(receipt) }],
   };
 }
-
-
-
-

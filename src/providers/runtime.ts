@@ -11,6 +11,12 @@ import type {
   UpdatePullRequestLabelsInput,
   MergeIntegrationPullRequestInput,
   PromotePullRequestInput,
+  GetWorkItemStatusInput,
+  ListWorkItemsInput,
+  WorkItemRecord,
+  WorkItemList,
+  CreateWorkItemInput,
+  UpdateWorkItemStatusInput,
 } from '../runtime/types.js';
 
 export interface RuntimeCapabilityProvider {
@@ -28,6 +34,16 @@ export interface ProjectReferenceResolver {
 
 export interface PullRequestReadProvider extends RuntimeCapabilityProvider {
   getPullRequestStatus(input: GetPullRequestStatusInput): Promise<PullRequestStatus>;
+}
+
+export interface WorkItemReadProvider extends RuntimeCapabilityProvider {
+  getWorkItemStatus(input: GetWorkItemStatusInput): Promise<WorkItemRecord>;
+  listWorkItems(input: ListWorkItemsInput): Promise<WorkItemList>;
+}
+
+export interface WorkItemMutationProvider extends WorkItemReadProvider {
+  createWorkItem(input: CreateWorkItemInput): Promise<WorkItemRecord>;
+  updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItemRecord>;
 }
 
 export interface ProjectMutationProvider extends RuntimeCapabilityProvider {
@@ -49,4 +65,3 @@ export function supportsProjectPreflight(
 ): provider is ProjectPreflightProvider {
   return 'preflightProject' in provider;
 }
-
