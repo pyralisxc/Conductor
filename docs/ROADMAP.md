@@ -1,41 +1,80 @@
-# Build Roadmap
+# Product Direction
 
-## Phase 0 — Repository spine
-Domain types, policy engine, provider contracts, deterministic next-action logic, verification workflow, Crystal/docs.
+This document owns strategic direction only. It is not a backlog.
 
-## Priority foundation — Tool Runtime v0
-Stable capability discovery, project preflight, normalized tool failures, execution receipts, and mutation idempotency. Establish this execution boundary before adding advanced orchestration, delegation, or session machinery.
+Concrete obligations, bugs, investigations, and implementation tasks belong in Conductor work items backed by provider-native issues.
 
-## Phase 1 — GitHub kernel
-Private GitHub App, webhook receiver, issue/PR adapter, branch manager, idempotent event ingestion, project policy.
+## Current foundation
 
-## Phase 2 — Preview integrator
-`ORCHESTRATION.md`, `preview` branch, work branches from Preview, Preview PRs, manifest generation, safe repair/revert.
+Conductor is a headless, provider-neutral execution and durable work-routing layer.
 
-CardForge becomes first canary.
+The current foundation includes:
 
-## Phase 3 — Durable runtime
-Vercel Workflow adapter, suspend on CI/deployment/review, event wakeups, retry/recovery, workflow history.
+- private GitHub App identity and repository-scoped permission evidence;
+- capability discovery and project preflight;
+- bounded branch/commit/PR operations with idempotent receipts;
+- exact-SHA Preview integration and explicit Main promotion;
+- read-only Development Intelligence preflight;
+- GitHub Issue-backed work items with normalized status, kind, and origin;
+- hosted MCP/OAuth access.
 
-## Phase 4 — Owner Console read model
-Mission Control, Project Cockpit, Founder Control Center, Preview Cockpit, Work Detail, Provider/Worker health.
+This foundation should remain useful without scheduling, autonomous task selection, or a separate control-plane database.
 
-Build real UI only after the read model has live data.
+## Near-term direction — context compression
 
-## Phase 5 — Development Intelligence
-Project mapping, main/Preview diff, overlap/blast-radius hooks, degraded mode.
+Make ordinary human-directed development require less restatement and less provider-payload interpretation.
 
-## Phase 6 — Worker adapters
-Start with interactive-session representation, Work/Codex delegated operator, and deterministic GitHub Actions/local runner.
+High-value areas include:
 
-## Phase 7 — Experimental Chat bridge
-Test resume/send-continue/create-successor behavior only after safe fallback exists.
+- compact project-open/status projections;
+- compact PR/check/deployment summaries;
+- useful work-item querying across status, kind, and origin;
+- natural issue ↔ PR relationships without duplicating their state;
+- better reconstruction of “what can I work on now?” from native artifacts.
 
-## Phase 8 — Release flow
-Immutable release branch, exact deployment, changelog, review package, explicit main promotion, main→Preview reconciliation.
+Prefer query-time reconstruction over another persistent state layer.
 
-## Phase 9 — Unity/local
-Controlled Windows runner, Unity build/test/artifact integration, local safety boundaries.
+## Native work first
 
-## Phase 10 — Inspector economics
-Tool/model/DI/CI/deployment telemetry, founder-rescue classification, orchestration bottleneck analysis.
+Use real work items for future Conductor development instead of maintaining a Markdown issue set.
+
+Repeated usage should teach us:
+
+- which issue kinds commonly belong together;
+- which origins produce reliable deterministic repairs;
+- which acceptance patterns are stable;
+- where humans still supply product meaning or consequential approval.
+
+That evidence, not an up-front automation taxonomy, should shape later workflow compression.
+
+## Selective automation later
+
+Do not build schedulers, automatic assignment, autonomous backlog selection, or unattended development loops merely because the provider APIs permit them.
+
+Automation becomes justified only when a repeated lane is:
+
+- sufficiently deterministic;
+- reconstructable from durable evidence;
+- bounded in consequence;
+- easy to interrupt and explain;
+- proven useful through human-directed operation first.
+
+Automation eligibility should be derived from work/evidence history rather than stored as a manually maintained work-item field.
+
+## Control surfaces are consumers
+
+Chat remains the primary human interaction surface for now.
+
+A future owner/control UI may become valuable for many simultaneous workers, approval queues, scheduled processes, drift alerts, or portfolio operations. If that need emerges, the UI should consume Conductor/DI/provider truth rather than become another source of truth.
+
+## Provider and environment portability
+
+Keep the domain model independent of GitHub, Vercel, ChatGPT, or a particular worker implementation.
+
+Add provider/runtime adapters only where an external system owns real technical state or execution capability.
+
+Local/Unity execution can be added when a concrete workflow requires it; it should not expand the core state model in advance.
+
+## Governing direction
+
+> **Grow capability while shrinking the amount of architecture humans and agents must understand. Prefer native integration plus stronger reasoning over additional persistent infrastructure.**

@@ -1,6 +1,11 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
 
-export type ToolOperationName = 'capabilities' | 'preflight_project';
+export type ToolOperationName =
+  | 'capabilities'
+  | 'preflight_project'
+  | 'pull-request.status'
+  | 'work-item.status'
+  | 'work-item.list';
 
 export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
@@ -9,7 +14,13 @@ export type MutationOperationName =
   | 'git.commit.create'
   | 'git.push'
   | 'pull-request.create'
-  | 'pull-request.comment.create';
+  | 'pull-request.comment.create'
+  | 'pull-request.labels.update'
+  | 'pull-request.merge.integration'
+  | 'pull-request.merge.promote'
+  | 'work-item.create'
+  | 'work-item.update-status'
+  | 'work-item.classification.update';
 
 export type RuntimeOperationName =
   | ToolOperationName
@@ -30,6 +41,8 @@ export type DevelopmentCapability =
   | 'git.push'
   | 'pull-request.read'
   | 'pull-request.write'
+  | 'work-item.read'
+  | 'work-item.write'
   | 'ci.read'
   | 'development-intelligence.read';
 
@@ -105,7 +118,7 @@ export interface CreateBranchInput {
 
 export interface CreateCommitFile {
   path: string;
-  content: string;
+  content: string | null;
 }
 
 export interface CreateCommitInput {
@@ -120,7 +133,7 @@ export interface CreateCommitInput {
 export interface CreatePullRequestInput {
   project: ProjectReference;
   head: string;
-  base: 'preview';
+  base: string;
   title: string;
   body?: string;
   draft?: boolean;
@@ -131,6 +144,181 @@ export interface CommentPullRequestInput {
   project: ProjectReference;
   pullRequestNumber: number;
   body: string;
+  idempotencyKey: string;
+}
+
+export type PullRequestMergeMethod = 'merge' | 'squash' | 'rebase';
+
+export interface GetPullRequestStatusInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+}
+
+export interface PullRequestCheckState {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  detailsUrl: string | null;
+  app: string | null;
+}
+
+export interface PullRequestWorkflowRunState {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  url: string | null;
+}
+
+export interface PullRequestStatus {
+  repository: string;
+  pullRequestNumber: number;
+  url: string;
+  state: string;
+  draft: boolean;
+  merged: boolean;
+  mergeable: boolean | null;
+  mergeableState: string | null;
+  head: { ref: string; sha: string };
+  base: { ref: string; sha: string };
+  labels: string[];
+  checks: {
+    total: number;
+    pending: number;
+    successful: number;
+    failed: number;
+    neutral: number;
+    skipped: number;
+    items: PullRequestCheckState[];
+  };
+  workflowRuns: PullRequestWorkflowRunState[];
+}
+
+export type WorkItemStatus =
+  | 'backlog'
+  | 'ready'
+  | 'in-progress'
+  | 'blocked'
+  | 'review'
+  | 'done'
+  | 'unknown';
+
+export type MutableWorkItemStatus = Exclude<WorkItemStatus, 'unknown'>;
+export type NewWorkItemStatus = Exclude<MutableWorkItemStatus, 'done'>;
+export type WorkItemStatusSource = 'label' | 'issue-state' | 'default' | 'conflict';
+
+export type WorkItemKind =
+  | 'bug'
+  | 'feature'
+  | 'investigation'
+  | 'improvement'
+  | 'maintenance'
+  | 'operations'
+  | 'unknown';
+
+export type MutableWorkItemKind = Exclude<WorkItemKind, 'unknown'>;
+
+export type WorkItemOrigin =
+  | 'human'
+  | 'agent-audit'
+  | 'di-finding'
+  | 'ci'
+  | 'runtime'
+  | 'dependency'
+  | 'user-feedback'
+  | 'unknown';
+
+export type MutableWorkItemOrigin = Exclude<WorkItemOrigin, 'unknown'>;
+export type WorkItemClassificationSource = 'label' | 'default' | 'conflict';
+
+export interface WorkItemRecord {
+  repository: string;
+  issueNumber: number;
+  url: string;
+  title: string;
+  body: string;
+  state: 'open' | 'closed';
+  status: WorkItemStatus;
+  statusSource: WorkItemStatusSource;
+  kind: WorkItemKind;
+  kindSource: WorkItemClassificationSource;
+  origin: WorkItemOrigin;
+  originSource: WorkItemClassificationSource;
+  labels: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkItemList {
+  repository: string;
+  items: WorkItemRecord[];
+  truncated: boolean;
+}
+
+export interface GetWorkItemStatusInput {
+  project: ProjectReference;
+  issueNumber: number;
+}
+
+export interface ListWorkItemsInput {
+  project: ProjectReference;
+  statuses?: WorkItemStatus[];
+  kinds?: WorkItemKind[];
+  origins?: WorkItemOrigin[];
+  limit?: number;
+}
+
+export interface CreateWorkItemInput {
+  project: ProjectReference;
+  title: string;
+  body?: string;
+  status?: NewWorkItemStatus;
+  kind?: WorkItemKind;
+  origin?: WorkItemOrigin;
+  labels?: string[];
+  idempotencyKey: string;
+}
+
+export interface UpdateWorkItemStatusInput {
+  project: ProjectReference;
+  issueNumber: number;
+  status: MutableWorkItemStatus;
+  idempotencyKey: string;
+}
+
+export interface UpdateWorkItemClassificationInput {
+  project: ProjectReference;
+  issueNumber: number;
+  kind?: WorkItemKind;
+  origin?: WorkItemOrigin;
+  idempotencyKey: string;
+}
+
+export interface UpdatePullRequestLabelsInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  add?: string[];
+  remove?: string[];
+  idempotencyKey: string;
+}
+
+export interface MergeIntegrationPullRequestInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  expectedHeadSha: string;
+  expectedBaseSha: string;
+  mergeMethod?: PullRequestMergeMethod;
+  idempotencyKey: string;
+}
+
+export interface PromotePullRequestInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  expectedHeadSha: string;
+  expectedBaseSha: string;
+  approvalReference: string;
+  mergeMethod?: PullRequestMergeMethod;
   idempotencyKey: string;
 }
 
@@ -173,6 +361,7 @@ export interface ExecutionIdentifiers {
   issueNumber?: number;
   commentId?: string;
   workflowRunId?: string;
+  mergeCommitSha?: string;
 }
 
 export interface ReceiptBase {

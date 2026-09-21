@@ -29,8 +29,10 @@ const receiptBase = {
   contractVersion: z.literal('conductor.tool-runtime.v0'),
   operationId: z.string(),
   operation: z.enum([
-    'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
-    'pull-request.create', 'pull-request.comment.create',
+    'capabilities', 'preflight_project', 'pull-request.status', 'work-item.status', 'work-item.list',
+    'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
+    'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.promote',
+    'work-item.create', 'work-item.update-status', 'work-item.classification.update',
   ]),
   target: z.object({
     kind: z.enum(['runtime', 'project', 'repository', 'workspace']),
@@ -66,8 +68,10 @@ const capabilitiesReceiptSchema = z.union([
       contractVersion: z.literal('conductor.tool-runtime.v0'),
       operations: z.array(z.object({
         name: z.enum([
-          'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
-          'pull-request.create', 'pull-request.comment.create',
+          'capabilities', 'preflight_project', 'pull-request.status', 'work-item.status', 'work-item.list',
+          'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
+          'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.promote',
+          'work-item.create', 'work-item.update-status', 'work-item.classification.update',
         ]),
         description: z.string(),
         mutates: z.boolean(),
@@ -133,6 +137,7 @@ const mutationReceiptSchema = z.union([
       issueNumber: z.number().optional(),
       commentId: z.string().optional(),
       workflowRunId: z.string().optional(),
+      mergeCommitSha: z.string().optional(),
     }).optional(),
     idempotency: idempotencySchema,
   }),
@@ -140,6 +145,26 @@ const mutationReceiptSchema = z.union([
 ]);
 
 const mutationOutputSchema = z.object({ receipt: mutationReceiptSchema });
+
+const workItemReadStatusSchema = z.enum([
+  'backlog', 'ready', 'in-progress', 'blocked', 'review', 'done', 'unknown',
+]);
+const workItemWriteStatusSchema = z.enum([
+  'backlog', 'ready', 'in-progress', 'blocked', 'review', 'done',
+]);
+const newWorkItemStatusSchema = z.enum([
+  'backlog', 'ready', 'in-progress', 'blocked', 'review',
+]);
+const workItemKindSchema = z.enum([
+  'bug', 'feature', 'investigation', 'improvement', 'maintenance', 'operations', 'unknown',
+]);
+const workItemOriginSchema = z.enum([
+  'human', 'agent-audit', 'di-finding', 'ci', 'runtime', 'dependency', 'user-feedback', 'unknown',
+]);
+const readReceiptSchema = z.object({ receipt: z.union([
+  z.object({ ...receiptBase, status: z.literal('succeeded'), result: z.record(z.string(), z.unknown()) }),
+  failedReceiptSchema,
+]) });
 
 export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServer {
   const server = new McpServer(
@@ -180,6 +205,53 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     _meta: { securitySchemes: oauthSecurity },
   }, async ({ project, intent }) => result(await runtime.preflightProject(project, intent)));
 
+  if (runtime.pullRequestReadEnabled) {
+    server.registerTool('pull-request.status', {
+      title: 'Read pull request status',
+      description: 'Read one pull request with exact head/base SHAs, labels, check runs, and workflow runs. Use before merge or CI decisions.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+      }),
+      outputSchema: z.object({ receipt: z.union([
+        z.object({ ...receiptBase, status: z.literal('succeeded'), result: z.record(z.string(), z.unknown()) }),
+        failedReceiptSchema,
+      ]) }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.pullRequestStatus(input)));
+  }
+
+
+  if (runtime.workItemReadEnabled) {
+    server.registerTool('work-item.status', {
+      title: 'Read work item status',
+      description: 'Read one durable project work item with a normalized Conductor status while preserving native GitHub issue identity and labels.',
+      inputSchema: z.object({
+        project: projectSchema,
+        issueNumber: z.number().int().positive(),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.workItemStatus(input)));
+
+    server.registerTool('work-item.list', {
+      title: 'List project work items',
+      description: 'List durable project work items, optionally filtered by normalized status. GitHub Issues are the initial backing store; pull requests are excluded.',
+      inputSchema: z.object({
+        project: projectSchema,
+        statuses: z.array(workItemReadStatusSchema).max(7).optional(),
+        kinds: z.array(workItemKindSchema).max(7).optional(),
+        origins: z.array(workItemOriginSchema).max(8).optional(),
+        limit: z.number().int().min(1).max(100).default(50),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.listWorkItems(input)));
+  }
+
   if (runtime.mutationsEnabled) {
     server.registerTool('git.branch.create', {
       title: 'Create a work branch',
@@ -200,13 +272,13 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
 
     server.registerTool('git.commit.create', {
       title: 'Commit files to a work branch',
-      description: 'Create one bounded commit and advance a work/* branch only when its head matches expectedHeadSha.',
+      description: 'Create one bounded commit, including tracked-file deletions via null content, and advance a work/* branch only when its head matches expectedHeadSha.',
       inputSchema: z.object({
         project: projectSchema,
         branch: z.string().min(6),
         expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
         message: z.string().min(1).max(500),
-        files: z.array(z.object({ path: z.string().min(1).max(1024), content: z.string().max(1024 * 1024) })).min(1).max(100),
+        files: z.array(z.object({ path: z.string().min(1).max(1024), content: z.string().max(1024 * 1024).nullable().describe('Full UTF-8 file content, or null to delete the tracked path') })).min(1).max(100),
         idempotencyKey: z.string().min(8).max(200),
       }),
       outputSchema: mutationOutputSchema,
@@ -218,12 +290,12 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     });
 
     server.registerTool('pull-request.create', {
-      title: 'Open a pull request to preview',
-      description: 'Open a work/* pull request targeting preview. Main promotion is intentionally unavailable.',
+      title: 'Open a pull request',
+      description: 'Open a work/* pull request against an explicit branch. Creating a proposal is allowed; merging or promoting accepted branches is a separate consequential operation.',
       inputSchema: z.object({
         project: projectSchema,
         head: z.string().min(6),
-        base: z.literal('preview'),
+        base: z.string().min(1).max(255).describe('Target branch for the pull request, for example main, preview, or vercel-preview'),
         title: z.string().min(1).max(256),
         body: z.string().optional(),
         draft: z.boolean().optional(),
@@ -252,6 +324,125 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     }, async (input, extra) => {
       requireWriteScope(extra.authInfo?.scopes);
       return result(await runtime.commentPullRequest(input));
+    });
+
+
+    server.registerTool('pull-request.labels.update', {
+      title: 'Update pull request labels',
+      description: 'Add or remove labels while preserving unrelated labels. Requires conductor.write.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+        add: z.array(z.string().min(1).max(100)).max(50).optional(),
+        remove: z.array(z.string().min(1).max(100)).max(50).optional(),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.updatePullRequestLabels(input));
+    });
+
+    server.registerTool('pull-request.merge.integration', {
+      title: 'Merge an integration pull request',
+      description: 'Merge an exact PR head/base candidate into a non-default integration branch. Main/master/default branches are rejected.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('squash'),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.mergeIntegrationPullRequest(input));
+    });
+
+    server.registerTool('pull-request.merge.promote', {
+      title: 'Promote an approved pull request',
+      description: 'Merge an exact approved PR candidate into the repository default branch. Requires exact head SHA, exact base SHA, and an owner approval reference.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        approvalReference: z.string().min(1).max(500),
+        mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('squash'),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.promotePullRequest(input));
+    });
+  }
+
+
+  if (runtime.workItemMutationsEnabled) {
+    server.registerTool('work-item.create', {
+      title: 'Create a durable work item',
+      description: 'Create one durable work item in the owning project. GitHub Issues are the initial backing store; no scheduling or autonomous assignment occurs. Bodies may start sparse; when known prefer Problem, Desired outcome, Evidence, Constraints, and Acceptance sections.',
+      inputSchema: z.object({
+        project: projectSchema,
+        title: z.string().min(1).max(256),
+        body: z.string().max(100000).optional(),
+        status: newWorkItemStatusSchema.default('backlog'),
+        kind: workItemKindSchema.optional(),
+        origin: workItemOriginSchema.optional(),
+        labels: z.array(z.string().min(1).max(100)).max(20).optional(),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.createWorkItem(input));
+    });
+
+    server.registerTool('work-item.classification.update', {
+      title: 'Classify a work item',
+      description: 'Update normalized work kind and/or origin. Use unknown to clear a classification; unrelated labels and lifecycle status are preserved.',
+      inputSchema: z.object({
+        project: projectSchema,
+        issueNumber: z.number().int().positive(),
+        kind: workItemKindSchema.optional(),
+        origin: workItemOriginSchema.optional(),
+        idempotencyKey: z.string().min(8).max(200),
+      }).refine((value) => value.kind !== undefined || value.origin !== undefined, {
+        message: 'At least one of kind or origin is required',
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.updateWorkItemClassification(input));
+    });
+
+    server.registerTool('work-item.update-status', {
+      title: 'Update work item status',
+      description: 'Move one durable work item to an explicit normalized status. done closes the backing issue; any active status reopens it.',
+      inputSchema: z.object({
+        project: projectSchema,
+        issueNumber: z.number().int().positive(),
+        status: workItemWriteStatusSchema,
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.updateWorkItemStatus(input));
     });
   }
 

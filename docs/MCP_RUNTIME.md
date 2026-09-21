@@ -33,7 +33,9 @@ Example:
 ]
 ```
 
-The GitHub adapter verifies repository access and project-specific push permission through GitHub's repository API. Write capability remains unverified in the global capability report until project preflight proves it.
+The preferred GitHub adapter identity is a private GitHub App. For each repository, Conductor discovers the covering installation, mints a short-lived token restricted to that repository, and verifies the effective permissions required by each operation. App-backed Develop readiness requires `contents:write`, `pull_requests:write`, and `issues:write`. Pull-request status additionally requires `checks:read` and `actions:read`; label updates require `issues:write`; merges require `contents:write`.
+
+`GITHUB_TOKEN` remains a migration fallback. Repository-level `permissions.push` is not proof that a fine-grained token can perform every advertised Git Data, pull-request, or issue-comment mutation, so static-token write preflight is intentionally degraded rather than operation-verified.
 
 The workspace adapter verifies readable/writable access, bounded Node process execution, and the presence of a package test script. Preflight does not execute the project's test suite. `inspect` requires repository read plus Development Intelligence, `develop` adds GitHub write, and `execute` adds workspace, shell, and tests.
 
@@ -49,13 +51,15 @@ Development Intelligence remains read-only. `DEVINT_MCP_URL` and `DEVINT_AGENT_T
 | `CONDUCTOR_OAUTH_ALLOWED_REDIRECT_ORIGINS` | Comma-separated redirect origins; defaults to `https://chatgpt.com` |
 | `CONDUCTOR_GITHUB_ALLOWED_OWNERS` | Comma-separated GitHub owner namespaces Conductor may resolve dynamically |
 | `CONDUCTOR_PROJECTS_JSON` | Optional aliases, workspace bindings, and per-project overrides |
-| `GITHUB_TOKEN` | GitHub App installation token or other least-privilege token |
+| `CONDUCTOR_GITHUB_APP_ID` | Numeric ID of the private Conductor GitHub App |
+| `CONDUCTOR_GITHUB_APP_PRIVATE_KEY` | GitHub App PEM private key; multiline or `\\n`-escaped |
+| `GITHUB_TOKEN` | Transitional least-privilege static token; ignored when App credentials are configured |
 | `DEVINT_MCP_URL` | Development Intelligence MCP endpoint |
 | `DEVINT_AGENT_TOKEN` | Separate machine bearer token for read-only DI access |
 | `CONDUCTOR_ENABLE_GITHUB_MUTATIONS` | Set to `1` to expose bounded GitHub write tools |
 | `PORT` | HTTP port; defaults to `3000` |
 
-On Vercel or another horizontally scaled deployment, also set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`. `KV_REST_API_URL` and `KV_REST_API_TOKEN` are accepted compatibility aliases. `CONDUCTOR_REQUIRE_SHARED_OAUTH_STATE=1` can enforce the same fail-closed rule on any host. Mutation enablement fails closed unless this durable Redis state is configured.
+On Vercel or another horizontally scaled deployment, also set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`. `KV_REST_API_URL` and `KV_REST_API_TOKEN` are accepted compatibility aliases. `CONDUCTOR_REQUIRE_SHARED_OAUTH_STATE=1` can enforce the same fail-closed rule on any host. Mutation enablement fails closed unless durable Redis state and either complete GitHub App credentials or the transitional static token are configured. Supplying only one App credential variable is invalid.
 
 ## Run and inspect
 
@@ -70,6 +74,8 @@ Deploy behind HTTPS or build the included container. Confirm `/health`, both dis
 ## Deliberate limits
 
 - No anonymous or static shared-secret mode.
-- No arbitrary shell, generic provider dispatch, force-push, merge, or main-promotion tool.
+- No arbitrary shell, generic provider dispatch, force-push, or repository-admin tool.
+- Merge is bounded to pull requests with exact head/base SHAs. Integration merge rejects `main`, `master`, and the repository default branch. Default-branch promotion requires a caller-supplied owner approval reference and exact candidate identity; the runtime does not infer approval.
 - Mutation operations are absent unless explicitly enabled with durable atomic idempotency state.
 - No multi-agent, handoff, scheduler, or session subsystem is added here.
+

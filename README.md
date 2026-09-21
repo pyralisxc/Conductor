@@ -1,88 +1,115 @@
 # Conductor
 
-Conductor is the orchestration and owner-control layer for an AI-assisted development environment.
+Conductor is the provider-neutral bounded execution and durable work-routing layer for a human-directed AI-assisted development environment.
 
-It does **not** replace the developer, DevOS, Development Intelligence, GitHub, or specialized workers. It connects them.
+It does **not** own product meaning, technical truth, development methodology, Git hosting, or the user's active reasoning context. It gives development clients a stable way to inspect capability, route durable work, perform bounded provider actions, and preserve exact execution receipts.
 
-> **Keep intelligence warm, work durable, execution replaceable, Preview integrated, evidence explicit, and production human-controlled.**
+> **Keep work native, effects bounded, evidence explicit, and production human-controlled.**
 
 ## Core architecture
 
-- **Developer / Founder** — decides what deserves to exist.
-- **DevOS 4.x** — development cognition: Objective, Ambition, stage, authorization, Evidence Appetite, proof.
-- **Development Intelligence** — compact, evidence-backed project reality.
-- **GitHub** — durable repositories, issues, projects, PRs, checks, branches, releases.
-- **Conductor** — observes state and decides what should happen next, who/what should do it, where it should run, and when intelligence should wake again.
-- **Conversational developer** — preferred primary owner for ambiguous/deep development work.
-- **Delegated workers** — bounded execution, browser/computer work, migrations, audits, local/Unity tasks.
-- **Owner Console** — unified visibility and control across the system.
+- **Developer / Founder** — decides what deserves to exist and approves consequential boundaries.
+- **Development OS** — owns the active objective, product-development stage, authorization referent, reasoning continuity, and handoff boundary.
+- **Development Intelligence** — owns read-only technical evidence and project understanding.
+- **GitHub** — initial durable home for repositories, issues, PRs, checks, branches, releases, and history.
+- **Conductor** — normalizes provider capability, durable work routing, bounded mutation, Preview integration, and execution receipts.
+- **Chat / development clients** — primary human interaction surface; they reason over durable project artifacts instead of requiring a separate Conductor memory system.
+- **Future control surfaces** — optional consumers of Conductor state when real automation or portfolio-operation needs justify them; they are not a prerequisite for the core system.
 
 ## Design principles
 
-1. Preserve productive conversational context; resume before replacing.
-2. A response ending is a **turn boundary**, not a work handoff.
-3. Delegation does not automatically transfer intellectual ownership.
-4. Deterministic waiting and polling should leave the model loop.
-5. `main` is accepted product truth and is always human-promoted.
-6. `preview` is the long-lived integrated next-product candidate.
-7. Work branches start from and target `preview`.
-8. A release candidate is an immutable snapshot of `preview`.
-9. Automation may create work, but creating work does not authorize execution.
-10. Owner control must remain visible, explainable, interruptible, and overridable.
-11. Provider integrations are adapters; no provider should become the architecture.
-12. No custom database in v0.1 unless real requirements force one.
+1. Prefer native durable provider artifacts before inventing another state store.
+2. GitHub Issues hold durable unresolved work; PRs hold implementation candidates; source and living docs hold accepted product truth.
+3. Conductor normalizes work lifecycle, kind, and origin without replacing the provider-native artifact.
+4. Creating or classifying work does not authorize executing it.
+5. `preview` is the long-lived integrated candidate; `main` is accepted truth and requires explicit owner promotion.
+6. Provider capability, session authorization, and consequential approval are separate facts.
+7. Provider integrations are adapters; no provider should become the architecture.
+8. No custom database merely for convenience. Add infrastructure only when native artifacts plus reasoning cannot represent something important.
+9. Automation is deferred until repeated real usage identifies deterministic, low-consequence lanes. Automation eligibility is derived, not a work-item field humans maintain.
+10. Crystallization is a reasoning outcome, not a mandatory repository artifact. Reconcile durable meaning into its canonical living document and discard temporary synthesis.
+11. Concrete future obligations belong in the work-item system, not Markdown task lists.
+12. Git history preserves prior documentation states; do not keep superseded meta-documents as parallel truth.
 
-## Recommended first stack
+## Current stack
 
 - GitHub + private GitHub App
 - GitHub Actions
-- Vercel Workflow / Vercel Preview for current web projects
+- Vercel for the hosted MCP runtime
 - Development Intelligence
-- DevOS 4.x
-- ChatGPT interactive development
-- Work/Codex for browser/computer/environment-heavy operations
-- Self-hosted GitHub Actions runner later for Unity/local execution
+- Development OS
+- ChatGPT / compatible development clients
 
-See `docs/PROVIDERS.md` for alternatives and cost posture.
+See `docs/PROVIDERS.md` for provider alternatives and cost posture.
 
-## Initial repository map
+## Documentation ownership
+
+Use the smallest living owner for each kind of durable truth:
+
+- `README.md` — product identity, current architecture, and repository entry point.
+- `AGENTS.md` — project-local operating rules for development agents.
+- `docs/STATE_MODEL.md` — normalized durable work state and its boundary with Development OS stage.
+- `docs/TOOL_RUNTIME_V0.md` — public Conductor runtime/tool contract.
+- `docs/GITHUB_AUTHORIZATION.md` — GitHub identity, permissions, authorization boundaries, and exact promotion semantics.
+- `docs/SECURITY_AND_GATES.md` — security invariants and consequential human gates.
+- `docs/MCP_RUNTIME.md` — hosted MCP/OAuth deployment contract.
+- `docs/PROVIDERS.md` — replaceable provider choices.
+- `docs/BATTLE_TEST_PLAN.md` — bounded canary/verification strategy.
+- `docs/ROADMAP.md` — strategic product direction only; concrete tasks belong in work items.
+
+Do not create `CRYSTAL.md`, status diaries, handoff ledgers, or Markdown backlogs by default. A temporary crystallized contract may live in the active conversation, issue body, or PR description until its durable parts are reconciled into the owners above.
+
+## Durable work routing
+
+GitHub Issues are the initial backing store for provider-neutral Conductor work items.
+
+Lifecycle status:
+
+- `backlog`
+- `ready`
+- `in-progress`
+- `blocked`
+- `review`
+- `done`
+
+Kind:
+
+- `bug`
+- `feature`
+- `investigation`
+- `improvement`
+- `maintenance`
+- `operations`
+
+Origin:
+
+- `human`
+- `agent-audit`
+- `di-finding`
+- `ci`
+- `runtime`
+- `dependency`
+- `user-feedback`
+
+Missing or conflicting classification is reported as `unknown`; Conductor does not guess.
+
+An issue may begin as a sparse observation and mature through research. When known, a useful issue body can capture Problem, Desired outcome, Evidence, Constraints, and Acceptance. Those sections are guidance, not a required schema.
+
+## Source-control flow
+
+Default development topology:
 
 ```text
-.
-├── AGENTS.md
-├── ORCHESTRATION.example.md
-├── docs/
-│   ├── CRYSTAL.md
-│   ├── TOOL_RUNTIME_V0.md
-│   ├── OWNER_CONSOLE.md
-│   ├── PROVIDERS.md
-│   ├── STATE_MODEL.md
-│   ├── SECURITY_AND_GATES.md
-│   ├── BATTLE_TEST_PLAN.md
-│   ├── ROADMAP.md
-│   └── INITIAL_ISSUES.md
-├── src/
-│   ├── domain/
-│   │   ├── types.ts
-│   │   └── policy.ts
-│   ├── providers/
-│   │   ├── contracts.ts
-│   │   └── runtime.ts
-│   ├── runtime/
-│   │   ├── types.ts
-│   │   ├── errors.ts
-│   │   ├── idempotency.ts
-│   │   └── runtime.ts
-│   ├── workflow/
-│   │   └── decide-next.ts
-│   ├── owner-console/
-│   │   └── view-model.ts
-│   └── index.ts
-├── tests/
-│   ├── policy.test.ts
-│   └── decide-next.test.ts
-└── .github/workflows/verify.yml
+main
+└── preview
+    ├── work/*
+    ├── audit/*
+    └── repair/*
 ```
+
+Work starts from current `preview` and targets `preview`.
+
+Main promotion is a separate exact-candidate operation. A release/promotion proposal never implies approval.
 
 ## Quick start
 
@@ -91,28 +118,16 @@ npm install
 npm run verify
 ```
 
-The initial code is intentionally a small provider-neutral core. It should be expanded only after the CardForge canary proves the first real integration needs.
-
 ## Tool runtime
 
-The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery with explicit project overrides, intent-aware preflight, a read-only Development Intelligence MCP adapter, and optionally enabled bounded GitHub mutations backed by durable idempotency state.
+The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, intent-aware preflight, a read-only Development Intelligence adapter, durable issue-backed work routing, and bounded GitHub mutations backed by durable idempotency state.
 
-See `docs/TOOL_RUNTIME_V0.md` for the stable contract and `docs/MCP_RUNTIME.md` for deployment, OAuth, and ChatGPT connection requirements.
+The preferred GitHub identity is a private GitHub App that mints repository-scoped installation tokens and proves operation-specific permissions. Static tokens remain an explicitly degraded migration path.
 
-## Important current experimental boundary
+See `docs/TOOL_RUNTIME_V0.md`, `docs/GITHUB_AUTHORIZATION.md`, and `docs/MCP_RUNTIME.md` for the current contracts.
 
-Automatic creation/resumption of ordinary consumer ChatGPT conversations is **not** treated as a guaranteed API contract.
+## Current boundary
 
-Conductor may later use an experimental browser/operator bridge, but the system must remain useful and safe when that bridge falls back to a small human resume action.
+Conductor does not schedule development, automatically assign agents, generate product objectives, or autonomously continue ordinary consumer ChatGPT sessions.
 
-## Build order
-
-Read:
-
-1. `docs/CRYSTAL.md`
-2. `docs/STATE_MODEL.md`
-3. `docs/SECURITY_AND_GATES.md`
-4. `docs/OWNER_CONSOLE.md`
-5. `docs/INITIAL_ISSUES.md`
-
-before expanding implementation.
+Those capabilities may be considered later only where real usage demonstrates that the underlying work is deterministic, reconstructable, and safe enough to justify automation.

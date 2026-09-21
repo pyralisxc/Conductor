@@ -1,23 +1,23 @@
 # Conductor Agent Guide
 
-This repository owns development orchestration and owner control. It does not own project product truth, Development Intelligence semantics, DevOS methodology, Git hosting, or worker-model implementations.
+This repository owns bounded development execution and durable work routing. It does not own project product truth, Development Intelligence semantics, Development OS methodology, Git hosting, or worker-model implementations.
 
 ## Non-negotiable boundaries
 
 - Preserve provider-neutral domain contracts.
-- GitHub is the initial durable work/source control plane, not an irreplaceable architectural primitive.
-- DevOS governs reasoning and authorization. Do not reimplement DevOS stages inside Conductor.
-- Development Intelligence supplies project reality. Do not turn Conductor into another code intelligence engine.
-- Conversational sessions are valuable hot reasoning caches but are not authoritative project truth.
-- Resume a productive conversational session before rotating it.
-- Delegated workers must carry a parent/return address when they are not the intellectual owner.
-- Deterministic waiting should not consume model reasoning.
-- `main` promotion always requires explicit owner approval.
-- Preview automation may be broad; production automation may not infer approval.
-- Do not introduce a custom database in v0.1 merely for convenience.
+- GitHub is the initial durable work/source-control plane, not an irreplaceable architectural primitive.
+- Development OS governs reasoning, stage validity, and authorization. Do not reimplement Development OS stages inside Conductor.
+- Development Intelligence supplies technical project reality. Do not turn Conductor into another code-intelligence engine.
+- Conversational sessions are useful working context but are not authoritative project truth.
+- Durable unresolved obligations belong in provider-native work items, initially GitHub Issues.
+- PRs describe implementation candidates; accepted source and living documentation describe what became true.
+- Crystallization is a reasoning result, not a required `CRYSTAL.md` artifact. Reconcile durable meaning into the canonical living owner.
+- Do not create status files, handoff ledgers, Markdown task lists, or parallel project-memory stores by default.
+- `main` promotion always requires explicit owner approval of an exact candidate.
+- Do not introduce a custom database merely for convenience.
 - Do not make ordinary ChatGPT UI automation a hard dependency.
-- Do not grant broad production credentials to ordinary workers.
-- Owner actions and automation decisions must remain explainable.
+- Do not grant broad production credentials to ordinary development clients.
+- Future automation must remain explainable and should be earned from repeated deterministic workflows rather than designed as a prerequisite.
 
 ## Source-control contract
 
@@ -37,7 +37,7 @@ Promotion:
 
 ```text
 preview @ exact SHA
-└── release/<candidate>
+└── work/promote-<candidate>
     └── PR -> main
 ```
 
@@ -45,21 +45,35 @@ preview @ exact SHA
 
 ## Project integration
 
-Each connected project may contain an `ORCHESTRATION.md` describing project-local branches, preview provider, worker capabilities, audit policy, and human gates.
+Each connected project may contain an `ORCHESTRATION.md` describing project-local branches, preview provider, audit policy, and human gates when those details are genuinely project-specific.
 
 Project policy may specialize Conductor behavior but may not silently manufacture founder intent.
+
+## Documentation discipline
+
+Every durable fact should have one natural owner.
+
+- Product identity belongs in product documentation.
+- Work lifecycle belongs in `docs/STATE_MODEL.md`.
+- Runtime API behavior belongs in `docs/TOOL_RUNTIME_V0.md`.
+- Security and consequential gates belong in `docs/SECURITY_AND_GATES.md`.
+- GitHub identity/permission behavior belongs in `docs/GITHUB_AUTHORIZATION.md`.
+- Concrete future work belongs in the work-item system.
+- Strategic direction may live in `docs/ROADMAP.md`, but it must not duplicate the issue backlog.
+
+When exploration or Crystallization produces durable meaning, update the owning document/source/test and remove the temporary synthesis. Git history is the archive.
 
 ## Code discipline
 
 - Prefer pure domain logic in `src/domain` and `src/workflow`.
 - Provider-specific APIs live behind interfaces in `src/providers`.
-- UI projections consume domain/read models rather than provider payloads.
-- Keep idempotency explicit for webhook-triggered mutations.
+- UI projections, if any, consume domain/read models rather than raw provider payloads.
+- Keep idempotency explicit for mutations.
 - Prefer immutable event/result records over hidden mutable global state.
 - Add tests for durable orchestration guarantees, not incidental implementation detail.
 
 ## Versioning philosophy
 
-This initial repository is the product skeleton, not a commitment to every provider decision in perpetuity.
+This repository is a provider-neutral execution core, not a commitment to every future orchestration idea.
 
-Use real CardForge canary evidence to evolve the system.
+Use real development evidence to evolve it. Prefer consolidation over new infrastructure whenever better reasoning over native artifacts can solve the problem.

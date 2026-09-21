@@ -93,6 +93,9 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
     async createCommit() { throw new Error('unused'); },
     async createPullRequest() { throw new Error('unused'); },
     async commentPullRequest() { throw new Error('unused'); },
+    async updatePullRequestLabels() { throw new Error('unused'); },
+    async mergeIntegrationPullRequest() { throw new Error('unused'); },
+    async promotePullRequest() { throw new Error('unused'); },
   };
   const runtime = new ConductorToolRuntime({
     mutationProvider,
@@ -106,9 +109,11 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name), [
     'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
-    'pull-request.create', 'pull-request.comment.create',
+    'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
+    'pull-request.merge.integration', 'pull-request.merge.promote',
   ]);
   assert.equal(listed.tools.find((tool) => tool.name === 'git.branch.create')?.annotations?.readOnlyHint, false);
   await client.close();
   await server.close();
 });
+
