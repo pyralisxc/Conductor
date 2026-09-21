@@ -10,8 +10,8 @@ The system does not create product objectives or infer consequential approval.
 
 - **Development OS** owns objective, constraints, Ambition, stage/mode, Evidence Appetite, standing authorization, frontier, reversal, and handoff.
 - **Development Intelligence** owns read-only technical reality and evidence-backed analysis.
-- **Conductor** owns provider identity, capability, GitHub mutation, idempotency, receipts, Preview integration, event ingestion, and structured escalation.
-- **AI Systems Control** owns the combined owner-facing projection without absorbing the other systems' semantics.
+- **Conductor** owns provider identity, capability, durable work routing, GitHub mutation, idempotency, receipts, and Preview/Main execution boundaries.
+- **Owner-facing UI/control surfaces**, if introduced later, consume these systems without becoming another semantic authority.
 
 ## Three independent decisions
 
@@ -72,6 +72,7 @@ For GitHub App credentials, Develop readiness requires the permissions needed by
 - branch/commit: `contents:write`
 - pull-request creation: `pull_requests:write`
 - pull-request conversation comment: `issues:write`
+- work-item create/status/classification: `issues:write`
 
 Preflight emits App, installation, account, repository coverage, repository-selection, and effective-permission evidence. A legacy static token may remain during migration, but repository `permissions.push` can only produce degraded—not operation-verified—write readiness.
 
@@ -83,9 +84,11 @@ Preview integration may be covered by standing authorization when explicitly inc
 
 A promotion approval binds to the exact Preview candidate SHA. The promotion receipt records both the approved candidate and resulting main SHA because repository merge policy may create a different merge commit.
 
-## Event truth
+## Provider truth
 
-GitHub webhooks keep projections current but are not repository authority. Conductor verifies signatures, deduplicates delivery IDs, processes asynchronously, tolerates repetition and reordering, and reconciles against current GitHub state.
+GitHub remains authoritative for issue, PR, branch, check, and repository state. Conductor queries and normalizes that state rather than copying it into a second durable ledger.
+
+If webhook/event ingestion is introduced later, events are wake/reconciliation signals rather than repository authority.
 
 ## Pull-request execution kernel
 
@@ -100,13 +103,10 @@ Opening a PR remains a proposal and does not authorize its merge. Integration me
 
 The current approval reference is an audit field supplied by the authorized interactive caller. It is not a cryptographic proof of human intent. The shared authorization/Work Envelope layer remains responsible for ensuring the caller invokes promotion only after current explicit owner approval.
 
-## Delivery order
+## Current delivery direction
 
-1. GitHub App identity and operation-aware preflight.
-2. Webhook kernel and reconciled event projections.
-3. Development Intelligence consolidation and impact analysis.
-4. Shared Work Envelope and authorization records.
-5. Project-open projection and measured workflow compression.
+The GitHub identity, bounded mutation, PR execution, and durable work-item kernels are established.
 
-CardForge is the first canary; every contract remains portfolio-native.
+Next improvements should compress human-directed workflow around native artifacts: compact project/work/PR projections, stronger reconstruction, and measured workflow simplification. Event-driven automation, scheduling, and unattended worker orchestration remain deferred until repeated real usage proves a deterministic need.
 
+Every contract remains portfolio-native.
