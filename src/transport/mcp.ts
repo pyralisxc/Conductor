@@ -284,7 +284,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     }, async (input) => result(await runtime.listWorkItems(input)));
   }
 
-  if (runtime.mutationsEnabled) {
+  if (runtime.sourceControlMutationsEnabled) {
     server.registerTool('git.branch.create', {
       title: 'Create a work branch',
       description: 'Create one work/* branch from an exact full Git SHA. Requires durable idempotency and conductor.write.',
