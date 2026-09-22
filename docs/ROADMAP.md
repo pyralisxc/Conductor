@@ -26,8 +26,8 @@ Make ordinary human-directed development require less restatement and less provi
 
 High-value areas include:
 
-- compact project-open/status projections;
-- compact PR/check/deployment summaries;
+- the initial `project.status` query-time projection for inspect readiness, active work, and native candidate evidence;
+- further compression of PR/check/deployment summaries;
 - useful work-item querying across status, kind, and origin;
 - natural issue ↔ PR relationships without duplicating their state;
 - better reconstruction of “what can I work on now?” from native artifacts.

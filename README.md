@@ -123,7 +123,7 @@ npm run verify
 
 ## Tool runtime
 
-The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, intent-aware preflight, a read-only Development Intelligence adapter, durable issue-backed work routing, and bounded GitHub mutations backed by durable idempotency state.
+The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, intent-aware preflight, compact query-time project/work status reconstruction, a read-only Development Intelligence adapter, durable issue-backed work routing, and bounded GitHub mutations backed by durable idempotency state.
 
 The preferred GitHub identity is a private GitHub App that mints repository-scoped installation tokens and proves operation-specific permissions. Static tokens remain an explicitly degraded migration path.
 

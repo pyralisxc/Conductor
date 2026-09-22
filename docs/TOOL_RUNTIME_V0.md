@@ -10,6 +10,7 @@ v0 always exposes the core non-mutating runtime tools:
 
 - `capabilities()` reports the runtime operations, configured provider capabilities, access level, authentication state, and health actually available now.
 - `preflight_project(project, intent)` verifies only the surfaces required for `inspect`, `develop` (default), or `execute`.
+- `project.status(project, limit?)` reconstructs compact inspect-time preflight plus ready/in-progress/blocked/review work. Each active work item includes same-repository PR candidates discovered through native issue timeline cross-references and reuses exact PR check/workflow truth. It never ranks or selects work.
 - `pull-request.status(project, pullRequestNumber)` is exposed when a GitHub PR provider is configured and returns exact head/base identity plus labels, check runs, and workflow runs.
 - `work-item.status(project, issueNumber)` reads one durable work item with normalized lifecycle status, kind, and origin.
 - `work-item.list(project, ...)` lists issue-backed work and can filter by normalized status, kind, and origin. Pull requests are excluded.
@@ -68,6 +69,8 @@ Provider exceptions do not escape as ambiguous client failures.
 
 Provider adapters report real capability and preflight evidence. They do not change the runtime contract. Development Intelligence may implement only read/query capabilities.
 
+The compact project-status projection is rebuilt on demand from provider-native work, native issue↔PR cross-references, PR/check state, and inspect preflight. It is not persisted as another project ledger.
+
 Every mutation claims an idempotency key and payload fingerprint before performing external work. A matching retry replays the original receipt; a different payload using the same key fails with `CONFLICT`.
 
 The included in-memory idempotency store is suitable for tests and one-process development only. A deployed mutation runtime must supply a durable atomic store before exposing mutation tools.
@@ -91,6 +94,7 @@ The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the confi
 ## Acceptance
 
 - A fresh runtime instance can enumerate its exact public tools and configured environment capabilities.
+- Project status groups active durable work without choosing it, and carries native PR/check evidence when a candidate exists.
 - Project preflight returns every check required by the selected intent, including explicit unavailable or blocked results.
 - Provider failures are normalized and visible.
 - Receipts are stable and carry provider identifiers, including merge commit SHA when a merge succeeds.
