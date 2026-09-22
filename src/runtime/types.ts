@@ -222,6 +222,7 @@ export type PullRequestOrchestrationState =
   | 'external-gate-pending'
   | 'pre-seal-checkpoint'
   | 'sealed-head-verification-required'
+  | 'action-required'
   | 'verification-failed'
   | 'merge-blocked'
   | 'promotion-ready';
@@ -230,6 +231,7 @@ export type PullRequestOrchestrationAction =
   | 'none'
   | 'wait'
   | 'rerun-exact-head'
+  | 'resume-external-gate'
   | 'inspect-failure'
   | 'promotion-gate';
 
