@@ -71,7 +71,7 @@ A future owner/control UI may become valuable for many simultaneous workers, app
 
 Keep the execution domain independent of GitHub, Vercel, ChatGPT, or a particular worker implementation. Provider-neutral execution must not become a duplicate model of product/project architecture.
 
-Add provider/runtime adapters only where an external system owns real technical state or execution capability. New adapters should integrate through exact operation capability/preflight contracts rather than expanding a persistent project-topology model.
+Add provider/runtime adapters only where an external system owns real technical state or execution capability. New adapters should integrate through exact operation capability/preflight contracts and the narrow semantic family they actually implement (for example source-control, database, deployment, or artifact execution), rather than a generic provider interface or persistent project-topology model.
 
 Local/Unity execution can be added when a concrete workflow requires it; it should not expand the core state model in advance.
 
