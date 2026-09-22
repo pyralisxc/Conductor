@@ -48,6 +48,7 @@ Use the smallest living owner for each kind of durable truth:
 
 - `README.md` — product identity, current architecture, and repository entry point.
 - `AGENTS.md` — project-local operating rules for development agents.
+- `ORCHESTRATION.md` — Conductor repository-local branch, Preview-provider, reconciliation, and human-gate specialization.
 - `docs/STATE_MODEL.md` — normalized durable work state and its boundary with Development OS stage.
 - `docs/TOOL_RUNTIME_V0.md` — public Conductor runtime/tool contract.
 - `docs/GITHUB_AUTHORIZATION.md` — GitHub identity, permissions, authorization boundaries, and exact promotion semantics.
