@@ -12,7 +12,7 @@ v0 always exposes the core non-mutating runtime tools:
 - `preflight_project(project, intent)` remains a repository-development convenience that verifies the surfaces required for `inspect`, `develop` (default), or `execute`.
 - `preflight_operation(project, operation)` is exposed when at least one configured provider can supply operation-level evidence. It verifies whether one exact exposed Conductor operation can execute against the supplied routing referent, aggregates only responsible providers, and never infers which operation the project needs.
 - `development.status(project, limit?)` reconstructs compact inspect-time preflight plus ready/in-progress/blocked/review work. Each active work item includes same-repository PR candidates discovered through native issue timeline cross-references and reuses exact PR check/workflow truth. It never ranks or selects work.
-- `pull-request.status(project, pullRequestNumber)` is exposed when a GitHub PR provider is configured and returns exact head/base identity plus labels, check runs, and workflow runs.
+- `pull-request.status(project, pullRequestNumber, previous?)` is exposed when a GitHub PR provider is configured and returns exact head/base identity plus labels, check/workflow truth and a derived orchestration state. A caller may supply its prior head/state observation to detect meaningful transitions without Conductor storing PR history.
 - `work-item.status(project, issueNumber)` reads one durable work item with normalized lifecycle status, kind, and origin.
 - `work-item.list(project, ...)` lists issue-backed work and can filter by normalized status, kind, and origin. Pull requests are excluded.
 
@@ -72,7 +72,7 @@ Provider adapters report real capability and preflight evidence. They do not cha
 
 Operation preflight is evidence aggregation, not planning. An operation must first be exposed by the configured runtime. Responsible providers then prove or qualify the exact capability/permission lane they own. GitHub App evidence is operation-specific; static-token repository-role evidence remains degraded because it cannot prove fine-grained operation permissions.
 
-The compact development-status projection is rebuilt on demand from provider-native work, native issue↔PR cross-references, PR/check state, and inspect preflight. It is not persisted as another project ledger and does not claim to describe product or technical architecture.
+The compact development-status projection is rebuilt on demand from provider-native work, native issue↔PR cross-references, PR/check state, and inspect preflight. Pull-request orchestration state is likewise derived on demand from exact provider truth. Waiting states explicitly distinguish `shouldAct=false` external gates from caller-action states, and optional prior observations make unchanged polling detectable without a Conductor PR-state database. These projections are not persisted as another project ledger and do not claim to describe product or technical architecture.
 
 Every mutation claims an idempotency key and payload fingerprint before performing external work. A matching retry replays the original receipt; a different payload using the same key fails with `CONFLICT`.
 
@@ -100,6 +100,8 @@ The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the confi
 - Development status groups active durable work without choosing it, and carries native PR/check evidence when a candidate exists.
 - Project preflight returns every check required by the selected repository-development intent, including explicit unavailable or blocked results.
 - Operation preflight fails closed for unexposed operations and reports exact provider-specific readiness/degradation for exposed operations.
+- Pull-request status distinguishes external-gate waiting, expected pre-seal checkpoint mismatch, sealed-head verification requirements, real verification failure, and technical promotion readiness without inferring authorization.
+- Repeating a prior observation with the same head and orchestration state reports no meaningful transition.
 - Provider failures are normalized and visible.
 - Receipts are stable and carry provider identifiers, including merge commit SHA when a merge succeeds.
 - Post-promotion reconciliation accepts only the exact default branch → Preview lane and preserves ancestry with a merge commit.
