@@ -212,7 +212,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         message: resolution.error,
       }, resolution.code, this.id));
     }
-    const configured = resolution.project;
+    const configured = resolution.binding;
     if (!this.credentials) {
       return githubChecks('blocked', normalizeToolError({
         code: 'AUTH_REQUIRED',
@@ -306,7 +306,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       }, 'AUTH_REQUIRED', this.id);
       return [operationCheck('blocked', error.message, error, error.diagnostics)];
     }
-    const configured = resolution.project;
+    const configured = resolution.binding;
     if (requirements.access === 'write' && configured.write === false) {
       const error = normalizeToolError({
         code: 'PERMISSION_DENIED',
