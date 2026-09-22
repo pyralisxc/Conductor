@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   ConductorToolRuntime,
   GitHubRuntimeProvider,
+  createConductorMcpServer,
   IdempotentMutationExecutor,
   InMemoryIdempotencyStore,
 } from '../src/index.js';
@@ -169,4 +172,25 @@ test('development status operation preflight aggregates every responsible provid
     receipt.result.checks.filter((check) => check.provider !== 'conductor').map((check) => check.provider),
     ['github', 'development-intelligence'],
   );
+});
+
+
+test('MCP exposes preflight_operation when an operation-evidence provider is configured', async () => {
+  const provider: OperationPreflightProvider = {
+    id: 'evidence',
+    async getCapabilities() { return []; },
+    async preflightOperation() {
+      return [{ provider: 'evidence', status: 'ready', summary: 'ready', diagnostics: [] }];
+    },
+  };
+  const runtime = new ConductorToolRuntime({ providers: [provider] });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createConductorMcpServer(runtime);
+  const client = new Client({ name: 'operation-preflight-test', version: '1.0.0' });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const listed = await client.listTools();
+  assert.equal(listed.tools.some((tool) => tool.name === 'preflight_operation' && tool.annotations?.readOnlyHint), true);
+  await client.close();
+  await server.close();
 });
