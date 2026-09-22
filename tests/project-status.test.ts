@@ -127,6 +127,27 @@ test('development status groups active work without ranking it and preserves ins
         labels: [],
         checks: { total: 1, pending: 0, successful: 1, failed: 0, neutral: 0, skipped: 0, items: [] },
         workflowRuns: [],
+        orchestration: {
+          state: 'promotion-ready' as const,
+          action: 'promotion-gate' as const,
+          shouldAct: true,
+          summary: 'ready',
+          resumeWhen: null,
+          transition: {
+            observed: false,
+            previousHeadSha: null,
+            previousState: null,
+            headChanged: null,
+            stateChanged: null,
+            meaningful: null,
+          },
+          seal: {
+            requested: false,
+            expectedPreSealCheckpoint: false,
+            exactHeadVerificationRequired: false,
+          },
+          signals: { pending: [], actionRequired: [], failed: [] },
+        },
       }];
     },
   };
