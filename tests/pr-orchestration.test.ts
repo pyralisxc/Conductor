@@ -201,6 +201,7 @@ test('real source verification failure remains actionable even during seal-b', a
   assert.deepEqual(result.orchestration.signals.failed, [
     'check:action-smoke',
     'check:verify',
+    'workflow:verify',
   ]);
 });
 
