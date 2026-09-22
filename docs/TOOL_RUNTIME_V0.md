@@ -9,7 +9,8 @@ Give every development client one stable, truthful execution contract before Con
 v0 always exposes the core non-mutating runtime tools:
 
 - `capabilities()` reports the runtime operations, configured provider capabilities, access level, authentication state, and health actually available now.
-- `preflight_project(project, intent)` verifies only the surfaces required for `inspect`, `develop` (default), or `execute`.
+- `preflight_project(project, intent)` remains a repository-development convenience that verifies the surfaces required for `inspect`, `develop` (default), or `execute`.
+- `preflight_operation(project, operation)` verifies whether one exact exposed Conductor operation can execute against the supplied routing referent. It aggregates only providers that own evidence for that operation and never infers which operation the project needs.
 - `development.status(project, limit?)` reconstructs compact inspect-time preflight plus ready/in-progress/blocked/review work. Each active work item includes same-repository PR candidates discovered through native issue timeline cross-references and reuses exact PR check/workflow truth. It never ranks or selects work.
 - `pull-request.status(project, pullRequestNumber)` is exposed when a GitHub PR provider is configured and returns exact head/base identity plus labels, check runs, and workflow runs.
 - `work-item.status(project, issueNumber)` reads one durable work item with normalized lifecycle status, kind, and origin.
@@ -69,6 +70,8 @@ Provider exceptions do not escape as ambiguous client failures.
 
 Provider adapters report real capability and preflight evidence. They do not change the runtime contract. Development Intelligence may implement only read/query capabilities. Project/repository identifiers entering the runtime are execution-routing referents supplied by callers; Conductor does not expand them into a project model.
 
+Operation preflight is evidence aggregation, not planning. An operation must first be exposed by the configured runtime. Responsible providers then prove or qualify the exact capability/permission lane they own. GitHub App evidence is operation-specific; static-token repository-role evidence remains degraded because it cannot prove fine-grained operation permissions.
+
 The compact development-status projection is rebuilt on demand from provider-native work, native issue↔PR cross-references, PR/check state, and inspect preflight. It is not persisted as another project ledger and does not claim to describe product or technical architecture.
 
 Every mutation claims an idempotency key and payload fingerprint before performing external work. A matching retry replays the original receipt; a different payload using the same key fails with `CONFLICT`.
@@ -94,8 +97,9 @@ The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the confi
 ## Acceptance
 
 - A fresh runtime instance can enumerate its exact public tools and configured environment capabilities.
-- Project status groups active durable work without choosing it, and carries native PR/check evidence when a candidate exists.
-- Project preflight returns every check required by the selected intent, including explicit unavailable or blocked results.
+- Development status groups active durable work without choosing it, and carries native PR/check evidence when a candidate exists.
+- Project preflight returns every check required by the selected repository-development intent, including explicit unavailable or blocked results.
+- Operation preflight fails closed for unexposed operations and reports exact provider-specific readiness/degradation for exposed operations.
 - Provider failures are normalized and visible.
 - Receipts are stable and carry provider identifiers, including merge commit SHA when a merge succeeds.
 - Post-promotion reconciliation accepts only the exact default branch → Preview lane and preserves ancestry with a merge commit.
