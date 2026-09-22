@@ -26,7 +26,7 @@ Make ordinary human-directed development require less restatement and less provi
 
 High-value areas include:
 
-- the initial `project.status` query-time projection for inspect readiness, active work, and native candidate evidence;
+- the initial `development.status` query-time projection for inspect readiness, active work, and native candidate evidence;
 - further compression of PR/check/deployment summaries;
 - useful work-item querying across status, kind, and origin;
 - natural issue ↔ PR relationships without duplicating their state;
@@ -69,7 +69,7 @@ A future owner/control UI may become valuable for many simultaneous workers, app
 
 ## Provider and environment portability
 
-Keep the domain model independent of GitHub, Vercel, ChatGPT, or a particular worker implementation.
+Keep the execution domain independent of GitHub, Vercel, ChatGPT, or a particular worker implementation. Provider-neutral execution must not become a duplicate model of product/project architecture.
 
 Add provider/runtime adapters only where an external system owns real technical state or execution capability.
 
