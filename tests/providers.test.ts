@@ -389,6 +389,9 @@ test('GitHub provider returns exact PR identity plus checks and workflow runs', 
   assert.equal(status.checks.pending, 1);
   assert.equal(status.checks.successful, 1);
   assert.equal(status.workflowRuns[0]?.id, 9);
+  assert.equal(status.orchestration.state, 'external-gate-pending');
+  assert.equal(status.orchestration.action, 'wait');
+  assert.equal(status.orchestration.shouldAct, false);
 });
 
 test('GitHub provider updates PR labels without erasing unrelated labels', async () => {
