@@ -75,7 +75,7 @@ Deploy behind HTTPS or build the included container. Confirm `/health`, both dis
 
 - No anonymous or static shared-secret mode.
 - No arbitrary shell, generic provider dispatch, force-push, or repository-admin tool.
-- Merge is bounded to pull requests with exact head/base SHAs. Integration merge rejects `main`, `master`, and the repository default branch. Default-branch promotion requires a caller-supplied owner approval reference and exact candidate identity; the runtime does not infer approval.
+- Merge is bounded to pull requests with exact head/base SHAs. Integration merge rejects `main`, `master`, and the repository default branch. Preview reconciliation accepts only repository-default-branch → `preview`/`vercel-preview` and always uses a merge commit. Default-branch promotion requires a caller-supplied owner approval reference and exact candidate identity; the runtime does not infer approval.
 - Mutation operations are absent unless explicitly enabled with durable atomic idempotency state.
 - No multi-agent, handoff, scheduler, or session subsystem is added here.
 

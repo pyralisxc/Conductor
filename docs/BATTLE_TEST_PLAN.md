@@ -1,73 +1,69 @@
 # Battle Test Plan
 
-Use CardForge as the first complete canary.
+Use Conductor itself for the first dogfood pass, then CardForge as the first cross-project canary.
 
-## Core flow
+This document tests the **current bounded runtime**. Future automation experiments are listed separately and are not current commitments or backlog items.
 
-1. Create work from conversational development.
-2. Work branch starts from latest Preview.
-3. Successful work PR integrates to Preview.
-4. Stable Preview deployment updates.
-5. Preview manifest explains the delta from main.
+## Current runtime — identity and preflight
 
-## Concurrency / integration
+1. GitHub App repository discovery resolves only allowed owners.
+2. Operation-aware preflight proves the permissions required by exposed tools.
+3. Static-token fallback is reported as degraded where operation-specific proof is unavailable.
+4. Development Intelligence outage is explicit and fails the required preflight lane closed.
+5. OAuth read tokens cannot call mutation tools; write scope is explicit.
 
-6. Two unrelated workers integrate safely.
-7. Meaningful overlap is detected.
-8. Technical merge conflict is repaired without founder interruption.
-9. Semantic conflict becomes Needs Founder.
-10. Main hotfix reconciles back into Preview.
+## Current runtime — durable work
 
-## Audit
+6. A GitHub Issue is created as a provider-native Conductor work item.
+7. Lifecycle status round-trips across backlog, ready, in-progress, blocked, review, and done.
+8. Kind and origin classification preserve unrelated labels.
+9. Missing or conflicting classification remains `unknown` rather than guessed.
+10. Pull requests are excluded from issue-backed work-item lists.
 
-11. Proven audit defect creates repair work automatically.
-12. Proven repair reaches Preview after appropriate proof.
-13. Product-semantic audit finding does not auto-mutate.
-14. Insufficient evidence remains Proposed.
-15. Consequential finding creates a human gate.
+## Current runtime — bounded development
 
-## Sessions
+11. A work branch starts from an exact Preview SHA.
+12. A bounded commit advances only the expected work-branch head.
+13. A pull request may target the project's explicit integration branch.
+14. PR status reports exact head/base identity plus checks and workflow runs.
+15. Integration merge rejects the repository default branch as target.
+16. Integration merge rejects unapproved source branch classes.
+17. Duplicate mutation attempts replay the durable idempotent receipt instead of repeating the side effect.
 
-16. Warm conversational session receives repeated continuation turns.
-17. Delegated worker returns evidence to the correct parent session.
-18. CI waiting consumes no active model reasoning.
-19. Deployment waiting consumes no active model reasoning.
-20. Chat continuation failure falls back without losing work.
-21. Session rotation preserves Objective, Ambition, accepted meaning, authorization, and frontier.
-22. Fresh-eyes request deliberately creates independent context.
+## Current runtime — release and reconciliation
 
-## Preview / release
+18. Main promotion requires an exact head SHA, exact base SHA, repository-default target, and explicit owner approval reference.
+19. Stale promotion identity fails closed.
+20. Conductor cannot infer or bypass Main approval.
+21. After accepted promotion, the repository default branch can reconcile into `preview`/`vercel-preview` only through the exact reconciliation lane.
+22. Preview reconciliation rejects non-default sources and non-Preview targets.
+23. Preview reconciliation always uses a merge commit so accepted ancestry is preserved.
+24. A subsequent work branch can start from the reconciled Preview lineage.
 
-23. Broken Preview integration is repaired or reverted.
-24. Release candidate freezes exact SHA while Preview keeps advancing.
-25. Owner rejects one candidate component without losing unrelated work.
-26. Exact approved release SHA reaches main.
-27. Conductor cannot bypass main approval.
-28. Preview reconciles to new main after release.
+## Current runtime — reliability and security
 
-## Reliability
+25. Restarting the hosted runtime does not lose durable mutation idempotency when Redis is configured.
+26. Expired GitHub App installation credentials are reminted through the credential provider.
+27. GitHub/provider failure leaves provider-native repository state authoritative.
+28. Production-only secrets are not required by ordinary Preview development.
+29. A self-hosted/local runner does not execute untrusted public code by default.
+30. Every consequential merge receipt retains the resulting merge commit SHA and relevant approval/reconciliation evidence.
 
-29. Duplicate webhook creates no duplicate work.
-30. Expired GitHub App installation token recovers.
-31. Workflow runtime restart does not lose work.
-32. Provider outage preserves GitHub work authority.
-33. DI outage produces explicit degraded mode.
-34. Offline Unity runner queues work rather than rerouting incorrectly.
+## Deferred experiments — not current product commitments
 
-## Owner control
+Do **not** treat the following as required Conductor behavior until repeated human-directed use demonstrates a deterministic need:
 
-35. Pause Project Automation reaches safe suspension.
-36. Pause All Automation prevents new mutating work.
-37. Owner can change Evidence Appetite while work is active.
-38. Owner can hold Preview integration while allowing development to continue.
-39. Owner can reassign work from autonomous worker back to conversational session.
-40. Every automated integration can explain why it occurred and what authorized it.
+- automatic task selection or backlog scheduling;
+- autonomous worker assignment or reassignment;
+- warm-session continuation machinery;
+- unattended repair loops;
+- webhook-driven mutation;
+- pause-all-automation control planes;
+- owner dashboards for fleets of simultaneous workers;
+- local/offline worker queues.
 
-## Secrets
-
-41. Preview worker cannot read production-only secrets.
-42. Local runner does not accept untrusted public code by default.
+When one of these becomes justified, create a real work item with current evidence and acceptance criteria before changing the architecture.
 
 ## Acceptance
 
-The canary succeeds when developer coordination burden decreases without increasing founder-rescue, hidden-quality failures, or unexplainable automation.
+The current canary succeeds when human-directed development becomes easier to reconstruct and execute without weakening exact authorization, provider truth, idempotency, or the Main human gate.
