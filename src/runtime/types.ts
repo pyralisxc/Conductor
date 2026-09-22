@@ -3,6 +3,7 @@ export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as cons
 export type ToolOperationName =
   | 'capabilities'
   | 'preflight_project'
+  | 'preflight_operation'
   | 'development.status'
   | 'pull-request.status'
   | 'work-item.status'
@@ -117,6 +118,28 @@ export interface ProjectReference {
   repository?: string;
   workspace?: string;
   ref?: string;
+}
+
+export interface GetOperationPreflightInput {
+  project: ProjectReference;
+  operation: RuntimeOperationName;
+}
+
+export interface OperationPreflightCheck {
+  provider: string;
+  status: 'ready' | 'degraded' | 'blocked' | 'unavailable';
+  summary: string;
+  error?: NormalizedToolError;
+  diagnostics: ToolDiagnostic[];
+}
+
+export interface OperationPreflight {
+  contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
+  project: ProjectReference;
+  operation: RuntimeOperationName;
+  exposed: boolean;
+  status: 'ready' | 'degraded' | 'blocked';
+  checks: OperationPreflightCheck[];
 }
 
 export interface GetDevelopmentStatusInput {

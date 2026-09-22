@@ -37,7 +37,9 @@ The preferred GitHub adapter identity is a private GitHub App. For each reposito
 
 `GITHUB_TOKEN` remains a migration fallback. Repository-level `permissions.push` is not proof that a fine-grained token can perform every advertised Git Data, pull-request, or issue-comment mutation, so static-token write preflight is intentionally degraded rather than operation-verified.
 
-The workspace adapter verifies readable/writable access, bounded Node process execution, and the presence of a package test script. Preflight does not execute the project's test suite. `inspect` requires repository read plus Development Intelligence, `develop` adds GitHub write, and `execute` adds workspace, shell, and tests.
+The workspace adapter verifies readable/writable access, bounded Node process execution, and the presence of a package test script. Preflight does not execute the project's test suite. `preflight_project` remains repository-development oriented: `inspect` requires repository read plus Development Intelligence, `develop` adds GitHub write, and `execute` adds workspace, shell, and tests.
+
+`preflight_operation` is narrower and preferred before one exact effect. It first proves that the operation is actually exposed by the current runtime, then aggregates operation-specific evidence from responsible providers. It does not discover project architecture or choose an operation.
 
 Development Intelligence remains read-only. `DEVINT_MCP_URL` and `DEVINT_AGENT_TOKEN` connect Conductor to its authenticated MCP `project_status` operation. If they are absent, capability and preflight results explicitly report the adapter as unavailable.
 
@@ -69,7 +71,7 @@ npm run verify
 npm start
 ```
 
-Deploy behind HTTPS or build the included container. Confirm `/health`, both discovery documents, and the unauthenticated `/mcp` challenge before connecting ChatGPT. Then enable ChatGPT developer mode, add the public URL including `/mcp`, choose OAuth, complete owner sign-in and consent, review the discovered tools, and run `capabilities` followed by `preflight_project` in a fresh conversation. Reauthorize with `conductor.write` before calling any mutation.
+Deploy behind HTTPS or build the included container. Confirm `/health`, both discovery documents, and the unauthenticated `/mcp` challenge before connecting ChatGPT. Then enable ChatGPT developer mode, add the public URL including `/mcp`, choose OAuth, complete owner sign-in and consent, review the discovered tools, and run `capabilities` followed by `preflight_project` for repository-development readiness or `preflight_operation` before an exact operation. Reauthorize with `conductor.write` before calling any mutation.
 
 ## Deliberate limits
 

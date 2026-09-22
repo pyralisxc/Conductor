@@ -67,6 +67,8 @@ Development Intelligence should use a separate read-only GitHub App. Its identit
 
 ## Permission-aware preflight
 
+`preflight_operation` proves the permission lane for one exact exposed GitHub operation and uses the same permission requirements as execution. `preflight_project` remains the broader repository-development readiness view.
+
 For GitHub App credentials, Develop readiness requires the permissions needed by every exposed bounded mutation:
 
 - branch/commit: `contents:write`
@@ -74,7 +76,7 @@ For GitHub App credentials, Develop readiness requires the permissions needed by
 - pull-request conversation comment: `issues:write`
 - work-item create/status/classification: `issues:write`
 
-Preflight emits App, installation, account, repository coverage, repository-selection, and effective-permission evidence. A legacy static token may remain during migration, but repository `permissions.push` can only produce degraded—not operation-verified—write readiness.
+Preflight emits App, installation, account, repository coverage, repository-selection, and effective-permission evidence. A legacy static token may remain during migration, but repository role evidence can only produce degraded—not operation-verified—read/write readiness for exact operations.
 
 Provider permission, repository policy/rulesets, and successful execution remain distinct proof levels. Exact-head checks and immutable receipts protect execution-time truth.
 

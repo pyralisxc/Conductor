@@ -1,7 +1,9 @@
 import type {
   CapabilityAvailability,
   PreflightCheck,
+  OperationPreflightCheck,
   ProjectReference,
+  RuntimeOperationName,
   CreateBranchInput,
   CreateCommitInput,
   CreatePullRequestInput,
@@ -29,6 +31,13 @@ export interface RuntimeCapabilityProvider {
 
 export interface ProjectPreflightProvider extends RuntimeCapabilityProvider {
   preflightProject(project: ProjectReference): Promise<PreflightCheck[]>;
+}
+
+export interface OperationPreflightProvider extends RuntimeCapabilityProvider {
+  preflightOperation(
+    project: ProjectReference,
+    operation: RuntimeOperationName,
+  ): Promise<OperationPreflightCheck[] | undefined>;
 }
 
 export interface ProjectReferenceResolver {
@@ -67,10 +76,18 @@ export interface ProjectMutationProvider extends RuntimeCapabilityProvider {
 
 export type ToolRuntimeProvider =
   | RuntimeCapabilityProvider
-  | ProjectPreflightProvider;
+  | ProjectPreflightProvider
+  | OperationPreflightProvider;
 
 export function supportsProjectPreflight(
   provider: ToolRuntimeProvider,
 ): provider is ProjectPreflightProvider {
   return 'preflightProject' in provider;
+}
+
+
+export function supportsOperationPreflight(
+  provider: ToolRuntimeProvider,
+): provider is OperationPreflightProvider {
+  return 'preflightOperation' in provider;
 }

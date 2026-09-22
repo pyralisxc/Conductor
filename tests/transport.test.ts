@@ -14,7 +14,7 @@ import {
 } from '../src/index.js';
 import type { ProjectMutationProvider } from '../src/index.js';
 
-test('MCP adapter advertises only the two typed read-only runtime tools', async () => {
+test('MCP adapter advertises only the core typed read-only runtime tools', async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createConductorMcpServer(new ConductorToolRuntime({
     createOperationId: () => 'op-mcp',
