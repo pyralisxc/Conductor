@@ -199,13 +199,13 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
   }
 
   resolveProjectReference(project: ProjectReference): ProjectReference {
-    const resolution = this.resolveProject(project);
+    const resolution = this.resolveBinding(project);
     if ('error' in resolution) return project;
-    return { ...project, repository: resolution.project.repository };
+    return { ...project, repository: resolution.binding.repository };
   }
 
   async preflightProject(project: ProjectReference): Promise<PreflightCheck[]> {
-    const resolution = this.resolveProject(project);
+    const resolution = this.resolveBinding(project);
     if ('error' in resolution) {
       return githubChecks('blocked', normalizeToolError({
         code: resolution.code,
@@ -291,7 +291,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
   ): Promise<OperationPreflightCheck[] | undefined> {
     const requirements = githubOperationRequirements(operation);
     if (!requirements) return undefined;
-    const resolution = this.resolveProject(project);
+    const resolution = this.resolveBinding(project);
     if ('error' in resolution) {
       const error = normalizeToolError({
         code: resolution.code,
@@ -880,7 +880,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     };
   }
 
-  resolveProject(project: ProjectReference): { project: GitHubRepositoryBinding } | {
+  private resolveBinding(project: ProjectReference): { binding: GitHubRepositoryBinding } | {
     error: string;
     code: 'NOT_FOUND' | 'CONFLICT';
   } {
@@ -889,10 +889,10 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       if (project.repository && !sameRepository(project.repository, explicit.repository)) {
         return {
           code: 'CONFLICT',
-          error: `Repository ${project.repository} does not match the configured project repository`,
+          error: `Repository ${project.repository} does not match the configured repository binding`,
         };
       }
-      return { project: explicit };
+      return { binding: explicit };
     }
 
     const requested = project.repository
@@ -900,7 +900,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     if (!requested) {
       return {
         code: 'NOT_FOUND',
-        error: `Project ${project.id} is not an explicit project and cannot be resolved to an authorized owner`,
+        error: `Project ${project.id} is not an explicit runtime binding and cannot be resolved to an authorized owner`,
       };
     }
     const parsed = parseRepository(requested);
@@ -912,7 +912,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       return { code: 'NOT_FOUND', error: `GitHub owner ${parsed.owner} is not authorized` };
     }
     return {
-      project: {
+      binding: {
         id: project.id,
         repository: `${authorizedOwner}/${parsed.repository}`,
       },
@@ -938,9 +938,9 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     requiredPermissions: Record<string, 'read' | 'write'>,
   ): Promise<{ repository: string; credential: GitHubCredential }> {
     if (!this.credentials) throw { code: 'AUTH_REQUIRED', message: 'GitHub authentication is not configured' };
-    const resolution = this.resolveProject(project);
+    const resolution = this.resolveBinding(project);
     if ('error' in resolution) throw { code: resolution.code, message: resolution.error };
-    const repository = resolution.project.repository;
+    const repository = resolution.binding.repository;
     const credential = await this.credentials.getCredential(repository);
     if (credential.kind === 'app-installation') {
       const missing = missingPermissions(credential, requiredPermissions);
@@ -959,12 +959,12 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     requiredPermissions: Record<string, 'write'>,
   ): Promise<{ repository: string; credential: GitHubCredential }> {
     if (!this.credentials) throw { code: 'AUTH_REQUIRED', message: 'GitHub authentication is not configured' };
-    const resolution = this.resolveProject(project);
+    const resolution = this.resolveBinding(project);
     if ('error' in resolution) throw { code: resolution.code, message: resolution.error };
-    if (resolution.project.write === false) {
-      throw { code: 'PERMISSION_DENIED', message: `Writes are disabled for ${resolution.project.repository}` };
+    if (resolution.binding.write === false) {
+      throw { code: 'PERMISSION_DENIED', message: `Writes are disabled for ${resolution.binding.repository}` };
     }
-    const repository = resolution.project.repository;
+    const repository = resolution.binding.repository;
     const credential = await this.credentials.getCredential(repository);
     if (credential.kind === 'app-installation') {
       const missing = missingPermissions(credential, requiredPermissions);
