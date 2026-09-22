@@ -27,7 +27,6 @@ test('MCP adapter advertises only the core typed read-only runtime tools', async
   assert.deepEqual(listed.tools.map((tool) => tool.name), [
     'capabilities',
     'preflight_project',
-    'preflight_operation',
   ]);
   assert.equal(listed.tools.every((tool) => tool.annotations?.readOnlyHint), true);
 
@@ -78,7 +77,7 @@ test('HTTP MCP boundary publishes OAuth metadata and fails closed', async () => 
     });
     await client.connect(transport);
     const tools = await client.listTools();
-    assert.equal(tools.tools.length, 3);
+    assert.equal(tools.tools.length, 2);
     await client.close();
   } finally {
     httpServer.close();
@@ -110,7 +109,7 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
   await client.connect(clientTransport);
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name), [
-    'capabilities', 'preflight_project', 'preflight_operation', 'git.branch.create', 'git.commit.create',
+    'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
     'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
     'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
   ]);
