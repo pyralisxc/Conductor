@@ -63,7 +63,7 @@ export interface WorkItemMutationProvider extends WorkItemReadProvider {
   updateWorkItemClassification(input: UpdateWorkItemClassificationInput): Promise<WorkItemRecord>;
 }
 
-export interface ProjectMutationProvider extends RuntimeCapabilityProvider {
+export interface SourceControlMutationProvider extends RuntimeCapabilityProvider {
   createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }>;
   createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }>;
   createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }>;
