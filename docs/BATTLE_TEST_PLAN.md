@@ -26,28 +26,33 @@ This document tests the **current bounded runtime**. Future automation experimen
 12. A bounded commit advances only the expected work-branch head.
 13. A pull request may target the project's explicit integration branch.
 14. PR status reports exact head/base identity plus checks and workflow runs.
-15. Integration merge rejects the repository default branch as target.
-16. Integration merge rejects unapproved source branch classes.
-17. Duplicate mutation attempts replay the durable idempotent receipt instead of repeating the side effect.
+15. Pending checks/workflows summarize as `external-gate-pending` with no agent action required.
+16. Repeating the same head/state observation reports no meaningful transition.
+17. A `seal-b` candidate can distinguish expected pre-seal `action-smoke` failure from source `verify` failure.
+18. A bot-pushed sealed head with `action_required` reports exact-head verification required.
+19. Settled technical gates report `promotion-ready` without inferring Main approval.
+20. Integration merge rejects the repository default branch as target.
+21. Integration merge rejects unapproved source branch classes.
+22. Duplicate mutation attempts replay the durable idempotent receipt instead of repeating the side effect.
 
 ## Current runtime — release and reconciliation
 
-18. Main promotion requires an exact head SHA, exact base SHA, repository-default target, and explicit owner approval reference.
-19. Stale promotion identity fails closed.
-20. Conductor cannot infer or bypass Main approval.
-21. After accepted promotion, the repository default branch can reconcile into `preview`/`vercel-preview` only through the exact reconciliation lane.
-22. Preview reconciliation rejects non-default sources and non-Preview targets.
-23. Preview reconciliation always uses a merge commit so accepted ancestry is preserved.
-24. A subsequent work branch can start from the reconciled Preview lineage.
+23. Main promotion requires an exact head SHA, exact base SHA, repository-default target, and explicit owner approval reference.
+24. Stale promotion identity fails closed.
+25. Conductor cannot infer or bypass Main approval.
+26. After accepted promotion, the repository default branch can reconcile into `preview`/`vercel-preview` only through the exact reconciliation lane.
+27. Preview reconciliation rejects non-default sources and non-Preview targets.
+28. Preview reconciliation always uses a merge commit so accepted ancestry is preserved.
+29. A subsequent work branch can start from the reconciled Preview lineage.
 
 ## Current runtime — reliability and security
 
-25. Restarting the hosted runtime does not lose durable mutation idempotency when Redis is configured.
-26. Expired GitHub App installation credentials are reminted through the credential provider.
-27. GitHub/provider failure leaves provider-native repository state authoritative.
-28. Production-only secrets are not required by ordinary Preview development.
-29. A self-hosted/local runner does not execute untrusted public code by default.
-30. Every consequential merge receipt retains the resulting merge commit SHA and relevant approval/reconciliation evidence.
+30. Restarting the hosted runtime does not lose durable mutation idempotency when Redis is configured.
+31. Expired GitHub App installation credentials are reminted through the credential provider.
+32. GitHub/provider failure leaves provider-native repository state authoritative.
+33. Production-only secrets are not required by ordinary Preview development.
+34. A self-hosted/local runner does not execute untrusted public code by default.
+35. Every consequential merge receipt retains the resulting merge commit SHA and relevant approval/reconciliation evidence.
 
 ## Deferred experiments — not current product commitments
 
