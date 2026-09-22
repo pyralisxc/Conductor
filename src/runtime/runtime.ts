@@ -3,7 +3,7 @@ import {
   supportsProjectPreflight,
   supportsOperationPreflight,
   type ToolRuntimeProvider,
-  type ProjectMutationProvider,
+  type SourceControlMutationProvider,
   type ProjectReferenceResolver,
   type PullRequestReadProvider,
   type WorkItemCandidateReadProvider,
@@ -122,7 +122,7 @@ export interface ConductorToolRuntimeOptions {
   providers?: ToolRuntimeProvider[];
   now?: () => Date;
   createOperationId?: () => string;
-  mutationProvider?: ProjectMutationProvider;
+  sourceControlMutationProvider?: SourceControlMutationProvider;
   mutationExecutor?: IdempotentMutationExecutor;
   projectResolver?: ProjectReferenceResolver;
   pullRequestProvider?: PullRequestReadProvider;
@@ -134,7 +134,7 @@ export class ConductorToolRuntime {
   private readonly providers: ToolRuntimeProvider[];
   private readonly now: () => Date;
   private readonly createOperationId: () => string;
-  private readonly mutationProvider?: ProjectMutationProvider;
+  private readonly sourceControlMutationProvider?: SourceControlMutationProvider;
   private readonly mutationExecutor?: IdempotentMutationExecutor;
   private readonly projectResolver?: ProjectReferenceResolver;
   private readonly pullRequestProvider?: PullRequestReadProvider;
@@ -146,7 +146,7 @@ export class ConductorToolRuntime {
     this.now = options.now ?? (() => new Date());
     this.createOperationId =
       options.createOperationId ?? (() => randomUUID());
-    this.mutationProvider = options.mutationProvider;
+    this.sourceControlMutationProvider = options.sourceControlMutationProvider;
     this.mutationExecutor = options.mutationExecutor;
     this.projectResolver = options.projectResolver;
     this.pullRequestProvider = options.pullRequestProvider;
@@ -154,8 +154,8 @@ export class ConductorToolRuntime {
     this.workItemCandidateProvider = options.workItemCandidateProvider;
   }
 
-  get mutationsEnabled(): boolean {
-    return Boolean(this.mutationProvider && this.mutationExecutor);
+  get sourceControlMutationsEnabled(): boolean {
+    return Boolean(this.sourceControlMutationProvider && this.mutationExecutor);
   }
 
   get operationPreflightEnabled(): boolean {
@@ -488,7 +488,7 @@ export class ConductorToolRuntime {
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
-      ...(this.mutationsEnabled ? MUTATION_DEFINITIONS : []),
+      ...(this.sourceControlMutationsEnabled ? MUTATION_DEFINITIONS : []),
       ...(this.workItemMutationsEnabled ? WORK_ITEM_MUTATION_DEFINITIONS : []),
     ];
   }
@@ -528,9 +528,9 @@ export class ConductorToolRuntime {
   private async executeMutation<Result>(
     input: { project: ProjectReference; idempotencyKey: string },
     operation: import('./types.js').MutationOperationName,
-    mutate: (provider: ProjectMutationProvider) => Promise<import('./idempotency.js').MutationResult<Result>>,
+    mutate: (provider: SourceControlMutationProvider) => Promise<import('./idempotency.js').MutationResult<Result>>,
   ): Promise<ExecutionReceipt<Result>> {
-    if (!this.mutationProvider || !this.mutationExecutor) {
+    if (!this.sourceControlMutationProvider || !this.mutationExecutor) {
       const executor = new IdempotentMutationExecutor({
         store: {
           async claim() { throw { code: 'TOOL_UNAVAILABLE', message: 'Mutation tools are not enabled' }; },
@@ -554,7 +554,7 @@ export class ConductorToolRuntime {
       fingerprint: mutationFingerprint(operation, input),
       operation,
       target: { kind: 'repository', id: input.project.repository ?? input.project.id },
-    }, async () => await mutate(this.mutationProvider!));
+    }, async () => await mutate(this.sourceControlMutationProvider!));
   }
 
   async preflightProject(

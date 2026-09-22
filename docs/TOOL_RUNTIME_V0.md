@@ -16,7 +16,7 @@ v0 always exposes the core non-mutating runtime tools:
 - `work-item.status(project, issueNumber)` reads one durable work item with normalized lifecycle status, kind, and origin.
 - `work-item.list(project, ...)` lists issue-backed work and can filter by normalized status, kind, and origin. Pull requests are excluded.
 
-When explicitly enabled with durable Redis idempotency state, it exposes bounded GitHub mutations:
+When explicitly enabled with durable Redis idempotency state, the current source-control mutation family exposes bounded GitHub mutations:
 
 - `git.branch.create` creates only `work/*` branches from an exact SHA.
 - `git.commit.create` creates a bounded file commit, supports tracked-path deletion with null content, and advances a `work/*` branch only from an expected head SHA.
@@ -68,7 +68,7 @@ Provider exceptions do not escape as ambiguous client failures.
 
 `ConductorToolRuntime` owns the stable facade and receipt boundary.
 
-Provider adapters report real capability and preflight evidence. They do not change the runtime contract. Development Intelligence may implement only read/query capabilities. Project/repository identifiers entering the runtime are execution-routing referents supplied by callers; Conductor does not expand them into a project model.
+Provider adapters report real capability and preflight evidence. They do not change the runtime contract. Provider-neutrality is organized by semantic capability family rather than a generic provider read/write/execute interface: source-control mutation, work-item mutation, intelligence/preflight, and future database/deployment/artifact families may evolve independently. Development Intelligence may implement only read/query capabilities. Project/repository identifiers entering the runtime are execution-routing referents supplied by callers; Conductor does not expand them into a project model.
 
 Operation preflight is evidence aggregation, not planning. An operation must first be exposed by the configured runtime. Responsible providers then prove or qualify the exact capability/permission lane they own. GitHub App evidence is operation-specific; static-token repository-role evidence remains degraded because it cannot prove fine-grained operation permissions.
 

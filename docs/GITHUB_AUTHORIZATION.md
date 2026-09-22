@@ -10,7 +10,7 @@ The system does not create product objectives or infer consequential approval.
 
 - **Development OS** owns objective, constraints, Ambition, stage/mode, Evidence Appetite, standing authorization, frontier, reversal, and handoff.
 - **Development Intelligence** owns read-only technical reality and evidence-backed analysis.
-- **Conductor** owns provider identity, capability, durable work routing, GitHub mutation, idempotency, receipts, and Preview/Main execution boundaries.
+- **Conductor** owns provider identity, capability, durable work routing, source-control mutation, idempotency, receipts, and Preview/Main execution boundaries. GitHub is the current adapter for that source-control family.
 - **Owner-facing UI/control surfaces**, if introduced later, consume these systems without becoming another semantic authority.
 
 ## Three independent decisions

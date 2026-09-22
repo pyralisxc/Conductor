@@ -24,7 +24,7 @@ It does **not** own product meaning, technical truth, development methodology, G
 4. Creating or classifying work does not authorize executing it.
 5. `preview` is the long-lived integrated candidate; `main` is accepted truth and requires explicit owner promotion.
 6. Provider capability, session authorization, and consequential approval are separate facts.
-7. Provider integrations are adapters; no provider should become the architecture.
+7. Provider integrations are semantic capability-family adapters; no provider should become the architecture and no non-source provider should be forced into Git/source-control contracts.
 8. No custom database merely for convenience. Add infrastructure only when native artifacts plus reasoning cannot represent something important.
 9. Automation is deferred until repeated real usage identifies deterministic, low-consequence lanes. Automation eligibility is derived, not a work-item field humans maintain.
 10. Crystallization is a reasoning outcome, not a mandatory repository artifact. Reconcile durable meaning into its canonical living document and discard temporary synthesis.
