@@ -12,7 +12,7 @@ import type {
   PreflightCheck,
   ProjectReference,
   ToolRuntimeProvider,
-  ProjectMutationProvider,
+  SourceControlMutationProvider,
 } from '../src/index.js';
 
 const project: ProjectReference = {
@@ -361,7 +361,7 @@ test('runtime exposes PR status as a read operation when a PR provider is config
 
 test('runtime exposes bounded mutations only with a provider and idempotency executor', async () => {
   let creates = 0;
-  const mutationProvider: ProjectMutationProvider = {
+  const sourceControlMutationProvider: SourceControlMutationProvider = {
     id: 'github',
     async getCapabilities() { return []; },
     async createBranch(input) {
@@ -377,7 +377,7 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
     async promotePullRequest() { throw new Error('unused'); },
   };
   const runtime = new ConductorToolRuntime({
-    mutationProvider,
+    sourceControlMutationProvider,
     mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
   });
   const capabilities = await runtime.capabilities();

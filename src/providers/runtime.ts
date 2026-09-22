@@ -1,7 +1,9 @@
 import type {
   CapabilityAvailability,
   PreflightCheck,
+  OperationPreflightCheck,
   ProjectReference,
+  RuntimeOperationName,
   CreateBranchInput,
   CreateCommitInput,
   CreatePullRequestInput,
@@ -31,6 +33,13 @@ export interface ProjectPreflightProvider extends RuntimeCapabilityProvider {
   preflightProject(project: ProjectReference): Promise<PreflightCheck[]>;
 }
 
+export interface OperationPreflightProvider extends RuntimeCapabilityProvider {
+  preflightOperation(
+    project: ProjectReference,
+    operation: RuntimeOperationName,
+  ): Promise<OperationPreflightCheck[] | undefined>;
+}
+
 export interface ProjectReferenceResolver {
   resolveProjectReference(project: ProjectReference): ProjectReference;
 }
@@ -54,7 +63,7 @@ export interface WorkItemMutationProvider extends WorkItemReadProvider {
   updateWorkItemClassification(input: UpdateWorkItemClassificationInput): Promise<WorkItemRecord>;
 }
 
-export interface ProjectMutationProvider extends RuntimeCapabilityProvider {
+export interface SourceControlMutationProvider extends RuntimeCapabilityProvider {
   createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }>;
   createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }>;
   createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }>;
@@ -67,10 +76,18 @@ export interface ProjectMutationProvider extends RuntimeCapabilityProvider {
 
 export type ToolRuntimeProvider =
   | RuntimeCapabilityProvider
-  | ProjectPreflightProvider;
+  | ProjectPreflightProvider
+  | OperationPreflightProvider;
 
 export function supportsProjectPreflight(
   provider: ToolRuntimeProvider,
 ): provider is ProjectPreflightProvider {
   return 'preflightProject' in provider;
+}
+
+
+export function supportsOperationPreflight(
+  provider: ToolRuntimeProvider,
+): provider is OperationPreflightProvider {
+  return 'preflightOperation' in provider;
 }

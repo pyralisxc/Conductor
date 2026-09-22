@@ -12,9 +12,9 @@ import {
   IdempotentMutationExecutor,
   InMemoryIdempotencyStore,
 } from '../src/index.js';
-import type { ProjectMutationProvider } from '../src/index.js';
+import type { SourceControlMutationProvider } from '../src/index.js';
 
-test('MCP adapter advertises only the two typed read-only runtime tools', async () => {
+test('MCP adapter advertises only the core typed read-only runtime tools', async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createConductorMcpServer(new ConductorToolRuntime({
     createOperationId: () => 'op-mcp',
@@ -86,7 +86,7 @@ test('HTTP MCP boundary publishes OAuth metadata and fails closed', async () => 
 });
 
 test('MCP advertises bounded mutations only when durable mutation infrastructure is supplied', async () => {
-  const mutationProvider: ProjectMutationProvider = {
+  const sourceControlMutationProvider: SourceControlMutationProvider = {
     id: 'github',
     async getCapabilities() { return []; },
     async createBranch(input) { return { repository: input.project.repository!, branch: input.branch, commitSha: input.fromSha }; },
@@ -99,7 +99,7 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
     async promotePullRequest() { throw new Error('unused'); },
   };
   const runtime = new ConductorToolRuntime({
-    mutationProvider,
+    sourceControlMutationProvider,
     mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   supportsProjectPreflight,
+  supportsOperationPreflight,
   type ToolRuntimeProvider,
-  type ProjectMutationProvider,
+  type SourceControlMutationProvider,
   type ProjectReferenceResolver,
   type PullRequestReadProvider,
   type WorkItemCandidateReadProvider,
@@ -23,9 +24,12 @@ import {
   type ToolDefinition,
   type ToolDiagnostic,
   type ToolOperationName,
-  type GetProjectStatusInput,
-  type ProjectStatusProjection,
-  type ProjectStatusWorkCounts,
+  type GetOperationPreflightInput,
+  type OperationPreflight,
+  type OperationPreflightCheck,
+  type GetDevelopmentStatusInput,
+  type DevelopmentStatusProjection,
+  type DevelopmentStatusWorkCounts,
   type CreateBranchInput,
   type CreateCommitInput,
   type CreatePullRequestInput,
@@ -54,14 +58,20 @@ const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   },
   {
     name: 'preflight_project',
-    description: 'Verify development access, execution surfaces, tests, and intelligence for a project.',
+    description: 'Verify repository-development access, execution surfaces, tests, and intelligence for an execution referent.',
     mutates: false,
   },
 ];
 
-const PROJECT_STATUS_READ_DEFINITION: ToolDefinition = {
-  name: 'project.status',
-  description: 'Reconstruct compact inspect-time project readiness, active work, and native PR candidate evidence.',
+const OPERATION_PREFLIGHT_DEFINITION: ToolDefinition = {
+  name: 'preflight_operation',
+  description: 'Verify whether one exact exposed Conductor operation can execute against a supplied execution referent.',
+  mutates: false,
+};
+
+const DEVELOPMENT_STATUS_READ_DEFINITION: ToolDefinition = {
+  name: 'development.status',
+  description: 'Reconstruct compact inspect-time development readiness, active work, and native PR candidate evidence.',
   mutates: false,
 };
 
@@ -93,6 +103,12 @@ const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'pull-request.merge.promote', description: 'Promote an exact explicitly approved PR candidate into the repository default branch.', mutates: true },
 ];
 
+const CORE_PREFLIGHT_OPERATIONS = new Set<import('./types.js').RuntimeOperationName>([
+  'capabilities',
+  'preflight_project',
+  'preflight_operation',
+]);
+
 const REQUIRED_PREFLIGHT_CHECKS: Record<PreflightIntent, readonly PreflightCheckId[]> = {
   inspect: ['repository.access', 'github.read', 'development-intelligence.read'],
   develop: ['repository.access', 'github.read', 'github.write', 'development-intelligence.read'],
@@ -106,7 +122,7 @@ export interface ConductorToolRuntimeOptions {
   providers?: ToolRuntimeProvider[];
   now?: () => Date;
   createOperationId?: () => string;
-  mutationProvider?: ProjectMutationProvider;
+  sourceControlMutationProvider?: SourceControlMutationProvider;
   mutationExecutor?: IdempotentMutationExecutor;
   projectResolver?: ProjectReferenceResolver;
   pullRequestProvider?: PullRequestReadProvider;
@@ -118,7 +134,7 @@ export class ConductorToolRuntime {
   private readonly providers: ToolRuntimeProvider[];
   private readonly now: () => Date;
   private readonly createOperationId: () => string;
-  private readonly mutationProvider?: ProjectMutationProvider;
+  private readonly sourceControlMutationProvider?: SourceControlMutationProvider;
   private readonly mutationExecutor?: IdempotentMutationExecutor;
   private readonly projectResolver?: ProjectReferenceResolver;
   private readonly pullRequestProvider?: PullRequestReadProvider;
@@ -130,7 +146,7 @@ export class ConductorToolRuntime {
     this.now = options.now ?? (() => new Date());
     this.createOperationId =
       options.createOperationId ?? (() => randomUUID());
-    this.mutationProvider = options.mutationProvider;
+    this.sourceControlMutationProvider = options.sourceControlMutationProvider;
     this.mutationExecutor = options.mutationExecutor;
     this.projectResolver = options.projectResolver;
     this.pullRequestProvider = options.pullRequestProvider;
@@ -138,11 +154,15 @@ export class ConductorToolRuntime {
     this.workItemCandidateProvider = options.workItemCandidateProvider;
   }
 
-  get mutationsEnabled(): boolean {
-    return Boolean(this.mutationProvider && this.mutationExecutor);
+  get sourceControlMutationsEnabled(): boolean {
+    return Boolean(this.sourceControlMutationProvider && this.mutationExecutor);
   }
 
-  get projectStatusReadEnabled(): boolean {
+  get operationPreflightEnabled(): boolean {
+    return this.providers.some((provider) => supportsOperationPreflight(provider));
+  }
+
+  get developmentStatusReadEnabled(): boolean {
     return Boolean(this.workItemCandidateProvider);
   }
 
@@ -205,14 +225,7 @@ export class ConductorToolRuntime {
         return {
           result: {
             contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
-            operations: [
-              ...TOOL_DEFINITIONS,
-              ...(this.projectStatusReadEnabled ? [PROJECT_STATUS_READ_DEFINITION] : []),
-              ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
-              ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
-              ...(this.mutationsEnabled ? MUTATION_DEFINITIONS : []),
-              ...(this.workItemMutationsEnabled ? WORK_ITEM_MUTATION_DEFINITIONS : []),
-            ],
+            operations: this.operationDefinitions(),
             capabilities,
             providers,
           },
@@ -222,20 +235,95 @@ export class ConductorToolRuntime {
     );
   }
 
-  async projectStatus(input: GetProjectStatusInput): Promise<ExecutionReceipt<ProjectStatusProjection>> {
+  async preflightOperation(input: GetOperationPreflightInput): Promise<ExecutionReceipt<OperationPreflight>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
     return await this.executeRead(
-      'project.status',
+      'preflight_operation',
+      { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
+      async () => {
+        const exposed = this.operationDefinitions().some((definition) => definition.name === input.operation);
+        const checks: OperationPreflightCheck[] = [{
+          provider: 'conductor',
+          status: exposed ? 'ready' : 'blocked',
+          summary: exposed
+            ? `Operation ${input.operation} is exposed by this runtime`
+            : `Operation ${input.operation} is not exposed by this runtime`,
+          diagnostics: [],
+          ...(exposed ? {} : {
+            error: normalizeToolError({
+              code: 'TOOL_UNAVAILABLE',
+              message: `Operation ${input.operation} is not exposed by this runtime`,
+            }, 'TOOL_UNAVAILABLE', 'conductor'),
+          }),
+        }];
+        if (exposed) {
+          let supportingProviders = 0;
+          for (const provider of this.providers) {
+            if (!supportsOperationPreflight(provider)) continue;
+            try {
+              const providerChecks = await provider.preflightOperation(resolvedProject, input.operation);
+              if (providerChecks === undefined) continue;
+              supportingProviders += 1;
+              checks.push(...providerChecks);
+            } catch (error) {
+              supportingProviders += 1;
+              const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', provider.id);
+              checks.push({
+                provider: provider.id,
+                status: normalized.code === 'TRANSIENT' ? 'degraded' : 'blocked',
+                summary: normalized.message,
+                error: normalized,
+                diagnostics: normalized.diagnostics,
+              });
+            }
+          }
+          if (supportingProviders === 0 && !CORE_PREFLIGHT_OPERATIONS.has(input.operation)) {
+            const error = normalizeToolError({
+              code: 'TOOL_UNAVAILABLE',
+              message: `No configured provider can preflight operation ${input.operation}`,
+            }, 'TOOL_UNAVAILABLE', 'conductor');
+            checks.push({
+              provider: 'conductor',
+              status: 'blocked',
+              summary: error.message,
+              error,
+              diagnostics: error.diagnostics,
+            });
+          }
+        }
+        const status = checks.some((check) => check.status === 'blocked' || check.status === 'unavailable')
+          ? 'blocked'
+          : checks.some((check) => check.status === 'degraded')
+            ? 'degraded'
+            : 'ready';
+        return {
+          result: {
+            contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+            project: resolvedProject,
+            operation: input.operation,
+            exposed,
+            status,
+            checks,
+          },
+        };
+      },
+    );
+  }
+
+  async developmentStatus(input: GetDevelopmentStatusInput): Promise<ExecutionReceipt<DevelopmentStatusProjection>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'development.status',
       { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
       async () => {
         const provider = this.workItemCandidateProvider;
-        if (!provider) throw { code: 'TOOL_UNAVAILABLE', message: 'Project status provider is not configured' };
+        if (!provider) throw { code: 'TOOL_UNAVAILABLE', message: 'Development status provider is not configured' };
 
         const preflightReceipt = await this.preflightProject(resolvedProject, 'inspect');
         if (preflightReceipt.status === 'failed') throw preflightReceipt.error;
 
         const listed = await provider.listWorkItems({ project: resolvedProject, limit: 100 });
-        const counts: ProjectStatusWorkCounts = {
+        const counts: DevelopmentStatusWorkCounts = {
           backlog: 0, ready: 0, inProgress: 0, blocked: 0, review: 0, done: 0, unknown: 0,
         };
         for (const item of listed.items) {
@@ -393,6 +481,18 @@ export class ConductorToolRuntime {
   }
 
 
+  private operationDefinitions(): ToolDefinition[] {
+    return [
+      ...TOOL_DEFINITIONS,
+      ...(this.operationPreflightEnabled ? [OPERATION_PREFLIGHT_DEFINITION] : []),
+      ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
+      ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
+      ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
+      ...(this.sourceControlMutationsEnabled ? MUTATION_DEFINITIONS : []),
+      ...(this.workItemMutationsEnabled ? WORK_ITEM_MUTATION_DEFINITIONS : []),
+    ];
+  }
+
   private async executeWorkItemMutation<Result>(
     input: { project: ProjectReference; idempotencyKey: string },
     operation: import('./types.js').MutationOperationName,
@@ -428,9 +528,9 @@ export class ConductorToolRuntime {
   private async executeMutation<Result>(
     input: { project: ProjectReference; idempotencyKey: string },
     operation: import('./types.js').MutationOperationName,
-    mutate: (provider: ProjectMutationProvider) => Promise<import('./idempotency.js').MutationResult<Result>>,
+    mutate: (provider: SourceControlMutationProvider) => Promise<import('./idempotency.js').MutationResult<Result>>,
   ): Promise<ExecutionReceipt<Result>> {
-    if (!this.mutationProvider || !this.mutationExecutor) {
+    if (!this.sourceControlMutationProvider || !this.mutationExecutor) {
       const executor = new IdempotentMutationExecutor({
         store: {
           async claim() { throw { code: 'TOOL_UNAVAILABLE', message: 'Mutation tools are not enabled' }; },
@@ -454,7 +554,7 @@ export class ConductorToolRuntime {
       fingerprint: mutationFingerprint(operation, input),
       operation,
       target: { kind: 'repository', id: input.project.repository ?? input.project.id },
-    }, async () => await mutate(this.mutationProvider!));
+    }, async () => await mutate(this.sourceControlMutationProvider!));
   }
 
   async preflightProject(

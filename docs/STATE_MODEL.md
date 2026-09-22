@@ -69,7 +69,8 @@ Reconstructable and normally **not** stored as another authority:
 - temporary work fronts or issue groupings;
 - a combined Work Envelope;
 - automation suitability;
-- current technical interpretation already available from Development Intelligence/provider state.
+- current technical interpretation already available from Development Intelligence/provider state;
+- project/provider topology that belongs to project truth or can be reconstructed from authoritative systems.
 
 ## Invariants
 
@@ -81,3 +82,4 @@ Reconstructable and normally **not** stored as another authority:
 - Main promotion approval is bound to an exact candidate SHA.
 - Unknown or conflicting classification remains explicit rather than being inferred from names or prose.
 - Concrete task tracking belongs in the work-item system, not Markdown backlog files.
+- A ProjectReference is an execution-routing referent, not a durable project description.

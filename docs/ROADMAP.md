@@ -11,7 +11,7 @@ Conductor is a headless, provider-neutral execution and durable work-routing lay
 The current foundation includes:
 
 - private GitHub App identity and repository-scoped permission evidence;
-- capability discovery and project preflight;
+- capability discovery, repository-development preflight, and exact operation-scoped preflight;
 - bounded branch/commit/PR operations with idempotent receipts;
 - exact-SHA Preview integration and explicit Main promotion;
 - read-only Development Intelligence preflight;
@@ -26,7 +26,7 @@ Make ordinary human-directed development require less restatement and less provi
 
 High-value areas include:
 
-- the initial `project.status` query-time projection for inspect readiness, active work, and native candidate evidence;
+- the initial `development.status` query-time projection for inspect readiness, active work, and native candidate evidence;
 - further compression of PR/check/deployment summaries;
 - useful work-item querying across status, kind, and origin;
 - natural issue ↔ PR relationships without duplicating their state;
@@ -69,9 +69,9 @@ A future owner/control UI may become valuable for many simultaneous workers, app
 
 ## Provider and environment portability
 
-Keep the domain model independent of GitHub, Vercel, ChatGPT, or a particular worker implementation.
+Keep the execution domain independent of GitHub, Vercel, ChatGPT, or a particular worker implementation. Provider-neutral execution must not become a duplicate model of product/project architecture.
 
-Add provider/runtime adapters only where an external system owns real technical state or execution capability.
+Add provider/runtime adapters only where an external system owns real technical state or execution capability. New adapters should integrate through exact operation capability/preflight contracts and the narrow semantic family they actually implement (for example source-control, database, deployment, or artifact execution), rather than a generic provider interface or persistent project-topology model.
 
 Local/Unity execution can be added when a concrete workflow requires it; it should not expand the core state model in advance.
 

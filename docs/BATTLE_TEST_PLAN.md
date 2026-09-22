@@ -7,8 +7,8 @@ This document tests the **current bounded runtime**. Future automation experimen
 ## Current runtime — identity and preflight
 
 1. GitHub App repository discovery resolves only allowed owners.
-2. Operation-aware preflight proves the permissions required by exposed tools.
-3. Static-token fallback is reported as degraded where operation-specific proof is unavailable.
+2. Operation-aware preflight first rejects operations that are not exposed by the configured runtime.
+3. GitHub App operation preflight proves the exact permissions used by execution; static-token fallback is reported as degraded where operation-specific proof is unavailable.
 4. Development Intelligence outage is explicit and fails the required preflight lane closed.
 5. OAuth read tokens cannot call mutation tools; write scope is explicit.
 

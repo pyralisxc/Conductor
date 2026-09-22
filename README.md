@@ -2,7 +2,7 @@
 
 Conductor is the provider-neutral bounded execution and durable work-routing layer for a human-directed AI-assisted development environment.
 
-It does **not** own product meaning, technical truth, development methodology, Git hosting, or the user's active reasoning context. It gives development clients a stable way to inspect capability, route durable work, perform bounded provider actions, and preserve exact execution receipts.
+It does **not** own product meaning, technical truth, development methodology, Git hosting, or the user's active reasoning context. It receives execution intent/referents from upstream reasoning and gives development clients a stable way to inspect capability, route durable work, perform bounded provider actions, and preserve exact execution receipts.
 
 > **Keep work native, effects bounded, evidence explicit, and production human-controlled.**
 
@@ -12,7 +12,7 @@ It does **not** own product meaning, technical truth, development methodology, G
 - **Development OS** — owns the active objective, product-development stage, authorization referent, reasoning continuity, and handoff boundary.
 - **Development Intelligence** — owns read-only technical evidence and project understanding.
 - **GitHub** — initial durable home for repositories, issues, PRs, checks, branches, releases, and history.
-- **Conductor** — normalizes provider capability, durable work routing, bounded mutation, Preview integration, and execution receipts.
+- **Conductor** — normalizes execution capability, durable work routing, bounded mutation, Preview integration, and execution receipts without inventing project architecture.
 - **Chat / development clients** — primary human interaction surface; they reason over durable project artifacts instead of requiring a separate Conductor memory system.
 - **Future control surfaces** — optional consumers of Conductor state when real automation or portfolio-operation needs justify them; they are not a prerequisite for the core system.
 
@@ -24,7 +24,7 @@ It does **not** own product meaning, technical truth, development methodology, G
 4. Creating or classifying work does not authorize executing it.
 5. `preview` is the long-lived integrated candidate; `main` is accepted truth and requires explicit owner promotion.
 6. Provider capability, session authorization, and consequential approval are separate facts.
-7. Provider integrations are adapters; no provider should become the architecture.
+7. Provider integrations are semantic capability-family adapters; no provider should become the architecture and no non-source provider should be forced into Git/source-control contracts.
 8. No custom database merely for convenience. Add infrastructure only when native artifacts plus reasoning cannot represent something important.
 9. Automation is deferred until repeated real usage identifies deterministic, low-consequence lanes. Automation eligibility is derived, not a work-item field humans maintain.
 10. Crystallization is a reasoning outcome, not a mandatory repository artifact. Reconcile durable meaning into its canonical living document and discard temporary synthesis.
@@ -123,7 +123,7 @@ npm run verify
 
 ## Tool runtime
 
-The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, intent-aware preflight, compact query-time project/work status reconstruction, a read-only Development Intelligence adapter, durable issue-backed work routing, and bounded GitHub mutations backed by durable idempotency state.
+The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, repository-development preflight, exact operation-scoped preflight, compact query-time development/work status reconstruction, a read-only Development Intelligence adapter, durable issue-backed work routing, and bounded GitHub mutations backed by durable idempotency state.
 
 The preferred GitHub identity is a private GitHub App that mints repository-scoped installation tokens and proves operation-specific permissions. Static tokens remain an explicitly degraded migration path.
 

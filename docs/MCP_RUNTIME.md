@@ -15,11 +15,11 @@ Dynamic client registrations, access tokens, and refresh tokens are signed and s
 
 The `/health` endpoint is public and returns only runtime health and contract version. It exposes no project or provider details.
 
-## Project authorization
+## Execution binding and repository authorization
 
 `CONDUCTOR_GITHUB_ALLOWED_OWNERS` authorizes repositories under one or more GitHub owners without per-repository environment edits. Projects may be addressed as `owner/repository`; when exactly one owner is authorized, a bare repository name is also accepted. Cross-owner requests fail closed.
 
-`CONDUCTOR_PROJECTS_JSON` supplies explicit aliases, workspace bindings, or per-project write policy. An explicit repository cannot be replaced by request input; mismatches fail with `CONFLICT`. Set `githubWrite` to `false` to deny mutations for an otherwise readable project.
+`CONDUCTOR_PROJECTS_JSON` is retained as a compatibility environment variable, but its entries are runtime execution bindings: explicit aliases, repository/workspace routing expectations, or per-binding GitHub write policy. They are not project metadata or architecture. An explicit repository cannot be replaced by request input; mismatches fail with `CONFLICT`. Set `githubWrite` to `false` to deny mutations for an otherwise readable binding.
 
 Example:
 
@@ -37,7 +37,9 @@ The preferred GitHub adapter identity is a private GitHub App. For each reposito
 
 `GITHUB_TOKEN` remains a migration fallback. Repository-level `permissions.push` is not proof that a fine-grained token can perform every advertised Git Data, pull-request, or issue-comment mutation, so static-token write preflight is intentionally degraded rather than operation-verified.
 
-The workspace adapter verifies readable/writable access, bounded Node process execution, and the presence of a package test script. Preflight does not execute the project's test suite. `inspect` requires repository read plus Development Intelligence, `develop` adds GitHub write, and `execute` adds workspace, shell, and tests.
+The workspace adapter verifies readable/writable access, bounded Node process execution, and the presence of a package test script. Preflight does not execute the project's test suite. `preflight_project` remains repository-development oriented: `inspect` requires repository read plus Development Intelligence, `develop` adds GitHub write, and `execute` adds workspace, shell, and tests.
+
+`preflight_operation` is narrower and preferred before one exact effect. It first proves that the operation is actually exposed by the current runtime, then aggregates operation-specific evidence from responsible providers. It does not discover project architecture or choose an operation.
 
 Development Intelligence remains read-only. `DEVINT_MCP_URL` and `DEVINT_AGENT_TOKEN` connect Conductor to its authenticated MCP `project_status` operation. If they are absent, capability and preflight results explicitly report the adapter as unavailable.
 
@@ -50,7 +52,7 @@ Development Intelligence remains read-only. `DEVINT_MCP_URL` and `DEVINT_AGENT_T
 | `CONDUCTOR_SESSION_SECRET` | Random secret of at least 32 characters used through purpose-separated signing keys |
 | `CONDUCTOR_OAUTH_ALLOWED_REDIRECT_ORIGINS` | Comma-separated redirect origins; defaults to `https://chatgpt.com` |
 | `CONDUCTOR_GITHUB_ALLOWED_OWNERS` | Comma-separated GitHub owner namespaces Conductor may resolve dynamically |
-| `CONDUCTOR_PROJECTS_JSON` | Optional aliases, workspace bindings, and per-project overrides |
+| `CONDUCTOR_PROJECTS_JSON` | Compatibility name for optional runtime aliases, workspace bindings, and execution-policy overrides; not project metadata |
 | `CONDUCTOR_GITHUB_APP_ID` | Numeric ID of the private Conductor GitHub App |
 | `CONDUCTOR_GITHUB_APP_PRIVATE_KEY` | GitHub App PEM private key; multiline or `\\n`-escaped |
 | `GITHUB_TOKEN` | Transitional least-privilege static token; ignored when App credentials are configured |
@@ -69,7 +71,7 @@ npm run verify
 npm start
 ```
 
-Deploy behind HTTPS or build the included container. Confirm `/health`, both discovery documents, and the unauthenticated `/mcp` challenge before connecting ChatGPT. Then enable ChatGPT developer mode, add the public URL including `/mcp`, choose OAuth, complete owner sign-in and consent, review the discovered tools, and run `capabilities` followed by `preflight_project` in a fresh conversation. Reauthorize with `conductor.write` before calling any mutation.
+Deploy behind HTTPS or build the included container. Confirm `/health`, both discovery documents, and the unauthenticated `/mcp` challenge before connecting ChatGPT. Then enable ChatGPT developer mode, add the public URL including `/mcp`, choose OAuth, complete owner sign-in and consent, review the discovered tools, and run `capabilities` followed by `preflight_project` for repository-development readiness or `preflight_operation` before an exact operation. Reauthorize with `conductor.write` before calling any mutation.
 
 ## Deliberate limits
 

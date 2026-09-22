@@ -26,9 +26,9 @@ audit:
 
 # Conductor orchestration policy
 
-This file declares repository-local execution policy for Conductor.
+This file declares repository-local execution policy for Conductor. It must not become an inventory of project architecture, provider topology, or technical meaning.
 
-It does not own product direction, current work, Development OS stage or authorization, technical truth, or current provider state. Those remain with their canonical systems and GitHub.
+It does not own product direction, current work, Development OS stage or authorization, technical truth, project/provider topology, or current provider state. Those remain with their canonical systems and provider/Development Intelligence evidence.
 
 ## Repository flow
 

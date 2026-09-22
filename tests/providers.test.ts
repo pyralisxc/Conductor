@@ -10,13 +10,13 @@ import {
   DevelopmentIntelligenceProvider,
   UnavailableDevelopmentIntelligenceProvider,
   WorkspaceRuntimeProvider,
-  parseProjects,
+  parseRuntimeBindings,
   parseOwners,
 } from '../src/index.js';
 
 test('GitHub provider reports missing authentication explicitly', async () => {
   const provider = new GitHubRuntimeProvider({
-    projects: [{ id: 'conductor', repository: 'pyralisxc/Conductor' }],
+    bindings: [{ id: 'conductor', repository: 'pyralisxc/Conductor' }],
   });
 
   const capabilities = await provider.getCapabilities();
@@ -32,7 +32,7 @@ test('GitHub provider proves project-specific read and write permissions', async
   const requested: string[] = [];
   const provider = new GitHubRuntimeProvider({
     token: 'secret',
-    projects: [{ id: 'conductor', repository: 'pyralisxc/Conductor' }],
+    bindings: [{ id: 'conductor', repository: 'pyralisxc/Conductor' }],
     fetch: async (input) => {
       requested.push(String(input));
       if (String(input).endsWith('/rate_limit')) {
@@ -197,7 +197,7 @@ test('GitHub provider rejects project identity mismatches before network access'
   let calls = 0;
   const provider = new GitHubRuntimeProvider({
     token: 'secret',
-    projects: [{ id: 'conductor', repository: 'pyralisxc/Conductor' }],
+    bindings: [{ id: 'conductor', repository: 'pyralisxc/Conductor' }],
     fetch: async () => {
       calls += 1;
       return Response.json({});
@@ -557,8 +557,8 @@ test('workspace provider verifies an allowlisted workspace, shell, and test scri
   assert.deepEqual(checks.map((check) => check.status), ['ready', 'ready', 'ready']);
 });
 
-test('project configuration is strict and rejects duplicate identities', () => {
-  assert.deepEqual(parseProjects('[{"id":"conductor","repository":"pyralisxc/Conductor"}]'), [{
+test('runtime binding configuration is strict and rejects duplicate identities', () => {
+  assert.deepEqual(parseRuntimeBindings('[{"id":"conductor","repository":"pyralisxc/Conductor"}]'), [{
     id: 'conductor',
     repository: 'pyralisxc/Conductor',
     workspace: undefined,
@@ -566,8 +566,8 @@ test('project configuration is strict and rejects duplicate identities', () => {
   }]);
   assert.deepEqual(parseOwners('pyralisxc,PYRALISXC'), ['pyralisxc']);
   assert.throws(
-    () => parseProjects('[{"id":"same"},{"id":"same"}]'),
-    /Duplicate project id/,
+    () => parseRuntimeBindings('[{"id":"same"},{"id":"same"}]'),
+    /Duplicate runtime binding id/,
   );
 });
 
