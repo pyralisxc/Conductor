@@ -2,15 +2,17 @@ import { normalizeToolError } from '../runtime/errors.js';
 import type {
   CapabilityAvailability,
   PreflightCheck,
+  OperationPreflightCheck,
   ProjectReference,
+  RuntimeOperationName,
 } from '../runtime/types.js';
-import type { ProjectPreflightProvider } from './runtime.js';
+import type { OperationPreflightProvider, ProjectPreflightProvider } from './runtime.js';
 
 /**
  * Truthful placeholder used until a deployed Development Intelligence API
  * adapter is configured. It never converts missing integration into evidence.
  */
-export class UnavailableDevelopmentIntelligenceProvider implements ProjectPreflightProvider {
+export class UnavailableDevelopmentIntelligenceProvider implements ProjectPreflightProvider, OperationPreflightProvider {
   readonly id = 'development-intelligence';
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
@@ -28,6 +30,14 @@ export class UnavailableDevelopmentIntelligenceProvider implements ProjectPrefli
         message: 'No deployed Development Intelligence adapter is configured',
       }],
     }];
+  }
+
+  async preflightOperation(
+    project: ProjectReference,
+    operation: RuntimeOperationName,
+  ): Promise<OperationPreflightCheck[] | undefined> {
+    if (operation !== 'development.status') return undefined;
+    return operationChecks(await this.preflightProject(project));
   }
 
   async preflightProject(_project: ProjectReference): Promise<PreflightCheck[]> {
@@ -61,7 +71,7 @@ export interface DevelopmentIntelligenceProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export class DevelopmentIntelligenceProvider implements ProjectPreflightProvider {
+export class DevelopmentIntelligenceProvider implements ProjectPreflightProvider, OperationPreflightProvider {
   readonly id = 'development-intelligence';
   private readonly endpoint: string;
   private readonly token?: string;
@@ -94,6 +104,14 @@ export class DevelopmentIntelligenceProvider implements ProjectPreflightProvider
       const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', this.id);
       return [unavailableIntelligenceCapability(normalized.code, normalized.message)];
     }
+  }
+
+  async preflightOperation(
+    project: ProjectReference,
+    operation: RuntimeOperationName,
+  ): Promise<OperationPreflightCheck[] | undefined> {
+    if (operation !== 'development.status') return undefined;
+    return operationChecks(await this.preflightProject(project));
   }
 
   async preflightProject(project: ProjectReference): Promise<PreflightCheck[]> {
@@ -230,4 +248,15 @@ function classifyStatusError(message: string): import('../runtime/types.js').Too
   if (/\b404\b|not found/i.test(message)) return 'NOT_FOUND';
   if (/timeout|timed out|temporar|rate limit|\b429\b|\b5\d\d\b/i.test(message)) return 'TRANSIENT';
   return 'TOOL_UNAVAILABLE';
+}
+
+
+function operationChecks(checks: PreflightCheck[]): OperationPreflightCheck[] {
+  return checks.map((check) => ({
+    provider: check.provider,
+    status: check.status,
+    summary: check.summary,
+    error: check.error,
+    diagnostics: check.diagnostics,
+  }));
 }
