@@ -204,22 +204,24 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     _meta: { securitySchemes: oauthSecurity },
   }, async ({ project, intent }) => result(await runtime.preflightProject(project, intent)));
 
-  server.registerTool('preflight_operation', {
-    title: 'Preflight one exact Conductor operation',
-    description: 'Verify whether one exact exposed operation can execute against the supplied execution-routing referent. This does not infer which operation the project needs.',
-    inputSchema: z.object({
-      project: projectSchema,
-      operation: runtimeOperationSchema,
-    }),
-    outputSchema: readReceiptSchema,
-    annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: false,
-    },
-    _meta: { securitySchemes: oauthSecurity },
-  }, async (input) => result(await runtime.preflightOperation(input)));
+  if (runtime.operationPreflightEnabled) {
+    server.registerTool('preflight_operation', {
+      title: 'Preflight one exact Conductor operation',
+      description: 'Verify whether one exact exposed operation can execute against the supplied execution-routing referent. This does not infer which operation the project needs.',
+      inputSchema: z.object({
+        project: projectSchema,
+        operation: runtimeOperationSchema,
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.preflightOperation(input)));
+  }
 
   if (runtime.developmentStatusReadEnabled) {
     server.registerTool('development.status', {
