@@ -11,7 +11,7 @@ import {
 } from '../src/index.js';
 import type {
   OperationPreflightProvider,
-  ProjectMutationProvider,
+  SourceControlMutationProvider,
   WorkItemCandidateReadProvider,
 } from '../src/index.js';
 
@@ -106,11 +106,11 @@ test('runtime operation preflight uses provider evidence for an exposed GitHub m
     },
     allowedOwners: ['pyralisxc'],
   });
-  const mutationProvider: ProjectMutationProvider = github;
+  const sourceControlMutationProvider: SourceControlMutationProvider = github;
   const runtime = new ConductorToolRuntime({
     providers: [github],
     projectResolver: github,
-    mutationProvider,
+    sourceControlMutationProvider,
     mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
   });
 
