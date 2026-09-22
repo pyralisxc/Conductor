@@ -2,7 +2,9 @@ import type {
   CapabilityAvailability,
   NormalizedToolError,
   PreflightCheck,
+  OperationPreflightCheck,
   ProjectReference,
+  RuntimeOperationName,
   CreateBranchInput,
   CreateCommitInput,
   CreatePullRequestInput,
@@ -32,7 +34,7 @@ import type {
   UpdateWorkItemClassificationInput,
 } from '../runtime/types.js';
 import { normalizeToolError } from '../runtime/errors.js';
-import type { ProjectMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
+import type { OperationPreflightProvider, ProjectMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
 import {
   StaticGitHubCredentialProvider,
   type GitHubCredential,
@@ -133,7 +135,7 @@ export interface GitHubRuntimeProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectMutationProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
+export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, ProjectMutationProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
   readonly id = 'github';
   private readonly credentials?: GitHubCredentialProvider;
   private readonly projects: ReadonlyMap<string, GitHubProjectConfiguration>;
@@ -283,12 +285,102 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     }
   }
 
+  async preflightOperation(
+    project: ProjectReference,
+    operation: RuntimeOperationName,
+  ): Promise<OperationPreflightCheck[] | undefined> {
+    const requirements = githubOperationRequirements(operation);
+    if (!requirements) return undefined;
+    const resolution = this.resolveProject(project);
+    if ('error' in resolution) {
+      const error = normalizeToolError({
+        code: resolution.code,
+        message: resolution.error,
+      }, resolution.code, this.id);
+      return [operationCheck('blocked', error.message, error, error.diagnostics)];
+    }
+    if (!this.credentials) {
+      const error = normalizeToolError({
+        code: 'AUTH_REQUIRED',
+        message: 'GitHub authentication is not configured',
+      }, 'AUTH_REQUIRED', this.id);
+      return [operationCheck('blocked', error.message, error, error.diagnostics)];
+    }
+    const configured = resolution.project;
+    if (requirements.access === 'write' && configured.write === false) {
+      const error = normalizeToolError({
+        code: 'PERMISSION_DENIED',
+        message: `Writes are disabled for ${configured.repository}`,
+      }, 'PERMISSION_DENIED', this.id);
+      return [operationCheck('blocked', error.message, error, error.diagnostics)];
+    }
+    try {
+      const credential = await this.credentials.getCredential(configured.repository);
+      const evidence = permissionDiagnostics(credential, configured.repository);
+      if (credential.kind === 'app-installation') {
+        const missing = missingPermissions(credential, requirements.permissions);
+        if (missing.length > 0) {
+          const error = normalizeToolError({
+            code: 'PERMISSION_DENIED',
+            message: `GitHub App installation lacks required permissions for ${configured.repository}: ${missing.join(', ')}`,
+          }, 'PERMISSION_DENIED', this.id);
+          return [operationCheck('blocked', error.message, error, [...evidence, ...error.diagnostics])];
+        }
+        return [operationCheck(
+          'ready',
+          `GitHub App can execute ${operation} for ${configured.repository}`,
+          undefined,
+          evidence,
+        )];
+      }
+
+      const response = await this.fetch(
+        `${this.apiBaseUrl}/repos/${encodeRepository(configured.repository)}`,
+        { headers: this.headers(credential.token) },
+      );
+      if (!response.ok) throw await githubResponseError(response);
+      const repository = await response.json() as GitHubRepositoryResponse;
+      const canRead = repository.permissions?.pull ?? true;
+      if (!canRead) {
+        const error = normalizeToolError({
+          code: 'PERMISSION_DENIED',
+          message: `GitHub token cannot read ${configured.repository}`,
+        }, 'PERMISSION_DENIED', this.id);
+        return [operationCheck('blocked', error.message, error, [...evidence, ...error.diagnostics])];
+      }
+      if (requirements.access === 'write') {
+        const canWrite = Boolean(
+          repository.permissions?.push
+          || repository.permissions?.admin
+          || repository.permissions?.maintain,
+        );
+        if (!canWrite) {
+          const error = normalizeToolError({
+            code: 'PERMISSION_DENIED',
+            message: `GitHub token repository role cannot execute ${operation} for ${configured.repository}`,
+          }, 'PERMISSION_DENIED', this.id);
+          return [operationCheck('blocked', error.message, error, [...evidence, ...error.diagnostics])];
+        }
+      }
+      return [operationCheck(
+        'degraded',
+        `Repository role permits ${operation} for ${configured.repository}, but a static token cannot prove operation-specific permissions`,
+        undefined,
+        evidence,
+      )];
+    } catch (error) {
+      const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', this.id);
+      return [operationCheck(
+        normalized.code === 'TRANSIENT' ? 'degraded' : 'blocked',
+        normalized.message,
+        normalized,
+        normalized.diagnostics,
+      )];
+    }
+  }
+
   async getPullRequestStatus(input: GetPullRequestStatusInput): Promise<PullRequestStatus> {
-    const { repository, credential } = await this.readableRepository(input.project, {
-      pull_requests: 'read',
-      checks: 'read',
-      actions: 'read',
-    });
+    const { repository, credential } = await this.readableRepository(input.project, GITHUB_READ_OPERATION_PERMISSIONS['pull-request.status']);
     assertPullRequestNumber(input.pullRequestNumber);
     const pull = await this.request<GitHubPullRequestResponse>(
       repository,
@@ -359,7 +451,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }> {
-    const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['git.branch.create']);
     assertWorkBranch(input.branch);
     assertSha(input.fromSha, 'fromSha');
     const created = await this.request<{ object: { sha: string } }>(repository, '/git/refs', {
@@ -370,7 +462,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }> {
-    const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['git.commit.create']);
     assertWorkBranch(input.branch);
     assertSha(input.expectedHeadSha, 'expectedHeadSha');
     if (!input.message.trim()) throw { code: 'CONFLICT', message: 'Commit message must not be empty' };
@@ -421,7 +513,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
 
 
   async getWorkItemStatus(input: GetWorkItemStatusInput): Promise<WorkItemRecord> {
-    const { repository, credential } = await this.readableRepository(input.project, { issues: 'read' });
+    const { repository, credential } = await this.readableRepository(input.project, GITHUB_READ_OPERATION_PERMISSIONS['work-item.status']);
     assertIssueNumber(input.issueNumber);
     const issue = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {}, credential);
     assertIssueIsWorkItem(issue);
@@ -429,7 +521,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async listWorkItems(input: ListWorkItemsInput): Promise<WorkItemList> {
-    const { repository, credential } = await this.readableRepository(input.project, { issues: 'read' });
+    const { repository, credential } = await this.readableRepository(input.project, GITHUB_READ_OPERATION_PERMISSIONS['work-item.list']);
     const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
     const statuses = input.statuses?.length ? new Set(input.statuses) : undefined;
     const kinds = input.kinds?.length ? new Set(input.kinds) : undefined;
@@ -454,12 +546,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async listWorkItemPullRequests(input: GetWorkItemCandidatesInput): Promise<PullRequestStatus[]> {
-    const { repository, credential } = await this.readableRepository(input.project, {
-      issues: 'read',
-      pull_requests: 'read',
-      checks: 'read',
-      actions: 'read',
-    });
+    const { repository, credential } = await this.readableRepository(input.project, GITHUB_READ_OPERATION_PERMISSIONS['development.status']);
     assertIssueNumber(input.issueNumber);
     const timeline = await this.request<GitHubIssueTimelineEvent[]>(
       repository,
@@ -481,7 +568,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async createWorkItem(input: CreateWorkItemInput): Promise<WorkItemRecord> {
-    const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['work-item.create']);
     const title = input.title.trim();
     if (!title) throw { code: 'CONFLICT', message: 'Work-item title must not be empty' };
     if (title.length > 256) throw { code: 'CONFLICT', message: 'Work-item title must be 256 characters or fewer' };
@@ -512,7 +599,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItemRecord> {
-    const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['work-item.update-status']);
     assertIssueNumber(input.issueNumber);
     const current = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {}, credential);
     assertIssueIsWorkItem(current);
@@ -534,7 +621,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async updateWorkItemClassification(input: UpdateWorkItemClassificationInput): Promise<WorkItemRecord> {
-    const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['work-item.classification.update']);
     assertIssueNumber(input.issueNumber);
     if (input.kind === undefined && input.origin === undefined) {
       throw { code: 'CONFLICT', message: 'At least one of kind or origin must be provided' };
@@ -634,7 +721,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }> {
-    const { repository, credential } = await this.writableRepository(input.project, { pull_requests: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.create']);
     assertWorkBranch(input.head);
     const base = input.base.trim();
     if (!base || base.startsWith('refs/')) throw { code: 'CONFLICT', message: 'Pull-request base must be a branch name' };
@@ -653,7 +740,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async commentPullRequest(input: CommentPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; commentId: string; url: string }> {
-    const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.comment.create']);
     if (!Number.isSafeInteger(input.pullRequestNumber) || input.pullRequestNumber < 1) {
       throw { code: 'CONFLICT', message: 'pullRequestNumber must be a positive integer' };
     }
@@ -670,7 +757,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async updatePullRequestLabels(input: UpdatePullRequestLabelsInput): Promise<{ repository: string; pullRequestNumber: number; labels: string[] }> {
-    const { repository, credential } = await this.writableRepository(input.project, { issues: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.labels.update']);
     assertPullRequestNumber(input.pullRequestNumber);
     const add = normalizedLabels(input.add);
     const remove = new Set(normalizedLabels(input.remove).map((label) => label.toLowerCase()));
@@ -701,7 +788,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }> {
-    const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.merge.integration']);
     const pull = await this.mergeCandidate(repository, credential, input.pullRequestNumber, input.expectedHeadSha, input.expectedBaseSha);
     const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
     const protectedBases = new Set(
@@ -717,7 +804,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 
   async reconcilePreviewPullRequest(input: ReconcilePreviewPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }> {
-    const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.merge.reconcile-preview']);
     const pull = await this.mergeCandidate(repository, credential, input.pullRequestNumber, input.expectedHeadSha, input.expectedBaseSha);
     const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
     if (!repositoryInfo.default_branch || pull.head.ref.toLowerCase() !== repositoryInfo.default_branch.toLowerCase()) {
@@ -733,7 +820,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   async promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string }> {
     const approvalReference = input.approvalReference.trim();
     if (!approvalReference) throw { code: 'PERMISSION_DENIED', message: 'Promotion requires a non-empty owner approval reference' };
-    const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.merge.promote']);
     const pull = await this.mergeCandidate(repository, credential, input.pullRequestNumber, input.expectedHeadSha, input.expectedBaseSha);
     assertPromotionSourceBranch(pull.head.ref);
     const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
@@ -908,6 +995,95 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
   }
 }
 
+
+type GitHubReadOperation =
+  | 'development.status'
+  | 'pull-request.status'
+  | 'work-item.status'
+  | 'work-item.list';
+
+type GitHubWriteOperation =
+  | 'git.branch.create'
+  | 'git.commit.create'
+  | 'pull-request.create'
+  | 'pull-request.comment.create'
+  | 'pull-request.labels.update'
+  | 'pull-request.merge.integration'
+  | 'pull-request.merge.reconcile-preview'
+  | 'pull-request.merge.promote'
+  | 'work-item.create'
+  | 'work-item.update-status'
+  | 'work-item.classification.update';
+
+const GITHUB_READ_OPERATION_PERMISSIONS: Readonly<Record<
+  GitHubReadOperation,
+  Readonly<Record<string, 'read' | 'write'>>
+>> = {
+  'development.status': {
+    issues: 'read',
+    pull_requests: 'read',
+    checks: 'read',
+    actions: 'read',
+  },
+  'pull-request.status': {
+    pull_requests: 'read',
+    checks: 'read',
+    actions: 'read',
+  },
+  'work-item.status': { issues: 'read' },
+  'work-item.list': { issues: 'read' },
+};
+
+const GITHUB_WRITE_OPERATION_PERMISSIONS: Readonly<Record<
+  GitHubWriteOperation,
+  Readonly<Record<string, 'write'>>
+>> = {
+  'git.branch.create': { contents: 'write' },
+  'git.commit.create': { contents: 'write' },
+  'pull-request.create': { pull_requests: 'write' },
+  'pull-request.comment.create': { issues: 'write' },
+  'pull-request.labels.update': { issues: 'write' },
+  'pull-request.merge.integration': { contents: 'write' },
+  'pull-request.merge.reconcile-preview': { contents: 'write' },
+  'pull-request.merge.promote': { contents: 'write' },
+  'work-item.create': { issues: 'write' },
+  'work-item.update-status': { issues: 'write' },
+  'work-item.classification.update': { issues: 'write' },
+};
+
+function githubOperationRequirements(operation: RuntimeOperationName): {
+  access: 'read' | 'write';
+  permissions: Readonly<Record<string, 'read' | 'write'>>;
+} | undefined {
+  if (operation in GITHUB_READ_OPERATION_PERMISSIONS) {
+    return {
+      access: 'read',
+      permissions: GITHUB_READ_OPERATION_PERMISSIONS[operation as GitHubReadOperation],
+    };
+  }
+  if (operation in GITHUB_WRITE_OPERATION_PERMISSIONS) {
+    return {
+      access: 'write',
+      permissions: GITHUB_WRITE_OPERATION_PERMISSIONS[operation as GitHubWriteOperation],
+    };
+  }
+  return undefined;
+}
+
+function operationCheck(
+  status: OperationPreflightCheck['status'],
+  summary: string,
+  error?: NormalizedToolError,
+  diagnostics: ToolDiagnostic[] = error?.diagnostics ?? [],
+): OperationPreflightCheck {
+  return {
+    provider: 'github',
+    status,
+    summary,
+    error,
+    diagnostics,
+  };
+}
 
 const WORK_ITEM_STATUS_PREFIX = 'status:';
 const WORK_ITEM_KIND_PREFIX = 'kind:';
