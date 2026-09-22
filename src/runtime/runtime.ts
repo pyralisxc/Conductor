@@ -61,12 +61,13 @@ const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     description: 'Verify repository-development access, execution surfaces, tests, and intelligence for an execution referent.',
     mutates: false,
   },
-  {
-    name: 'preflight_operation',
-    description: 'Verify whether one exact exposed Conductor operation can execute against a supplied execution referent.',
-    mutates: false,
-  },
 ];
+
+const OPERATION_PREFLIGHT_DEFINITION: ToolDefinition = {
+  name: 'preflight_operation',
+  description: 'Verify whether one exact exposed Conductor operation can execute against a supplied execution referent.',
+  mutates: false,
+};
 
 const DEVELOPMENT_STATUS_READ_DEFINITION: ToolDefinition = {
   name: 'development.status',
@@ -155,6 +156,10 @@ export class ConductorToolRuntime {
 
   get mutationsEnabled(): boolean {
     return Boolean(this.mutationProvider && this.mutationExecutor);
+  }
+
+  get operationPreflightEnabled(): boolean {
+    return this.providers.some((provider) => supportsOperationPreflight(provider));
   }
 
   get developmentStatusReadEnabled(): boolean {
@@ -479,6 +484,7 @@ export class ConductorToolRuntime {
   private operationDefinitions(): ToolDefinition[] {
     return [
       ...TOOL_DEFINITIONS,
+      ...(this.operationPreflightEnabled ? [OPERATION_PREFLIGHT_DEFINITION] : []),
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
