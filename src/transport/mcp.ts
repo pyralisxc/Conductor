@@ -25,15 +25,19 @@ const errorSchema = z.object({
   diagnostics: z.array(diagnosticSchema),
 });
 
+const runtimeOperationSchema = z.enum([
+  'capabilities', 'preflight_project', 'preflight_operation',
+  'development.status', 'pull-request.status', 'work-item.status', 'work-item.list',
+  'git.branch.create', 'git.commit.create', 'git.push',
+  'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
+  'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
+  'work-item.create', 'work-item.update-status', 'work-item.classification.update',
+]);
+
 const receiptBase = {
   contractVersion: z.literal('conductor.tool-runtime.v0'),
   operationId: z.string(),
-  operation: z.enum([
-    'capabilities', 'preflight_project', 'development.status', 'pull-request.status', 'work-item.status', 'work-item.list',
-    'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
-    'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
-    'work-item.create', 'work-item.update-status', 'work-item.classification.update',
-  ]),
+  operation: runtimeOperationSchema,
   target: z.object({
     kind: z.enum(['runtime', 'project', 'repository', 'workspace']),
     id: z.string(),
@@ -67,12 +71,7 @@ const capabilitiesReceiptSchema = z.union([
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
       operations: z.array(z.object({
-        name: z.enum([
-          'capabilities', 'preflight_project', 'development.status', 'pull-request.status', 'work-item.status', 'work-item.list',
-          'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
-          'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
-          'work-item.create', 'work-item.update-status', 'work-item.classification.update',
-        ]),
+        name: runtimeOperationSchema,
         description: z.string(),
         mutates: z.boolean(),
       })),
@@ -170,7 +169,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
   const server = new McpServer(
     { name: 'conductor', version: '0.1.0' },
     {
-      instructions: 'Call capabilities first in a fresh conversation. Call preflight_project before project work. Treat unavailable or blocked checks as hard evidence; do not infer hidden access.',
+      instructions: 'Call capabilities first in a fresh conversation. Use preflight_project for repository-development session readiness and preflight_operation before one exact operation. Treat unavailable or blocked checks as hard evidence; do not infer hidden access or project meaning.',
     },
   );
 
@@ -204,6 +203,23 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     },
     _meta: { securitySchemes: oauthSecurity },
   }, async ({ project, intent }) => result(await runtime.preflightProject(project, intent)));
+
+  server.registerTool('preflight_operation', {
+    title: 'Preflight one exact Conductor operation',
+    description: 'Verify whether one exact exposed operation can execute against the supplied execution-routing referent. This does not infer which operation the project needs.',
+    inputSchema: z.object({
+      project: projectSchema,
+      operation: runtimeOperationSchema,
+    }),
+    outputSchema: readReceiptSchema,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    _meta: { securitySchemes: oauthSecurity },
+  }, async (input) => result(await runtime.preflightOperation(input)));
 
   if (runtime.developmentStatusReadEnabled) {
     server.registerTool('development.status', {
