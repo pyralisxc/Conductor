@@ -15,11 +15,11 @@ Dynamic client registrations, access tokens, and refresh tokens are signed and s
 
 The `/health` endpoint is public and returns only runtime health and contract version. It exposes no project or provider details.
 
-## Project authorization
+## Execution binding and repository authorization
 
 `CONDUCTOR_GITHUB_ALLOWED_OWNERS` authorizes repositories under one or more GitHub owners without per-repository environment edits. Projects may be addressed as `owner/repository`; when exactly one owner is authorized, a bare repository name is also accepted. Cross-owner requests fail closed.
 
-`CONDUCTOR_PROJECTS_JSON` supplies explicit aliases, workspace bindings, or per-project write policy. An explicit repository cannot be replaced by request input; mismatches fail with `CONFLICT`. Set `githubWrite` to `false` to deny mutations for an otherwise readable project.
+`CONDUCTOR_PROJECTS_JSON` is retained as a compatibility environment variable, but its entries are runtime execution bindings: explicit aliases, repository/workspace routing expectations, or per-binding GitHub write policy. They are not project metadata or architecture. An explicit repository cannot be replaced by request input; mismatches fail with `CONFLICT`. Set `githubWrite` to `false` to deny mutations for an otherwise readable binding.
 
 Example:
 
@@ -50,7 +50,7 @@ Development Intelligence remains read-only. `DEVINT_MCP_URL` and `DEVINT_AGENT_T
 | `CONDUCTOR_SESSION_SECRET` | Random secret of at least 32 characters used through purpose-separated signing keys |
 | `CONDUCTOR_OAUTH_ALLOWED_REDIRECT_ORIGINS` | Comma-separated redirect origins; defaults to `https://chatgpt.com` |
 | `CONDUCTOR_GITHUB_ALLOWED_OWNERS` | Comma-separated GitHub owner namespaces Conductor may resolve dynamically |
-| `CONDUCTOR_PROJECTS_JSON` | Optional aliases, workspace bindings, and per-project overrides |
+| `CONDUCTOR_PROJECTS_JSON` | Compatibility name for optional runtime aliases, workspace bindings, and execution-policy overrides; not project metadata |
 | `CONDUCTOR_GITHUB_APP_ID` | Numeric ID of the private Conductor GitHub App |
 | `CONDUCTOR_GITHUB_APP_PRIVATE_KEY` | GitHub App PEM private key; multiline or `\\n`-escaped |
 | `GITHUB_TOKEN` | Transitional least-privilege static token; ignored when App credentials are configured |
