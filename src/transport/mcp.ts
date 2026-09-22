@@ -29,7 +29,7 @@ const receiptBase = {
   contractVersion: z.literal('conductor.tool-runtime.v0'),
   operationId: z.string(),
   operation: z.enum([
-    'capabilities', 'preflight_project', 'pull-request.status', 'work-item.status', 'work-item.list',
+    'capabilities', 'preflight_project', 'project.status', 'pull-request.status', 'work-item.status', 'work-item.list',
     'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
     'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
     'work-item.create', 'work-item.update-status', 'work-item.classification.update',
@@ -68,7 +68,7 @@ const capabilitiesReceiptSchema = z.union([
       contractVersion: z.literal('conductor.tool-runtime.v0'),
       operations: z.array(z.object({
         name: z.enum([
-          'capabilities', 'preflight_project', 'pull-request.status', 'work-item.status', 'work-item.list',
+          'capabilities', 'preflight_project', 'project.status', 'pull-request.status', 'work-item.status', 'work-item.list',
           'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
           'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
           'work-item.create', 'work-item.update-status', 'work-item.classification.update',
@@ -204,6 +204,20 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     },
     _meta: { securitySchemes: oauthSecurity },
   }, async ({ project, intent }) => result(await runtime.preflightProject(project, intent)));
+
+  if (runtime.projectStatusReadEnabled) {
+    server.registerTool('project.status', {
+      title: 'Read compact project status',
+      description: 'Reconstruct inspect-time preflight plus ready/in-progress/blocked/review work and native cross-referenced PR candidate checks. This read does not rank or select work.',
+      inputSchema: z.object({
+        project: projectSchema,
+        limit: z.number().int().min(1).max(50).default(25),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.projectStatus(input)));
+  }
 
   if (runtime.pullRequestReadEnabled) {
     server.registerTool('pull-request.status', {

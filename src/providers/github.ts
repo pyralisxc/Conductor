@@ -16,6 +16,7 @@ import type {
   PullRequestMergeMethod,
   ToolDiagnostic,
   GetWorkItemStatusInput,
+  GetWorkItemCandidatesInput,
   ListWorkItemsInput,
   WorkItemRecord,
   WorkItemList,
@@ -31,7 +32,7 @@ import type {
   UpdateWorkItemClassificationInput,
 } from '../runtime/types.js';
 import { normalizeToolError } from '../runtime/errors.js';
-import type { ProjectMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, WorkItemMutationProvider } from './runtime.js';
+import type { ProjectMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
 import {
   StaticGitHubCredentialProvider,
   type GitHubCredential,
@@ -73,6 +74,17 @@ interface GitHubIssueResponse {
   created_at: string;
   updated_at: string;
   pull_request?: unknown;
+}
+
+interface GitHubIssueTimelineEvent {
+  event: string;
+  source?: {
+    issue?: {
+      number: number;
+      repository_url?: string;
+      pull_request?: unknown;
+    };
+  };
 }
 
 interface GitHubCheckRunsResponse {
@@ -121,7 +133,7 @@ export interface GitHubRuntimeProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectMutationProvider, PullRequestReadProvider, WorkItemMutationProvider {
+export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectMutationProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
   readonly id = 'github';
   private readonly credentials?: GitHubCredentialProvider;
   private readonly projects: ReadonlyMap<string, GitHubProjectConfiguration>;
@@ -439,6 +451,33 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
       items: filtered.slice(0, limit),
       truncated: filtered.length > limit,
     };
+  }
+
+  async listWorkItemPullRequests(input: GetWorkItemCandidatesInput): Promise<PullRequestStatus[]> {
+    const { repository, credential } = await this.readableRepository(input.project, {
+      issues: 'read',
+      pull_requests: 'read',
+      checks: 'read',
+      actions: 'read',
+    });
+    assertIssueNumber(input.issueNumber);
+    const timeline = await this.request<GitHubIssueTimelineEvent[]>(
+      repository,
+      `/issues/${input.issueNumber}/timeline?per_page=100`,
+      { headers: { Accept: 'application/vnd.github+json' } },
+      credential,
+    );
+    const repositoryUrl = `${this.apiBaseUrl}/repos/${encodeRepository(repository)}`.toLowerCase();
+    const pullRequestNumbers = [...new Set(timeline.flatMap((event) => {
+      if (event.event !== 'cross-referenced') return [];
+      const referenced = event.source?.issue;
+      if (!referenced?.pull_request || referenced.repository_url?.toLowerCase() !== repositoryUrl) return [];
+      return [referenced.number];
+    }))].slice(0, 10);
+
+    return await Promise.all(pullRequestNumbers.map(async (pullRequestNumber) =>
+      await this.getPullRequestStatus({ project: input.project, pullRequestNumber })
+    ));
   }
 
   async createWorkItem(input: CreateWorkItemInput): Promise<WorkItemRecord> {

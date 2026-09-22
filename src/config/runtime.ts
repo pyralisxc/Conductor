@@ -63,7 +63,7 @@ export function createRuntimeFromEnvironment(
   }
 
   const mutationsEnabled = environment.CONDUCTOR_ENABLE_GITHUB_MUTATIONS === '1';
-  if (!mutationsEnabled) return new ConductorToolRuntime({ providers, projectResolver: githubProvider, pullRequestProvider: githubProvider, workItemProvider: githubProvider });
+  if (!mutationsEnabled) return new ConductorToolRuntime({ providers, projectResolver: githubProvider, pullRequestProvider: githubProvider, workItemProvider: githubProvider, workItemCandidateProvider: githubProvider });
   if (!githubProvider || (!environment.GITHUB_TOKEN && !githubApp)) {
     throw new Error('GitHub mutations require an authorized owner/project and GitHub authentication');
   }
@@ -81,6 +81,7 @@ export function createRuntimeFromEnvironment(
     projectResolver: githubProvider,
     pullRequestProvider: githubProvider,
     workItemProvider: githubProvider,
+    workItemCandidateProvider: githubProvider,
   });
 }
 

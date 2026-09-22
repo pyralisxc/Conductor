@@ -13,6 +13,7 @@ import type {
   ReconcilePreviewPullRequestInput,
   PromotePullRequestInput,
   GetWorkItemStatusInput,
+  GetWorkItemCandidatesInput,
   ListWorkItemsInput,
   WorkItemRecord,
   WorkItemList,
@@ -41,6 +42,10 @@ export interface PullRequestReadProvider extends RuntimeCapabilityProvider {
 export interface WorkItemReadProvider extends RuntimeCapabilityProvider {
   getWorkItemStatus(input: GetWorkItemStatusInput): Promise<WorkItemRecord>;
   listWorkItems(input: ListWorkItemsInput): Promise<WorkItemList>;
+}
+
+export interface WorkItemCandidateReadProvider extends WorkItemReadProvider {
+  listWorkItemPullRequests(input: GetWorkItemCandidatesInput): Promise<PullRequestStatus[]>;
 }
 
 export interface WorkItemMutationProvider extends WorkItemReadProvider {

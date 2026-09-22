@@ -3,6 +3,7 @@ export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as cons
 export type ToolOperationName =
   | 'capabilities'
   | 'preflight_project'
+  | 'project.status'
   | 'pull-request.status'
   | 'work-item.status'
   | 'work-item.list';
@@ -108,6 +109,40 @@ export interface ProjectReference {
   repository?: string;
   workspace?: string;
   ref?: string;
+}
+
+export interface GetProjectStatusInput {
+  project: ProjectReference;
+  limit?: number;
+}
+
+export interface ProjectStatusWorkItem {
+  workItem: WorkItemRecord;
+  candidates: PullRequestStatus[];
+}
+
+export interface ProjectStatusWorkCounts {
+  backlog: number;
+  ready: number;
+  inProgress: number;
+  blocked: number;
+  review: number;
+  done: number;
+  unknown: number;
+}
+
+export interface ProjectStatusProjection {
+  contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
+  project: ProjectReference;
+  preflight: ProjectPreflight;
+  work: {
+    counts: ProjectStatusWorkCounts;
+    ready: ProjectStatusWorkItem[];
+    inProgress: ProjectStatusWorkItem[];
+    blocked: ProjectStatusWorkItem[];
+    review: ProjectStatusWorkItem[];
+    truncated: boolean;
+  };
 }
 
 export interface CreateBranchInput {
@@ -258,6 +293,11 @@ export interface WorkItemList {
 }
 
 export interface GetWorkItemStatusInput {
+  project: ProjectReference;
+  issueNumber: number;
+}
+
+export interface GetWorkItemCandidatesInput {
   project: ProjectReference;
   issueNumber: number;
 }

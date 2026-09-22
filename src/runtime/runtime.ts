@@ -5,6 +5,7 @@ import {
   type ProjectMutationProvider,
   type ProjectReferenceResolver,
   type PullRequestReadProvider,
+  type WorkItemCandidateReadProvider,
   type WorkItemMutationProvider,
 } from '../providers/runtime.js';
 import { normalizeToolError } from './errors.js';
@@ -22,6 +23,9 @@ import {
   type ToolDefinition,
   type ToolDiagnostic,
   type ToolOperationName,
+  type GetProjectStatusInput,
+  type ProjectStatusProjection,
+  type ProjectStatusWorkCounts,
   type CreateBranchInput,
   type CreateCommitInput,
   type CreatePullRequestInput,
@@ -54,6 +58,12 @@ const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     mutates: false,
   },
 ];
+
+const PROJECT_STATUS_READ_DEFINITION: ToolDefinition = {
+  name: 'project.status',
+  description: 'Reconstruct compact inspect-time project readiness, active work, and native PR candidate evidence.',
+  mutates: false,
+};
 
 const PULL_REQUEST_READ_DEFINITION: ToolDefinition = {
   name: 'pull-request.status',
@@ -101,6 +111,7 @@ export interface ConductorToolRuntimeOptions {
   projectResolver?: ProjectReferenceResolver;
   pullRequestProvider?: PullRequestReadProvider;
   workItemProvider?: WorkItemMutationProvider;
+  workItemCandidateProvider?: WorkItemCandidateReadProvider;
 }
 
 export class ConductorToolRuntime {
@@ -112,6 +123,7 @@ export class ConductorToolRuntime {
   private readonly projectResolver?: ProjectReferenceResolver;
   private readonly pullRequestProvider?: PullRequestReadProvider;
   private readonly workItemProvider?: WorkItemMutationProvider;
+  private readonly workItemCandidateProvider?: WorkItemCandidateReadProvider;
 
   constructor(options: ConductorToolRuntimeOptions = {}) {
     this.providers = options.providers ?? [];
@@ -123,10 +135,15 @@ export class ConductorToolRuntime {
     this.projectResolver = options.projectResolver;
     this.pullRequestProvider = options.pullRequestProvider;
     this.workItemProvider = options.workItemProvider;
+    this.workItemCandidateProvider = options.workItemCandidateProvider;
   }
 
   get mutationsEnabled(): boolean {
     return Boolean(this.mutationProvider && this.mutationExecutor);
+  }
+
+  get projectStatusReadEnabled(): boolean {
+    return Boolean(this.workItemCandidateProvider);
   }
 
   get pullRequestReadEnabled(): boolean {
@@ -190,6 +207,7 @@ export class ConductorToolRuntime {
             contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
             operations: [
               ...TOOL_DEFINITIONS,
+              ...(this.projectStatusReadEnabled ? [PROJECT_STATUS_READ_DEFINITION] : []),
               ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
               ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
               ...(this.mutationsEnabled ? MUTATION_DEFINITIONS : []),
@@ -199,6 +217,58 @@ export class ConductorToolRuntime {
             providers,
           },
           diagnostics,
+        };
+      },
+    );
+  }
+
+  async projectStatus(input: GetProjectStatusInput): Promise<ExecutionReceipt<ProjectStatusProjection>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'project.status',
+      { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
+      async () => {
+        const provider = this.workItemCandidateProvider;
+        if (!provider) throw { code: 'TOOL_UNAVAILABLE', message: 'Project status provider is not configured' };
+
+        const preflightReceipt = await this.preflightProject(resolvedProject, 'inspect');
+        if (preflightReceipt.status === 'failed') throw preflightReceipt.error;
+
+        const listed = await provider.listWorkItems({ project: resolvedProject, limit: 100 });
+        const counts: ProjectStatusWorkCounts = {
+          backlog: 0, ready: 0, inProgress: 0, blocked: 0, review: 0, done: 0, unknown: 0,
+        };
+        for (const item of listed.items) {
+          if (item.status === 'in-progress') counts.inProgress += 1;
+          else counts[item.status] += 1;
+        }
+
+        const limit = Math.min(Math.max(input.limit ?? 25, 1), 50);
+        const active = listed.items.filter((item) =>
+          ['ready', 'in-progress', 'blocked', 'review'].includes(item.status)
+        );
+        const projected = await Promise.all(active.slice(0, limit).map(async (workItem) => ({
+          workItem,
+          candidates: await provider.listWorkItemPullRequests({
+            project: resolvedProject,
+            issueNumber: workItem.issueNumber,
+          }),
+        })));
+
+        return {
+          result: {
+            contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+            project: resolvedProject,
+            preflight: preflightReceipt.result,
+            work: {
+              counts,
+              ready: projected.filter((item) => item.workItem.status === 'ready'),
+              inProgress: projected.filter((item) => item.workItem.status === 'in-progress'),
+              blocked: projected.filter((item) => item.workItem.status === 'blocked'),
+              review: projected.filter((item) => item.workItem.status === 'review'),
+              truncated: listed.truncated || active.length > limit,
+            },
+          },
         };
       },
     );
