@@ -41,6 +41,8 @@ Do not make the experimental reference implementation a runtime dependency.
 
 Use existing/native capability until a provider becomes a demonstrated limiter.
 
+Conductor adapters are grouped by the semantic execution family they actually implement. GitHub currently implements source-control and durable-work families; a future database, deployment, artifact, or local-execution adapter should receive its own bounded family instead of implementing a generic project mutation interface.
+
 Avoid provider sprawl.
 
 ## Initial fixed-cost goal
