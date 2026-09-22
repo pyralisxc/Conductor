@@ -30,6 +30,7 @@ import {
   type PullRequestStatus,
   type UpdatePullRequestLabelsInput,
   type MergeIntegrationPullRequestInput,
+  type ReconcilePreviewPullRequestInput,
   type PromotePullRequestInput,
   type GetWorkItemStatusInput,
   type ListWorkItemsInput,
@@ -74,10 +75,11 @@ const WORK_ITEM_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
 const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'git.branch.create', description: 'Create a work/* branch from an exact Git SHA.', mutates: true },
   { name: 'git.commit.create', description: 'Create files in one commit and advance an existing work/* branch from an expected head SHA.', mutates: true },
-  { name: 'pull-request.create', description: 'Open a work/* pull request targeting preview.', mutates: true },
+  { name: 'pull-request.create', description: 'Open a work/* pull request against an explicit target branch.', mutates: true },
   { name: 'pull-request.comment.create', description: 'Add a comment to a pull request.', mutates: true },
   { name: 'pull-request.labels.update', description: 'Add/remove pull-request labels while preserving unrelated labels.', mutates: true },
   { name: 'pull-request.merge.integration', description: 'Merge an exact PR candidate into a non-accepted integration branch.', mutates: true },
+  { name: 'pull-request.merge.reconcile-preview', description: 'Reconcile the exact accepted default-branch ancestry back into Preview with a merge commit.', mutates: true },
   { name: 'pull-request.merge.promote', description: 'Promote an exact explicitly approved PR candidate into the repository default branch.', mutates: true },
 ];
 
@@ -302,6 +304,13 @@ export class ConductorToolRuntime {
   async mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput) {
     return await this.executeMutation(input, 'pull-request.merge.integration', async (provider) => {
       const result = await provider.mergeIntegrationPullRequest(input);
+      return { result, identifiers: { pullRequestNumber: result.pullRequestNumber, mergeCommitSha: result.mergeCommitSha } };
+    });
+  }
+
+  async reconcilePreviewPullRequest(input: ReconcilePreviewPullRequestInput) {
+    return await this.executeMutation(input, 'pull-request.merge.reconcile-preview', async (provider) => {
+      const result = await provider.reconcilePreviewPullRequest(input);
       return { result, identifiers: { pullRequestNumber: result.pullRequestNumber, mergeCommitSha: result.mergeCommitSha } };
     });
   }

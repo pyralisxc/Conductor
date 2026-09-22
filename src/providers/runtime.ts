@@ -10,6 +10,7 @@ import type {
   PullRequestStatus,
   UpdatePullRequestLabelsInput,
   MergeIntegrationPullRequestInput,
+  ReconcilePreviewPullRequestInput,
   PromotePullRequestInput,
   GetWorkItemStatusInput,
   ListWorkItemsInput,
@@ -55,6 +56,7 @@ export interface ProjectMutationProvider extends RuntimeCapabilityProvider {
   commentPullRequest(input: CommentPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; commentId: string; url: string }>;
   updatePullRequestLabels(input: UpdatePullRequestLabelsInput): Promise<{ repository: string; pullRequestNumber: number; labels: string[] }>;
   mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }>;
+  reconcilePreviewPullRequest(input: ReconcilePreviewPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }>;
   promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string }>;
 }
 

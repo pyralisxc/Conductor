@@ -17,6 +17,7 @@ export type MutationOperationName =
   | 'pull-request.comment.create'
   | 'pull-request.labels.update'
   | 'pull-request.merge.integration'
+  | 'pull-request.merge.reconcile-preview'
   | 'pull-request.merge.promote'
   | 'work-item.create'
   | 'work-item.update-status'
@@ -309,6 +310,14 @@ export interface MergeIntegrationPullRequestInput {
   expectedHeadSha: string;
   expectedBaseSha: string;
   mergeMethod?: PullRequestMergeMethod;
+  idempotencyKey: string;
+}
+
+export interface ReconcilePreviewPullRequestInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  expectedHeadSha: string;
+  expectedBaseSha: string;
   idempotencyKey: string;
 }
 
