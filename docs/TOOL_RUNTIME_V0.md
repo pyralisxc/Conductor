@@ -10,7 +10,7 @@ v0 always exposes the core non-mutating runtime tools:
 
 - `capabilities()` reports the runtime operations, configured provider capabilities, access level, authentication state, and health actually available now.
 - `preflight_project(project, intent)` remains a repository-development convenience that verifies the surfaces required for `inspect`, `develop` (default), or `execute`.
-- `preflight_operation(project, operation)` verifies whether one exact exposed Conductor operation can execute against the supplied routing referent. It aggregates only providers that own evidence for that operation and never infers which operation the project needs.
+- `preflight_operation(project, operation)` is exposed when at least one configured provider can supply operation-level evidence. It verifies whether one exact exposed Conductor operation can execute against the supplied routing referent, aggregates only responsible providers, and never infers which operation the project needs.
 - `development.status(project, limit?)` reconstructs compact inspect-time preflight plus ready/in-progress/blocked/review work. Each active work item includes same-repository PR candidates discovered through native issue timeline cross-references and reuses exact PR check/workflow truth. It never ranks or selects work.
 - `pull-request.status(project, pullRequestNumber)` is exposed when a GitHub PR provider is configured and returns exact head/base identity plus labels, check runs, and workflow runs.
 - `work-item.status(project, issueNumber)` reads one durable work item with normalized lifecycle status, kind, and origin.
