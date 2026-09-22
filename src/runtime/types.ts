@@ -3,7 +3,7 @@ export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as cons
 export type ToolOperationName =
   | 'capabilities'
   | 'preflight_project'
-  | 'project.status'
+  | 'development.status'
   | 'pull-request.status'
   | 'work-item.status'
   | 'work-item.list';
@@ -104,6 +104,14 @@ export interface CapabilityReport {
   providers: ProviderHealth[];
 }
 
+/**
+ * Opaque execution-routing referent supplied by an upstream caller.
+ *
+ * This identifies provider resources Conductor may address; it is not a
+ * product/project model and must not accumulate architecture or domain meaning.
+ * Optional repository/workspace/ref fields are exact routing expectations used
+ * to fail closed on mismatched execution targets.
+ */
 export interface ProjectReference {
   id: string;
   repository?: string;
@@ -111,17 +119,17 @@ export interface ProjectReference {
   ref?: string;
 }
 
-export interface GetProjectStatusInput {
+export interface GetDevelopmentStatusInput {
   project: ProjectReference;
   limit?: number;
 }
 
-export interface ProjectStatusWorkItem {
+export interface DevelopmentStatusWorkItem {
   workItem: WorkItemRecord;
   candidates: PullRequestStatus[];
 }
 
-export interface ProjectStatusWorkCounts {
+export interface DevelopmentStatusWorkCounts {
   backlog: number;
   ready: number;
   inProgress: number;
@@ -131,16 +139,16 @@ export interface ProjectStatusWorkCounts {
   unknown: number;
 }
 
-export interface ProjectStatusProjection {
+export interface DevelopmentStatusProjection {
   contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
   project: ProjectReference;
   preflight: ProjectPreflight;
   work: {
-    counts: ProjectStatusWorkCounts;
-    ready: ProjectStatusWorkItem[];
-    inProgress: ProjectStatusWorkItem[];
-    blocked: ProjectStatusWorkItem[];
-    review: ProjectStatusWorkItem[];
+    counts: DevelopmentStatusWorkCounts;
+    ready: DevelopmentStatusWorkItem[];
+    inProgress: DevelopmentStatusWorkItem[];
+    blocked: DevelopmentStatusWorkItem[];
+    review: DevelopmentStatusWorkItem[];
     truncated: boolean;
   };
 }

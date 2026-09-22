@@ -23,9 +23,9 @@ import {
   type ToolDefinition,
   type ToolDiagnostic,
   type ToolOperationName,
-  type GetProjectStatusInput,
-  type ProjectStatusProjection,
-  type ProjectStatusWorkCounts,
+  type GetDevelopmentStatusInput,
+  type DevelopmentStatusProjection,
+  type DevelopmentStatusWorkCounts,
   type CreateBranchInput,
   type CreateCommitInput,
   type CreatePullRequestInput,
@@ -59,9 +59,9 @@ const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   },
 ];
 
-const PROJECT_STATUS_READ_DEFINITION: ToolDefinition = {
-  name: 'project.status',
-  description: 'Reconstruct compact inspect-time project readiness, active work, and native PR candidate evidence.',
+const DEVELOPMENT_STATUS_READ_DEFINITION: ToolDefinition = {
+  name: 'development.status',
+  description: 'Reconstruct compact inspect-time development readiness, active work, and native PR candidate evidence.',
   mutates: false,
 };
 
@@ -142,7 +142,7 @@ export class ConductorToolRuntime {
     return Boolean(this.mutationProvider && this.mutationExecutor);
   }
 
-  get projectStatusReadEnabled(): boolean {
+  get developmentStatusReadEnabled(): boolean {
     return Boolean(this.workItemCandidateProvider);
   }
 
@@ -207,7 +207,7 @@ export class ConductorToolRuntime {
             contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
             operations: [
               ...TOOL_DEFINITIONS,
-              ...(this.projectStatusReadEnabled ? [PROJECT_STATUS_READ_DEFINITION] : []),
+              ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
               ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
               ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
               ...(this.mutationsEnabled ? MUTATION_DEFINITIONS : []),
@@ -222,20 +222,20 @@ export class ConductorToolRuntime {
     );
   }
 
-  async projectStatus(input: GetProjectStatusInput): Promise<ExecutionReceipt<ProjectStatusProjection>> {
+  async developmentStatus(input: GetDevelopmentStatusInput): Promise<ExecutionReceipt<DevelopmentStatusProjection>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
     return await this.executeRead(
-      'project.status',
+      'development.status',
       { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
       async () => {
         const provider = this.workItemCandidateProvider;
-        if (!provider) throw { code: 'TOOL_UNAVAILABLE', message: 'Project status provider is not configured' };
+        if (!provider) throw { code: 'TOOL_UNAVAILABLE', message: 'Development status provider is not configured' };
 
         const preflightReceipt = await this.preflightProject(resolvedProject, 'inspect');
         if (preflightReceipt.status === 'failed') throw preflightReceipt.error;
 
         const listed = await provider.listWorkItems({ project: resolvedProject, limit: 100 });
-        const counts: ProjectStatusWorkCounts = {
+        const counts: DevelopmentStatusWorkCounts = {
           backlog: 0, ready: 0, inProgress: 0, blocked: 0, review: 0, done: 0, unknown: 0,
         };
         for (const item of listed.items) {

@@ -29,7 +29,7 @@ const receiptBase = {
   contractVersion: z.literal('conductor.tool-runtime.v0'),
   operationId: z.string(),
   operation: z.enum([
-    'capabilities', 'preflight_project', 'project.status', 'pull-request.status', 'work-item.status', 'work-item.list',
+    'capabilities', 'preflight_project', 'development.status', 'pull-request.status', 'work-item.status', 'work-item.list',
     'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
     'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
     'work-item.create', 'work-item.update-status', 'work-item.classification.update',
@@ -68,7 +68,7 @@ const capabilitiesReceiptSchema = z.union([
       contractVersion: z.literal('conductor.tool-runtime.v0'),
       operations: z.array(z.object({
         name: z.enum([
-          'capabilities', 'preflight_project', 'project.status', 'pull-request.status', 'work-item.status', 'work-item.list',
+          'capabilities', 'preflight_project', 'development.status', 'pull-request.status', 'work-item.status', 'work-item.list',
           'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
           'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
           'work-item.create', 'work-item.update-status', 'work-item.classification.update',
@@ -88,10 +88,10 @@ const capabilitiesReceiptSchema = z.union([
 ]);
 
 const projectSchema = z.object({
-  id: z.string().min(1).describe('Project alias, repository name, or authorized owner/repository'),
-  repository: z.string().optional().describe('Optional expected owner/repository'),
-  workspace: z.string().optional().describe('Optional expected absolute workspace path'),
-  ref: z.string().optional().describe('Git ref to verify'),
+  id: z.string().min(1).describe('Execution-routing alias/referent, repository name, or authorized owner/repository; not a product model'),
+  repository: z.string().optional().describe('Optional exact owner/repository routing expectation'),
+  workspace: z.string().optional().describe('Optional exact workspace routing expectation'),
+  ref: z.string().optional().describe('Optional exact Git ref expectation'),
 });
 
 const preflightReceiptSchema = z.union([
@@ -205,10 +205,10 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     _meta: { securitySchemes: oauthSecurity },
   }, async ({ project, intent }) => result(await runtime.preflightProject(project, intent)));
 
-  if (runtime.projectStatusReadEnabled) {
-    server.registerTool('project.status', {
-      title: 'Read compact project status',
-      description: 'Reconstruct inspect-time preflight plus ready/in-progress/blocked/review work and native cross-referenced PR candidate checks. This read does not rank or select work.',
+  if (runtime.developmentStatusReadEnabled) {
+    server.registerTool('development.status', {
+      title: 'Read compact development status',
+      description: 'Reconstruct inspect-time development preflight plus ready/in-progress/blocked/review work and native cross-referenced PR candidate checks. This read does not rank or select work or describe project architecture.',
       inputSchema: z.object({
         project: projectSchema,
         limit: z.number().int().min(1).max(50).default(25),
@@ -216,7 +216,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       outputSchema: readReceiptSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthSecurity },
-    }, async (input) => result(await runtime.projectStatus(input)));
+    }, async (input) => result(await runtime.developmentStatus(input)));
   }
 
   if (runtime.pullRequestReadEnabled) {

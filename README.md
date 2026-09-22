@@ -2,7 +2,7 @@
 
 Conductor is the provider-neutral bounded execution and durable work-routing layer for a human-directed AI-assisted development environment.
 
-It does **not** own product meaning, technical truth, development methodology, Git hosting, or the user's active reasoning context. It gives development clients a stable way to inspect capability, route durable work, perform bounded provider actions, and preserve exact execution receipts.
+It does **not** own product meaning, technical truth, development methodology, Git hosting, or the user's active reasoning context. It receives execution intent/referents from upstream reasoning and gives development clients a stable way to inspect capability, route durable work, perform bounded provider actions, and preserve exact execution receipts.
 
 > **Keep work native, effects bounded, evidence explicit, and production human-controlled.**
 
@@ -12,7 +12,7 @@ It does **not** own product meaning, technical truth, development methodology, G
 - **Development OS** — owns the active objective, product-development stage, authorization referent, reasoning continuity, and handoff boundary.
 - **Development Intelligence** — owns read-only technical evidence and project understanding.
 - **GitHub** — initial durable home for repositories, issues, PRs, checks, branches, releases, and history.
-- **Conductor** — normalizes provider capability, durable work routing, bounded mutation, Preview integration, and execution receipts.
+- **Conductor** — normalizes execution capability, durable work routing, bounded mutation, Preview integration, and execution receipts without inventing project architecture.
 - **Chat / development clients** — primary human interaction surface; they reason over durable project artifacts instead of requiring a separate Conductor memory system.
 - **Future control surfaces** — optional consumers of Conductor state when real automation or portfolio-operation needs justify them; they are not a prerequisite for the core system.
 
@@ -123,7 +123,7 @@ npm run verify
 
 ## Tool runtime
 
-The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, intent-aware preflight, compact query-time project/work status reconstruction, a read-only Development Intelligence adapter, durable issue-backed work routing, and bounded GitHub mutations backed by durable idempotency state.
+The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, intent-aware preflight, compact query-time development/work status reconstruction, a read-only Development Intelligence adapter, durable issue-backed work routing, and bounded GitHub mutations backed by durable idempotency state.
 
 The preferred GitHub identity is a private GitHub App that mints repository-scoped installation tokens and proves operation-specific permissions. Static tokens remain an explicitly degraded migration path.
 

@@ -79,7 +79,7 @@ test('GitHub reconstructs same-repository PR candidates from native issue timeli
   assert.equal(candidates[0]?.workflowRuns[0]?.id, 9);
 });
 
-test('project status groups active work without ranking it and preserves inspect preflight', async () => {
+test('development status groups active work without ranking it and preserves inspect preflight', async () => {
   const items = [
     ['ready', 23], ['in-progress', 31], ['blocked', 32],
     ['review', 33], ['backlog', 34], ['done', 35],
@@ -159,7 +159,7 @@ test('project status groups active work without ranking it and preserves inspect
     workItemProvider: workProvider as any,
     workItemCandidateProvider: workProvider,
   });
-  const receipt = await runtime.projectStatus({ project: { id: 'pyralisxc/Conductor' } });
+  const receipt = await runtime.developmentStatus({ project: { id: 'pyralisxc/Conductor' } });
   assert.equal(receipt.status, 'succeeded');
   if (receipt.status !== 'succeeded') return;
   assert.equal(receipt.result.preflight.status, 'ready');
@@ -173,7 +173,7 @@ test('project status groups active work without ranking it and preserves inspect
   assert.equal(receipt.result.work.review[0]?.workItem.issueNumber, 33);
 });
 
-test('MCP advertises project.status only when candidate reconstruction is configured', async () => {
+test('MCP advertises development.status only when candidate reconstruction is configured', async () => {
   const provider: WorkItemCandidateReadProvider = {
     id: 'github',
     async getCapabilities() { return []; },
@@ -187,11 +187,11 @@ test('MCP advertises project.status only when candidate reconstruction is config
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createConductorMcpServer(runtime);
-  const client = new Client({ name: 'project-status-test', version: '1.0.0' });
+  const client = new Client({ name: 'development-status-test', version: '1.0.0' });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   const listed = await client.listTools();
-  assert.equal(listed.tools.some((tool) => tool.name === 'project.status' && tool.annotations?.readOnlyHint), true);
+  assert.equal(listed.tools.some((tool) => tool.name === 'development.status' && tool.annotations?.readOnlyHint), true);
   await client.close();
   await server.close();
 });

@@ -7,7 +7,7 @@ import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
 import { IdempotentMutationExecutor } from '../runtime/idempotency.js';
 import { RedisIdempotencyStore } from '../runtime/redis-idempotency.js';
 
-export interface ConfiguredProject {
+export interface RuntimeBinding {
   id: string;
   repository?: string;
   workspace?: string;
@@ -32,34 +32,34 @@ export interface RuntimeEnvironment extends Record<string, string | undefined> {
 export function createRuntimeFromEnvironment(
   environment: RuntimeEnvironment = process.env,
 ): ConductorToolRuntime {
-  const projects = parseProjects(environment.CONDUCTOR_PROJECTS_JSON);
+  const bindings = parseRuntimeBindings(environment.CONDUCTOR_PROJECTS_JSON);
   const providers: ToolRuntimeProvider[] = [environment.DEVINT_MCP_URL
     ? new DevelopmentIntelligenceProvider({
       endpoint: environment.DEVINT_MCP_URL,
       token: environment.DEVINT_AGENT_TOKEN,
     })
     : new UnavailableDevelopmentIntelligenceProvider()];
-  const githubProjects = projects.flatMap((project) => project.repository
-    ? [{ id: project.id, repository: project.repository, write: project.githubWrite }]
+  const githubBindings = bindings.flatMap((binding) => binding.repository
+    ? [{ id: binding.id, repository: binding.repository, write: binding.githubWrite }]
     : []);
   const allowedOwners = parseOwners(environment.CONDUCTOR_GITHUB_ALLOWED_OWNERS);
   const githubApp = githubAppCredentials(environment);
   let githubProvider: GitHubRuntimeProvider | undefined;
-  if (githubProjects.length > 0 || allowedOwners.length > 0) {
+  if (githubBindings.length > 0 || allowedOwners.length > 0) {
     githubProvider = new GitHubRuntimeProvider({
       token: githubApp ? undefined : environment.GITHUB_TOKEN,
       credentials: githubApp,
-      projects: githubProjects,
+      projects: githubBindings,
       allowedOwners,
     });
     providers.push(githubProvider);
   }
 
-  const workspaceProjects = projects.flatMap((project) => project.workspace
-    ? [{ id: project.id, workspace: project.workspace }]
+  const workspaceBindings = bindings.flatMap((binding) => binding.workspace
+    ? [{ id: binding.id, workspace: binding.workspace }]
     : []);
-  if (workspaceProjects.length > 0) {
-    providers.push(new WorkspaceRuntimeProvider({ projects: workspaceProjects }));
+  if (workspaceBindings.length > 0) {
+    providers.push(new WorkspaceRuntimeProvider({ projects: workspaceBindings }));
   }
 
   const mutationsEnabled = environment.CONDUCTOR_ENABLE_GITHUB_MUTATIONS === '1';
@@ -108,7 +108,7 @@ export function parseOwners(value?: string): string[] {
   return [...unique.values()];
 }
 
-export function parseProjects(value?: string): ConfiguredProject[] {
+export function parseRuntimeBindings(value?: string): RuntimeBinding[] {
   if (!value) return [];
   const parsed: unknown = JSON.parse(value);
   if (!Array.isArray(parsed)) {
@@ -117,28 +117,28 @@ export function parseProjects(value?: string): ConfiguredProject[] {
   const ids = new Set<string>();
   return parsed.map((candidate, index) => {
     if (!candidate || typeof candidate !== 'object') {
-      throw new Error(`Project at index ${index} must be an object`);
+      throw new Error(`Runtime binding at index ${index} must be an object`);
     }
     const project = candidate as Record<string, unknown>;
     if (typeof project.id !== 'string' || project.id.trim() === '') {
-      throw new Error(`Project at index ${index} must have a non-empty id`);
+      throw new Error(`Runtime binding at index ${index} must have a non-empty id`);
     }
-    if (ids.has(project.id)) throw new Error(`Duplicate project id: ${project.id}`);
+    if (ids.has(project.id)) throw new Error(`Duplicate runtime binding id: ${project.id}`);
     ids.add(project.id);
     if (project.repository !== undefined && typeof project.repository !== 'string') {
-      throw new Error(`Project ${project.id} repository must be a string`);
+      throw new Error(`Runtime binding ${project.id} repository must be a string`);
     }
     if (project.workspace !== undefined && typeof project.workspace !== 'string') {
-      throw new Error(`Project ${project.id} workspace must be a string`);
+      throw new Error(`Runtime binding ${project.id} workspace must be a string`);
     }
     if (project.githubWrite !== undefined && typeof project.githubWrite !== 'boolean') {
-      throw new Error(`Project ${project.id} githubWrite must be a boolean`);
+      throw new Error(`Runtime binding ${project.id} githubWrite must be a boolean`);
     }
     return {
       id: project.id,
       repository: project.repository,
       workspace: project.workspace,
       githubWrite: project.githubWrite,
-    } as ConfiguredProject;
+    } as RuntimeBinding;
   });
 }
