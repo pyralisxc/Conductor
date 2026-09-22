@@ -34,7 +34,7 @@ import type {
   UpdateWorkItemClassificationInput,
 } from '../runtime/types.js';
 import { normalizeToolError } from '../runtime/errors.js';
-import type { OperationPreflightProvider, ProjectMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
+import type { OperationPreflightProvider, SourceControlMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
 import {
   StaticGitHubCredentialProvider,
   type GitHubCredential,
@@ -120,7 +120,7 @@ interface GitHubMergeResponse {
   message: string;
 }
 
-export interface GitHubProjectConfiguration {
+export interface GitHubRepositoryBinding {
   id: string;
   repository: string;
   write?: boolean;
@@ -129,16 +129,16 @@ export interface GitHubProjectConfiguration {
 export interface GitHubRuntimeProviderOptions {
   token?: string;
   credentials?: GitHubCredentialProvider;
-  projects?: GitHubProjectConfiguration[];
+  bindings?: GitHubRepositoryBinding[];
   allowedOwners?: string[];
   apiBaseUrl?: string;
   fetch?: typeof globalThis.fetch;
 }
 
-export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, ProjectMutationProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
+export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, SourceControlMutationProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
   readonly id = 'github';
   private readonly credentials?: GitHubCredentialProvider;
-  private readonly projects: ReadonlyMap<string, GitHubProjectConfiguration>;
+  private readonly bindings: ReadonlyMap<string, GitHubRepositoryBinding>;
   private readonly allowedOwners: ReadonlyMap<string, string>;
   private readonly apiBaseUrl: string;
   private readonly fetch: typeof globalThis.fetch;
@@ -150,7 +150,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     this.credentials = options.credentials ?? (options.token
       ? new StaticGitHubCredentialProvider(options.token)
       : undefined);
-    this.projects = new Map((options.projects ?? []).map((project) => [project.id, project]));
+    this.bindings = new Map((options.bindings ?? []).map((binding) => [binding.id, binding]));
     this.allowedOwners = new Map((options.allowedOwners ?? []).map((owner) => [owner.toLowerCase(), owner]));
     this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.github.com').replace(/\/$/, '');
     this.fetch = options.fetch ?? globalThis.fetch;
@@ -880,11 +880,11 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     };
   }
 
-  resolveProject(project: ProjectReference): { project: GitHubProjectConfiguration } | {
+  resolveProject(project: ProjectReference): { project: GitHubRepositoryBinding } | {
     error: string;
     code: 'NOT_FOUND' | 'CONFLICT';
   } {
-    const explicit = this.projects.get(project.id);
+    const explicit = this.bindings.get(project.id);
     if (explicit) {
       if (project.repository && !sameRepository(project.repository, explicit.repository)) {
         return {
