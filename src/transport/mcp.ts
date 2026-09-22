@@ -31,7 +31,7 @@ const receiptBase = {
   operation: z.enum([
     'capabilities', 'preflight_project', 'pull-request.status', 'work-item.status', 'work-item.list',
     'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
-    'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.promote',
+    'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
     'work-item.create', 'work-item.update-status', 'work-item.classification.update',
   ]),
   target: z.object({
@@ -70,7 +70,7 @@ const capabilitiesReceiptSchema = z.union([
         name: z.enum([
           'capabilities', 'preflight_project', 'pull-request.status', 'work-item.status', 'work-item.list',
           'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
-          'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.promote',
+          'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
           'work-item.create', 'work-item.update-status', 'work-item.classification.update',
         ]),
         description: z.string(),
@@ -362,6 +362,24 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     }, async (input, extra) => {
       requireWriteScope(extra.authInfo?.scopes);
       return result(await runtime.mergeIntegrationPullRequest(input));
+    });
+
+    server.registerTool('pull-request.merge.reconcile-preview', {
+      title: 'Reconcile Main ancestry into Preview',
+      description: 'Merge an exact repository-default-branch PR candidate into preview/vercel-preview using a merge commit. This repairs post-promotion ancestry and never targets production.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      return result(await runtime.reconcilePreviewPullRequest(input));
     });
 
     server.registerTool('pull-request.merge.promote', {

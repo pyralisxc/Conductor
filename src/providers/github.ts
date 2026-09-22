@@ -11,6 +11,7 @@ import type {
   PullRequestStatus,
   UpdatePullRequestLabelsInput,
   MergeIntegrationPullRequestInput,
+  ReconcilePreviewPullRequestInput,
   PromotePullRequestInput,
   PullRequestMergeMethod,
   ToolDiagnostic,
@@ -676,6 +677,20 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, ProjectM
     return await this.mergePullRequest(repository, credential, pull, input.mergeMethod ?? 'squash');
   }
 
+  async reconcilePreviewPullRequest(input: ReconcilePreviewPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }> {
+    const { repository, credential } = await this.writableRepository(input.project, { contents: 'write' });
+    const pull = await this.mergeCandidate(repository, credential, input.pullRequestNumber, input.expectedHeadSha, input.expectedBaseSha);
+    const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+    if (!repositoryInfo.default_branch || pull.head.ref.toLowerCase() !== repositoryInfo.default_branch.toLowerCase()) {
+      throw {
+        code: 'PERMISSION_DENIED',
+        message: `Preview reconciliation source must be repository default branch ${repositoryInfo.default_branch ?? '(unknown)'}`,
+      };
+    }
+    assertPreviewReconciliationTarget(pull.base.ref);
+    return await this.mergePullRequest(repository, credential, pull, 'merge');
+  }
+
   async promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string }> {
     const approvalReference = input.approvalReference.trim();
     if (!approvalReference) throw { code: 'PERMISSION_DENIED', message: 'Promotion requires a non-empty owner approval reference' };
@@ -1015,6 +1030,12 @@ function safeMergeBranch(branch: string): boolean {
 function assertIntegrationSourceBranch(branch: string): void {
   if (!safeMergeBranch(branch) || !/^(?:work|repair|audit)\//.test(branch)) {
     throw { code: 'PERMISSION_DENIED', message: 'Integration merge sources must be work/*, repair/*, or audit/* branches' };
+  }
+}
+
+function assertPreviewReconciliationTarget(branch: string): void {
+  if (!safeMergeBranch(branch) || !['preview', 'vercel-preview'].includes(branch.toLowerCase())) {
+    throw { code: 'PERMISSION_DENIED', message: 'Preview reconciliation targets must be preview or vercel-preview' };
   }
 }
 

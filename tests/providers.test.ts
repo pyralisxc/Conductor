@@ -461,6 +461,11 @@ test('GitHub provider separates integration merge from accepted-branch promotion
         draft: false, merged: false, head: { ref: 'vercel-preview', sha: headSha },
         base: { ref: 'main', sha: defaultBaseSha },
       });
+      if (url.endsWith('/pulls/14') && method === 'GET') return Response.json({
+        number: 14, html_url: 'https://github.com/pyralisxc/CardForge/pull/14', state: 'open',
+        draft: false, merged: false, head: { ref: 'main', sha: headSha },
+        base: { ref: 'vercel-preview', sha: integrationBaseSha },
+      });
       if (/\/repos\/pyralisxc\/CardForge$/u.test(url) && method === 'GET') return Response.json({
         full_name: 'pyralisxc/CardForge', default_branch: 'main',
       });
@@ -492,6 +497,27 @@ test('GitHub provider separates integration merge from accepted-branch promotion
       idempotencyKey: 'merge:cf:13:wrong-lane',
     }),
     (error: any) => error?.code === 'PERMISSION_DENIED' && /accepted\/default branch main/.test(error.message),
+  );
+
+  const reconciled = await provider.reconcilePreviewPullRequest({
+    project: { id: 'pyralisxc/CardForge' },
+    pullRequestNumber: 14,
+    expectedHeadSha: headSha,
+    expectedBaseSha: integrationBaseSha,
+    idempotencyKey: 'merge:cf:14:reconcile-preview',
+  });
+  assert.equal(reconciled.merged, true);
+  assert.deepEqual(mergeRequests[1], { sha: headSha, merge_method: 'merge' });
+
+  await assert.rejects(
+    provider.reconcilePreviewPullRequest({
+      project: { id: 'pyralisxc/CardForge' },
+      pullRequestNumber: 12,
+      expectedHeadSha: headSha,
+      expectedBaseSha: integrationBaseSha,
+      idempotencyKey: 'merge:cf:12:wrong-reconcile-source',
+    }),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /source must be repository default branch main/.test(error.message),
   );
 
   const promoted = await provider.promotePullRequest({

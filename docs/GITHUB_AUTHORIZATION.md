@@ -92,20 +92,21 @@ If webhook/event ingestion is introduced later, events are wake/reconciliation s
 
 ## Pull-request execution kernel
 
-The GitHub provider exposes four distinct concerns instead of one generic merge power:
+The GitHub provider exposes five distinct concerns instead of one generic merge power:
 
 - **status** — read exact PR head/base identity, labels, check runs, and workflow runs;
 - **labels** — add/remove PR labels while preserving unrelated labels;
 - **integration merge** — merge an exact candidate into a non-accepted integration branch;
+- **Preview reconciliation** — merge the exact repository default branch into `preview` or `vercel-preview` with a merge commit after accepted promotion;
 - **promotion merge** — execute an exact explicitly approved candidate into the repository default branch.
 
-Opening a PR remains a proposal and does not authorize its merge. Integration merge rejects `main`, `master`, and the repository default branch. Promotion requires exact head/base SHAs plus an owner approval reference; stale identity fails closed.
+Opening a PR remains a proposal and does not authorize its merge. Integration merge rejects `main`, `master`, and the repository default branch. Preview reconciliation accepts only the repository default branch as source and `preview`/`vercel-preview` as target, requires exact head/base SHAs, and always uses a merge commit. Promotion requires exact head/base SHAs plus an owner approval reference; stale identity fails closed.
 
 The current approval reference is an audit field supplied by the authorized interactive caller. It is not a cryptographic proof of human intent. The shared authorization/Work Envelope layer remains responsible for ensuring the caller invokes promotion only after current explicit owner approval.
 
 ## Current delivery direction
 
-The GitHub identity, bounded mutation, PR execution, and durable work-item kernels are established.
+The GitHub identity, bounded mutation, PR execution, post-promotion Preview reconciliation, and durable work-item kernels are established.
 
 Next improvements should compress human-directed workflow around native artifacts: compact project/work/PR projections, stronger reconstruction, and measured workflow simplification. Event-driven automation, scheduling, and unattended worker orchestration remain deferred until repeated real usage proves a deterministic need.
 

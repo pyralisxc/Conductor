@@ -373,6 +373,7 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
     async commentPullRequest() { throw new Error('unused'); },
     async updatePullRequestLabels() { throw new Error('unused'); },
     async mergeIntegrationPullRequest() { throw new Error('unused'); },
+    async reconcilePreviewPullRequest() { throw new Error('unused'); },
     async promotePullRequest() { throw new Error('unused'); },
   };
   const runtime = new ConductorToolRuntime({
@@ -384,7 +385,7 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   if (capabilities.status === 'succeeded') {
     assert.deepEqual(capabilities.result.operations.filter((item) => item.mutates).map((item) => item.name), [
       'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
-      'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.promote',
+      'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
     ]);
   }
   const input = {

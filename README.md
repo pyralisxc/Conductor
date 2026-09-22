@@ -48,6 +48,7 @@ Use the smallest living owner for each kind of durable truth:
 
 - `README.md` — product identity, current architecture, and repository entry point.
 - `AGENTS.md` — project-local operating rules for development agents.
+- `ORCHESTRATION.md` — Conductor repository-local branch, Preview-provider, reconciliation, and human-gate specialization.
 - `docs/STATE_MODEL.md` — normalized durable work state and its boundary with Development OS stage.
 - `docs/TOOL_RUNTIME_V0.md` — public Conductor runtime/tool contract.
 - `docs/GITHUB_AUTHORIZATION.md` — GitHub identity, permissions, authorization boundaries, and exact promotion semantics.
@@ -110,6 +111,8 @@ main
 Work starts from current `preview` and targets `preview`.
 
 Main promotion is a separate exact-candidate operation. A release/promotion proposal never implies approval.
+
+After a successful squash-style Main promotion, accepted Main ancestry is reconciled back into `preview` with an exact-SHA merge commit. Reconciliation never targets production and never substitutes for Main approval.
 
 ## Quick start
 

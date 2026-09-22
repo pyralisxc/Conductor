@@ -8,7 +8,6 @@ branches:
 
 preview:
   provider: vercel
-  automatic_integration: true
 
 main:
   human_approval_required: true
@@ -16,13 +15,6 @@ main:
 audit:
   enabled: true
   default_evidence_appetite: representative
-  proven_repairs_to_preview: true
-
-workers:
-  interactive_chat: true
-  work_operator: true
-  api_agent: false
-  github_copilot: false
 
 local_runners:
   - labels: [self-hosted, windows, unity]
@@ -32,18 +24,19 @@ local_runners:
 
 This file specializes Conductor for one project.
 
-It does not replace DevOS, project product truth, repository instructions, or Development Intelligence.
+It does not replace Development OS, project product truth, repository instructions, or Development Intelligence.
 
 ## Owner policy
 
-- Proven ordinary repairs may integrate into Preview after appropriate proof.
-- Product-semantic findings must stop at Shaping / Needs Founder.
-- Main promotion always requires explicit owner approval.
-- Production secrets are unavailable to ordinary Preview workers.
+- Ordinary development targets Preview through explicit bounded work.
+- Product-semantic findings require human reasoning before mutation.
+- Main promotion always requires explicit owner approval of an exact candidate.
+- After accepted promotion, Main ancestry is reconciled back into Preview with the bounded reconciliation operation.
+- Production secrets are unavailable to ordinary Preview execution identities.
 
 ## Preview
 
-Preview is the integrated next-product candidate and should remain deployable/inspectable.
+Preview is the integrated next-product candidate and should remain deployable and inspectable.
 
 ## Human gates
 

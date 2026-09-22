@@ -43,6 +43,8 @@ preview @ exact SHA
 
 `main` is never automatically promoted.
 
+After promotion, reconcile accepted Main ancestry back into `preview` with the bounded exact-SHA reconciliation operation. Do not force-update Preview or use another squash for ancestry repair.
+
 ## Project integration
 
 Each connected project may contain an `ORCHESTRATION.md` describing project-local branches, preview provider, audit policy, and human gates when those details are genuinely project-specific.
@@ -65,7 +67,7 @@ When exploration or Crystallization produces durable meaning, update the owning 
 
 ## Code discipline
 
-- Prefer pure domain logic in `src/domain` and `src/workflow`.
+- Prefer pure domain logic in `src/domain`; runtime/provider orchestration belongs behind typed runtime and provider contracts.
 - Provider-specific APIs live behind interfaces in `src/providers`.
 - UI projections, if any, consume domain/read models rather than raw provider payloads.
 - Keep idempotency explicit for mutations.
