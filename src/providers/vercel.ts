@@ -109,7 +109,7 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
     const project = await this.getProject(binding);
     const projectId = stringField(project, 'id') ?? binding.project;
     const [deploymentPayload, domainPayload] = await Promise.all([
-      this.getJson('/v13/deployments', {
+      this.getJson('/v6/deployments', {
         ...scopeQuery(binding),
         projectId,
         limit: String(limit),

@@ -29,7 +29,7 @@ function provider(token = 'vercel-token') {
           targets: { production: { id: 'dpl_live' } },
         });
       }
-      if (url.pathname === '/v13/deployments') {
+      if (url.pathname === '/v6/deployments') {
         return Response.json({ deployments: [
           {
             uid: 'dpl_failed',
