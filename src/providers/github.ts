@@ -839,7 +839,10 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     if (!repositoryInfo.default_branch || pull.base.ref.toLowerCase() !== repositoryInfo.default_branch.toLowerCase()) {
       throw { code: 'PERMISSION_DENIED', message: `Promotion may only target repository default branch ${repositoryInfo.default_branch ?? '(unknown)'}` };
     }
-    const merged = await this.mergePullRequest(repository, credential, pull, input.mergeMethod ?? 'squash');
+    if (input.mergeMethod && input.mergeMethod !== 'merge') {
+      throw { code: 'PERMISSION_DENIED', message: 'Main promotion requires a merge commit to preserve Preview ancestry' };
+    }
+    const merged = await this.mergePullRequest(repository, credential, pull, 'merge');
     return { ...merged, approvalReference };
   }
 
@@ -1464,12 +1467,8 @@ function assertPreviewReconciliationTarget(branch: string): void {
 }
 
 function assertPromotionSourceBranch(branch: string): void {
-  if (!safeMergeBranch(branch) || !(
-    branch === 'preview'
-    || branch === 'vercel-preview'
-    || /^(?:release|work)\//.test(branch)
-  )) {
-    throw { code: 'PERMISSION_DENIED', message: 'Promotion sources must be preview, vercel-preview, release/*, or explicitly approved work/* branches' };
+  if (!safeMergeBranch(branch) || !['preview', 'vercel-preview'].includes(branch.toLowerCase())) {
+    throw { code: 'PERMISSION_DENIED', message: 'Promotion sources must be preview or vercel-preview' };
   }
 }
 

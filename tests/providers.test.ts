@@ -469,6 +469,11 @@ test('GitHub provider separates integration merge from accepted-branch promotion
         draft: false, merged: false, head: { ref: 'main', sha: headSha },
         base: { ref: 'vercel-preview', sha: integrationBaseSha },
       });
+      if (url.endsWith('/pulls/15') && method === 'GET') return Response.json({
+        number: 15, html_url: 'https://github.com/pyralisxc/CardForge/pull/15', state: 'open',
+        draft: false, merged: false, head: { ref: 'work/direct-main', sha: headSha },
+        base: { ref: 'main', sha: defaultBaseSha },
+      });
       if (/\/repos\/pyralisxc\/CardForge$/u.test(url) && method === 'GET') return Response.json({
         full_name: 'pyralisxc/CardForge', default_branch: 'main',
       });
@@ -533,6 +538,32 @@ test('GitHub provider separates integration merge from accepted-branch promotion
   });
   assert.equal(promoted.merged, true);
   assert.match(promoted.approvalReference, /owner approved/);
+  assert.deepEqual(mergeRequests[2], { sha: headSha, merge_method: 'merge' });
+
+  await assert.rejects(
+    provider.promotePullRequest({
+      project: { id: 'pyralisxc/CardForge' },
+      pullRequestNumber: 15,
+      expectedHeadSha: headSha,
+      expectedBaseSha: defaultBaseSha,
+      approvalReference: 'owner approved',
+      idempotencyKey: 'merge:cf:15:direct-main-denied',
+    }),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /Promotion sources/.test(error.message),
+  );
+
+  await assert.rejects(
+    provider.promotePullRequest({
+      project: { id: 'pyralisxc/CardForge' },
+      pullRequestNumber: 13,
+      expectedHeadSha: headSha,
+      expectedBaseSha: defaultBaseSha,
+      approvalReference: 'owner approved',
+      mergeMethod: 'squash',
+      idempotencyKey: 'merge:cf:13:squash-denied',
+    }),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /merge commit/.test(error.message),
+  );
 
   await assert.rejects(
     provider.promotePullRequest({
@@ -661,8 +692,6 @@ test('unconfigured Development Intelligence is explicit and read-only', async ()
   const checks = await provider.preflightProject({ id: 'conductor' });
   assert.equal(checks[0]?.error?.code, 'TOOL_UNAVAILABLE');
 });
-
-
 
 
 

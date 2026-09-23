@@ -35,8 +35,8 @@ It does not own product direction, current work, Development OS stage or authori
 - Ordinary development branches start from current `preview` and propose changes back to `preview`.
 - `preview` is the integrated, deployable next-product candidate and is hosted on Vercel.
 - `main` is accepted truth. Promotion requires explicit owner approval bound to the exact candidate.
-- After accepted promotion, reconcile `main` ancestry back into `preview` through `pull-request.merge.reconcile-preview`.
-- Preview reconciliation uses exact head/base identity and a merge commit. Do not force-update Preview or squash the reconciliation.
+- Promote the exact approved `preview` head to `main` with a merge commit, preserving Preview ancestry. Routine promotion needs no Main-to-Preview PR.
+- Reconcile Main-only content changes into `preview` through `pull-request.merge.reconcile-preview` before continuing ordinary work. Reconciliation uses exact head/base identity and a merge commit. Do not force-update Preview.
 - Current candidates, checks, deployments, and work status are queried from provider-native state rather than recorded here.
 
 ## Human gates

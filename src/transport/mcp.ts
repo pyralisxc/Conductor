@@ -451,14 +451,14 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
 
     server.registerTool('pull-request.merge.promote', {
       title: 'Promote an approved pull request',
-      description: 'Merge an exact approved PR candidate into the repository default branch. Requires exact head SHA, exact base SHA, and an owner approval reference.',
+      description: 'Merge an exact approved Preview candidate into the repository default branch with a merge commit. Requires exact head SHA, exact base SHA, and an owner approval reference.',
       inputSchema: z.object({
         project: projectSchema,
         pullRequestNumber: z.number().int().positive(),
         expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
         expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/i),
         approvalReference: z.string().min(1).max(500),
-        mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('squash'),
+        mergeMethod: z.literal('merge').optional(),
         idempotencyKey: z.string().min(8).max(200),
       }),
       outputSchema: mutationOutputSchema,

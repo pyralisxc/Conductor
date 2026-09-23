@@ -99,14 +99,14 @@ The GitHub provider exposes five distinct concerns instead of one generic merge 
 - **status** — read exact PR head/base identity, labels, check/workflow truth, and derived orchestration state; prior observations may be supplied ephemerally to detect meaningful transitions without persisting PR state;
 - **labels** — add/remove PR labels while preserving unrelated labels;
 - **integration merge** — merge an exact candidate into a non-accepted integration branch;
-- **Preview reconciliation** — merge the exact repository default branch into `preview` or `vercel-preview` with a merge commit after accepted promotion;
-- **promotion merge** — execute an exact explicitly approved candidate into the repository default branch.
+- **Preview reconciliation** — merge an exact repository default-branch change into `preview` or `vercel-preview` when Main contains content absent from Preview;
+- **promotion merge** — merge an exact explicitly approved Preview candidate into the repository default branch, preserving Preview ancestry.
 
 State-aware PR status never authorizes its own next action. `promotion-ready` means observed technical gates are settled; Development OS/owner approval still governs consequential promotion. An `external-gate-pending` result with `shouldAct=false` is a signal to stop identical polling and wait for provider/user/event-driven re-entry.
 
 For self-sealing repositories, Conductor treats `seal-b` + successful source `verify` + failed `action-smoke` + active/successful `self-seal` as an expected pre-seal checkpoint mismatch rather than a source failure. If the seal changes the candidate SHA and GitHub reports `action_required`, status explicitly requests exact sealed-head verification before promotion.
 
-Opening a PR remains a proposal and does not authorize its merge. Integration merge rejects `main`, `master`, and the repository default branch. Preview reconciliation accepts only the repository default branch as source and `preview`/`vercel-preview` as target, requires exact head/base SHAs, and always uses a merge commit. Promotion requires exact head/base SHAs plus an owner approval reference; stale identity fails closed.
+Opening a PR remains a proposal and does not authorize its merge. Integration merge rejects `main`, `master`, and the repository default branch. Preview reconciliation accepts only the repository default branch as source and `preview`/`vercel-preview` as target, requires exact head/base SHAs, and always uses a merge commit. Promotion accepts only `preview`/`vercel-preview`, requires exact head/base SHAs plus an owner approval reference, and uses a merge commit; stale identity fails closed.
 
 The current approval reference is an audit field supplied by the authorized interactive caller. It is not a cryptographic proof of human intent. The shared authorization/Work Envelope layer remains responsible for ensuring the caller invokes promotion only after current explicit owner approval.
 
