@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Redis } from '@upstash/redis';
 import { derivedSecret, ownerSessionValid } from './owner-auth.js';
@@ -7,6 +7,41 @@ import { oauthPublicBaseUrl } from './oauth.js';
 type Installation = { configurationId: string; teamId: string | null; connectedAt: string; token: string };
 const prefix = 'conductor:vercel:connection:v1';
 const stateTtl = 600;
+const csrfTtlSeconds = 15 * 60;
+type ConnectionAction = 'start' | 'disconnect';
+
+function csrfSignature(action: ConnectionAction, expiresAt: number): string {
+  return createHmac('sha256', derivedSecret('vercel-connection-csrf'))
+    .update(`${action}:${expiresAt}`)
+    .digest('base64url');
+}
+
+export function vercelConnectionCsrfToken(action: ConnectionAction, now = Date.now()): string {
+  const expiresAt = Math.floor(now / 1000) + csrfTtlSeconds;
+  return `${expiresAt}.${csrfSignature(action, expiresAt)}`;
+}
+
+export function vercelConnectionCsrfValid(action: ConnectionAction, token: string, now = Date.now()): boolean {
+  const [expiry, signature, extra] = token.split('.');
+  const expiresAt = Number(expiry);
+  if (extra !== undefined || !Number.isSafeInteger(expiresAt) || expiresAt <= Math.floor(now / 1000)
+    || expiresAt > Math.floor(now / 1000) + csrfTtlSeconds || !signature) return false;
+  const actual = Buffer.from(signature);
+  const expected = Buffer.from(csrfSignature(action, expiresAt));
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+async function formBody(req: IncomingMessage): Promise<URLSearchParams> {
+  if (!String(req.headers['content-type'] ?? '').startsWith('application/x-www-form-urlencoded')) {
+    throw Object.assign(new Error('Expected a form submission'), { status: 415 });
+  }
+  let body = '';
+  for await (const chunk of req) {
+    body += String(chunk);
+    if (body.length > 4096) throw Object.assign(new Error('Request too large'), { status: 413 });
+  }
+  return new URLSearchParams(body);
+}
 
 function configuration(): { redis: Redis; slug: string; clientId: string; clientSecret: string } {
   const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
@@ -69,10 +104,6 @@ function redirect(res: ServerResponse, location: string): void {
   res.end();
 }
 
-function sameOrigin(req: IncomingMessage): boolean {
-  return req.headers.origin === oauthPublicBaseUrl();
-}
-
 export async function handleVercelConnectionRequest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
   if (!url.pathname.startsWith('/connections/vercel')) return false;
   if (!ownerSessionValid(req)) {
@@ -86,12 +117,14 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
       const ids = await redis.smembers<string[]>(`${prefix}:ids`);
       const records = await Promise.all(ids.map(id => redis.get<string>(`${prefix}:installation:${id}`)));
       const installations = records.flatMap(record => record ? [decrypt(record)] : []);
-      const list = installations.length ? `<ul>${installations.map(item => `<li>${escapeHtml(item.teamId ?? 'Personal account')} <small>(${escapeHtml(item.configurationId)})</small><form method="post" action="/connections/vercel/disconnect"><input type="hidden" name="configurationId" value="${escapeHtml(item.configurationId)}"><button>Disconnect locally</button></form></li>`).join('')}</ul>` : '<p>No Vercel account is connected.</p>';
-      respond(res, 200, page(`${list}<p>Authorize an account or team in Vercel. Access remains scoped to the chosen installation.</p><form method="post" action="/connections/vercel/start"><button>Connect Vercel</button></form>`));
+      const disconnectCsrf = vercelConnectionCsrfToken('disconnect');
+      const list = installations.length ? `<ul>${installations.map(item => `<li>${escapeHtml(item.teamId ?? 'Personal account')} <small>(${escapeHtml(item.configurationId)})</small><form method="post" action="/connections/vercel/disconnect"><input type="hidden" name="csrf" value="${disconnectCsrf}"><input type="hidden" name="configurationId" value="${escapeHtml(item.configurationId)}"><button>Disconnect locally</button></form></li>`).join('')}</ul>` : '<p>No Vercel account is connected.</p>';
+      respond(res, 200, page(`${list}<p>Authorize an account or team in Vercel. Access remains scoped to the chosen installation.</p><form method="post" action="/connections/vercel/start"><input type="hidden" name="csrf" value="${vercelConnectionCsrfToken('start')}"><button>Connect Vercel</button></form>`));
       return true;
     }
     if (url.pathname === '/connections/vercel/start' && req.method === 'POST') {
-      if (!sameOrigin(req)) { respond(res, 403, page('<p>Request origin was not accepted.</p>')); return true; }
+      const form = await formBody(req);
+      if (!vercelConnectionCsrfValid('start', form.get('csrf') ?? '')) { respond(res, 403, page('<p>Connection form expired. Return to connections and try again.</p>')); return true; }
       const state = randomBytes(32).toString('base64url');
       await redis.set(`${prefix}:state:${state}`, 'pending', { ex: stateTtl, nx: true });
       const authorize = new URL(`https://vercel.com/integrations/${slug}/new`);
@@ -100,13 +133,9 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
       return true;
     }
     if (url.pathname === '/connections/vercel/disconnect' && req.method === 'POST') {
-      if (!sameOrigin(req)) { respond(res, 403, page('<p>Request origin was not accepted.</p>')); return true; }
-      let body = '';
-      for await (const chunk of req) {
-        body += String(chunk);
-        if (body.length > 4096) { respond(res, 413, page('<p>Request too large.</p>')); return true; }
-      }
-      const id = new URLSearchParams(body).get('configurationId') ?? '';
+      const form = await formBody(req);
+      if (!vercelConnectionCsrfValid('disconnect', form.get('csrf') ?? '')) { respond(res, 403, page('<p>Connection form expired. Return to connections and try again.</p>')); return true; }
+      const id = form.get('configurationId') ?? '';
       if (!/^icfg_[\w-]+$/u.test(id)) { respond(res, 400, page('<p>Invalid connection.</p>')); return true; }
       await redis.del(`${prefix}:installation:${id}`);
       await redis.srem(`${prefix}:ids`, id);
