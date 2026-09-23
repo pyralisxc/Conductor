@@ -216,9 +216,34 @@ export interface CommentPullRequestInput {
 
 export type PullRequestMergeMethod = 'merge' | 'squash' | 'rebase';
 
+export type PullRequestOrchestrationState =
+  | 'merged'
+  | 'draft'
+  | 'external-gate-pending'
+  | 'pre-seal-checkpoint'
+  | 'sealed-head-verification-required'
+  | 'action-required'
+  | 'verification-failed'
+  | 'merge-blocked'
+  | 'promotion-ready';
+
+export type PullRequestOrchestrationAction =
+  | 'none'
+  | 'wait'
+  | 'rerun-exact-head'
+  | 'resume-external-gate'
+  | 'inspect-failure'
+  | 'promotion-gate';
+
+export interface PullRequestPriorObservation {
+  headSha: string;
+  orchestrationState?: PullRequestOrchestrationState;
+}
+
 export interface GetPullRequestStatusInput {
   project: ProjectReference;
   pullRequestNumber: number;
+  previous?: PullRequestPriorObservation;
 }
 
 export interface PullRequestCheckState {
@@ -236,6 +261,32 @@ export interface PullRequestWorkflowRunState {
   status: string;
   conclusion: string | null;
   url: string | null;
+}
+
+export interface PullRequestOrchestration {
+  state: PullRequestOrchestrationState;
+  action: PullRequestOrchestrationAction;
+  shouldAct: boolean;
+  summary: string;
+  resumeWhen: string | null;
+  transition: {
+    observed: boolean;
+    previousHeadSha: string | null;
+    previousState: PullRequestOrchestrationState | null;
+    headChanged: boolean | null;
+    stateChanged: boolean | null;
+    meaningful: boolean | null;
+  };
+  seal: {
+    requested: boolean;
+    expectedPreSealCheckpoint: boolean;
+    exactHeadVerificationRequired: boolean;
+  };
+  signals: {
+    pending: string[];
+    actionRequired: string[];
+    failed: string[];
+  };
 }
 
 export interface PullRequestStatus {
@@ -260,6 +311,7 @@ export interface PullRequestStatus {
     items: PullRequestCheckState[];
   };
   workflowRuns: PullRequestWorkflowRunState[];
+  orchestration: PullRequestOrchestration;
 }
 
 export type WorkItemStatus =

@@ -239,11 +239,19 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
 
   if (runtime.pullRequestReadEnabled) {
     server.registerTool('pull-request.status', {
-      title: 'Read pull request status',
-      description: 'Read one pull request with exact head/base SHAs, labels, check runs, and workflow runs. Use before merge or CI decisions.',
+      title: 'Read state-aware pull request status',
+      description: 'Read exact PR identity plus checks/workflows and a derived orchestration state. Supply the prior observation when available to detect meaningful head/state transitions. When the result says external gate pending with shouldAct=false, do not repeatedly poll identical state; wait for provider/user/event-driven re-entry.',
       inputSchema: z.object({
         project: projectSchema,
         pullRequestNumber: z.number().int().positive(),
+        previous: z.object({
+          headSha: z.string().regex(/^[0-9a-f]{40}$/i),
+          orchestrationState: z.enum([
+            'merged', 'draft', 'external-gate-pending', 'pre-seal-checkpoint',
+            'sealed-head-verification-required', 'action-required',
+            'verification-failed', 'merge-blocked', 'promotion-ready',
+          ]).optional(),
+        }).optional(),
       }),
       outputSchema: z.object({ receipt: z.union([
         z.object({ ...receiptBase, status: z.literal('succeeded'), result: z.record(z.string(), z.unknown()) }),

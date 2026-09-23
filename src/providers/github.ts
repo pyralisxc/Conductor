@@ -11,6 +11,8 @@ import type {
   CommentPullRequestInput,
   GetPullRequestStatusInput,
   PullRequestStatus,
+  PullRequestOrchestration,
+  PullRequestOrchestrationState,
   UpdatePullRequestLabelsInput,
   MergeIntegrationPullRequestInput,
   ReconcilePreviewPullRequestInput,
@@ -419,6 +421,21 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       && check.conclusion !== null
       && !['success', 'neutral', 'skipped'].includes(check.conclusion)
     ).length;
+    const labels = (pull.labels ?? []).flatMap((label) => label.name ? [label.name] : []);
+    const observedWorkflowRuns = workflowRuns.workflow_runs.map((run) => ({
+      id: run.id,
+      name: run.name ?? `workflow-${run.id}`,
+      status: run.status,
+      conclusion: run.conclusion,
+      url: run.html_url ?? null,
+    }));
+    const orchestration = derivePullRequestOrchestration({
+      pull,
+      labels,
+      checks: items,
+      workflowRuns: observedWorkflowRuns,
+      previous: input.previous,
+    });
     return {
       repository,
       pullRequestNumber: pull.number,
@@ -430,7 +447,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       mergeableState: pull.mergeable_state ?? null,
       head: pull.head,
       base: pull.base,
-      labels: (pull.labels ?? []).flatMap((label) => label.name ? [label.name] : []),
+      labels,
       checks: {
         total: items.length,
         pending,
@@ -440,13 +457,8 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         skipped,
         items,
       },
-      workflowRuns: workflowRuns.workflow_runs.map((run) => ({
-        id: run.id,
-        name: run.name ?? `workflow-${run.id}`,
-        status: run.status,
-        conclusion: run.conclusion,
-        url: run.html_url ?? null,
-      })),
+      workflowRuns: observedWorkflowRuns,
+      orchestration,
     };
   }
 
@@ -1083,6 +1095,203 @@ function operationCheck(
     error,
     diagnostics,
   };
+}
+
+function derivePullRequestOrchestration(input: {
+  pull: GitHubPullRequestResponse;
+  labels: string[];
+  checks: PullRequestStatus['checks']['items'];
+  workflowRuns: PullRequestStatus['workflowRuns'];
+  previous?: GetPullRequestStatusInput['previous'];
+}): PullRequestOrchestration {
+  const sealRequested = input.labels.some((label) => label.toLowerCase() === 'seal-b');
+  const namedChecks = (name: string) =>
+    input.checks.filter((check) => normalizedCheckName(check.name) === name);
+
+  const verifyChecks = namedChecks('verify');
+  const actionSmokeChecks = namedChecks('action-smoke');
+  const selfSealChecks = namedChecks('self-seal');
+
+  const sourceVerifySucceeded = verifyChecks.some((check) => check.conclusion === 'success');
+  const sourceVerifyFailed = verifyChecks.some((check) => isFailureConclusion(check.conclusion));
+  const actionSmokeFailed = actionSmokeChecks.some((check) => isFailureConclusion(check.conclusion));
+  const selfSealPending = selfSealChecks.some((check) => check.status !== 'completed');
+  const selfSealSucceeded = selfSealChecks.some((check) => check.conclusion === 'success');
+  const selfSealActive = selfSealPending || selfSealSucceeded;
+
+  const expectedPreSealCheckpoint =
+    sealRequested
+    && sourceVerifySucceeded
+    && actionSmokeFailed
+    && selfSealActive;
+
+  const pendingSignals = uniqueStrings([
+    ...input.checks
+      .filter((check) => check.status !== 'completed')
+      .map((check) => `check:${check.name}`),
+    ...input.workflowRuns
+      .filter((run) => run.status !== 'completed')
+      .map((run) => `workflow:${run.name}`),
+  ]);
+
+  const actionRequiredSignals = uniqueStrings([
+    ...input.checks
+      .filter((check) => check.conclusion === 'action_required')
+      .map((check) => `check:${check.name}`),
+    ...input.workflowRuns
+      .filter((run) => run.conclusion === 'action_required')
+      .map((run) => `workflow:${run.name}`),
+  ]);
+
+  const granularFailures = input.checks
+    .filter((check) => isFailureConclusion(check.conclusion))
+    .filter((check) =>
+      !(expectedPreSealCheckpoint && normalizedCheckName(check.name) === 'action-smoke')
+    )
+    .map((check) => `check:${check.name}`);
+
+  const aggregateWorkflowFailures = input.workflowRuns
+    .filter((run) => isFailureConclusion(run.conclusion))
+    .filter((run) =>
+      !(expectedPreSealCheckpoint && normalizedCheckName(run.name) === 'verify')
+    )
+    .map((run) => `workflow:${run.name}`);
+
+  const failedSignals = uniqueStrings([
+    ...granularFailures,
+    ...aggregateWorkflowFailures,
+  ]);
+
+  const previousHeadSha = input.previous?.headSha ?? null;
+  const previousState = input.previous?.orchestrationState ?? null;
+  const headChanged = previousHeadSha === null
+    ? null
+    : previousHeadSha !== input.pull.head.sha;
+
+  let state: PullRequestOrchestrationState;
+  let action: PullRequestOrchestration['action'];
+  let shouldAct: boolean;
+  let summary: string;
+  let resumeWhen: string | null = null;
+
+  if (input.pull.merged) {
+    state = 'merged';
+    action = 'none';
+    shouldAct = false;
+    summary = 'Pull request is already merged; no further orchestration action is required.';
+  } else if (input.pull.draft) {
+    state = 'draft';
+    action = 'none';
+    shouldAct = false;
+    summary = 'Pull request is still a draft; promotion/integration orchestration is not active.';
+  } else if (sourceVerifyFailed || failedSignals.length > 0) {
+    state = 'verification-failed';
+    action = 'inspect-failure';
+    shouldAct = true;
+    summary = 'One or more source/check gates failed on the exact PR head; inspect the failure before proceeding.';
+  } else if (sealRequested && headChanged === true && actionRequiredSignals.length > 0) {
+    state = 'sealed-head-verification-required';
+    action = 'rerun-exact-head';
+    shouldAct = true;
+    summary = 'The seal changed the candidate head and GitHub reports action_required; rerun verification from the exact sealed head before promotion.';
+  } else if (expectedPreSealCheckpoint) {
+    state = 'pre-seal-checkpoint';
+    action = 'wait';
+    shouldAct = false;
+    summary = 'Expected pre-seal checkpoint mismatch: source verify passed while action-smoke failed and self-seal is active.';
+    resumeWhen = 'Self-seal completes or the pull-request head SHA changes.';
+  } else if (pendingSignals.length > 0) {
+    state = 'external-gate-pending';
+    action = 'wait';
+    shouldAct = false;
+    summary = 'External gate pending for the exact PR head; no agent action is required until provider state changes.';
+    resumeWhen = 'A check/workflow settles or the pull-request head SHA changes.';
+  } else if (
+    sealRequested
+    && headChanged === true
+    && input.checks.length === 0
+    && input.workflowRuns.length === 0
+  ) {
+    state = 'sealed-head-verification-required';
+    action = 'rerun-exact-head';
+    shouldAct = true;
+    summary = 'The seal changed the candidate head and no exact-head verification is currently observed; run verification on the sealed head.';
+  } else if (actionRequiredSignals.length > 0) {
+    state = 'action-required';
+    action = 'resume-external-gate';
+    shouldAct = true;
+    summary = 'GitHub reports action_required for the exact PR head; caller intervention is required before the external gate can continue.';
+  } else if (input.pull.mergeable === false) {
+    state = 'merge-blocked';
+    action = 'inspect-failure';
+    shouldAct = true;
+    summary = 'Checks are settled but GitHub reports the pull request as not mergeable; inspect the merge blocker.';
+  } else if (input.checks.length === 0 && input.workflowRuns.length === 0) {
+    state = 'external-gate-pending';
+    action = 'wait';
+    shouldAct = false;
+    summary = 'No verification result is observed yet for the exact PR head; wait for GitHub to publish gate state.';
+    resumeWhen = 'A check/workflow appears or the pull-request head SHA changes.';
+  } else {
+    state = 'promotion-ready';
+    action = 'promotion-gate';
+    shouldAct = true;
+    summary = 'Observed technical gates for the exact PR head are settled without failure; proceed only to the caller-owned promotion/authorization gate.';
+  }
+
+  const stateChanged = input.previous?.orchestrationState === undefined
+    ? null
+    : input.previous.orchestrationState !== state;
+  const meaningful = input.previous === undefined
+    ? null
+    : headChanged === true || stateChanged === true;
+
+  return {
+    state,
+    action,
+    shouldAct,
+    summary,
+    resumeWhen,
+    transition: {
+      observed: input.previous !== undefined,
+      previousHeadSha,
+      previousState,
+      headChanged,
+      stateChanged,
+      meaningful,
+    },
+    seal: {
+      requested: sealRequested,
+      expectedPreSealCheckpoint,
+      exactHeadVerificationRequired:
+        sealRequested
+        && headChanged === true
+        && state !== 'promotion-ready'
+        && state !== 'merged',
+    },
+    signals: {
+      pending: pendingSignals,
+      actionRequired: actionRequiredSignals,
+      failed: failedSignals,
+    },
+  };
+}
+
+function normalizedCheckName(name: string): string {
+  return name
+    .toLowerCase()
+    .split('/')
+    .at(-1)!
+    .trim();
+}
+
+function isFailureConclusion(conclusion: string | null): boolean {
+  return conclusion !== null
+    && !['success', 'neutral', 'skipped', 'action_required'].includes(conclusion);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 
 const WORK_ITEM_STATUS_PREFIX = 'status:';

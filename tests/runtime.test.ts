@@ -342,6 +342,27 @@ test('runtime exposes PR status as a read operation when a PR provider is config
         labels: [],
         checks: { total: 0, pending: 0, successful: 0, failed: 0, neutral: 0, skipped: 0, items: [] },
         workflowRuns: [],
+        orchestration: {
+          state: 'promotion-ready' as const,
+          action: 'promotion-gate' as const,
+          shouldAct: true,
+          summary: 'ready',
+          resumeWhen: null,
+          transition: {
+            observed: false,
+            previousHeadSha: null,
+            previousState: null,
+            headChanged: null,
+            stateChanged: null,
+            meaningful: null,
+          },
+          seal: {
+            requested: false,
+            expectedPreSealCheckpoint: false,
+            exactHeadVerificationRequired: false,
+          },
+          signals: { pending: [], actionRequired: [], failed: [] },
+        },
       };
     },
   };
