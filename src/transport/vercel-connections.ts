@@ -86,7 +86,7 @@ function respond(res: ServerResponse, status: number, body: string): void {
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
     'x-frame-options': 'DENY',
-    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://vercel.com; base-uri 'none'",
   });
   res.end(body);
 }
