@@ -8,6 +8,7 @@ import {
   type PullRequestReadProvider,
   type WorkItemCandidateReadProvider,
   type WorkItemMutationProvider,
+  type DeploymentReadProvider,
 } from '../providers/runtime.js';
 import { normalizeToolError } from './errors.js';
 import {
@@ -47,6 +48,10 @@ import {
   type CreateWorkItemInput,
   type UpdateWorkItemStatusInput,
   type UpdateWorkItemClassificationInput,
+  type GetDeploymentStatusInput,
+  type GetDeploymentLogsInput,
+  type DeploymentProjectStatus,
+  type DeploymentLogs,
 } from './types.js';
 import { IdempotentMutationExecutor } from './idempotency.js';
 
@@ -80,6 +85,11 @@ const PULL_REQUEST_READ_DEFINITION: ToolDefinition = {
   description: 'Read one pull request with exact head/base identity plus observed check and workflow state.',
   mutates: false,
 };
+
+const DEPLOYMENT_READ_DEFINITIONS: readonly ToolDefinition[] = [
+  { name: 'deployment.status', description: 'Read Vercel deployment/production state for one configured execution referent.', mutates: false },
+  { name: 'deployment.logs', description: 'Read bounded/redacted deployment event logs for one exact Vercel deployment.', mutates: false },
+];
 
 const WORK_ITEM_READ_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'work-item.status', description: 'Read one normalized durable work item.', mutates: false },
@@ -128,6 +138,7 @@ export interface ConductorToolRuntimeOptions {
   pullRequestProvider?: PullRequestReadProvider;
   workItemProvider?: WorkItemMutationProvider;
   workItemCandidateProvider?: WorkItemCandidateReadProvider;
+  deploymentProvider?: DeploymentReadProvider;
 }
 
 export class ConductorToolRuntime {
@@ -140,6 +151,7 @@ export class ConductorToolRuntime {
   private readonly pullRequestProvider?: PullRequestReadProvider;
   private readonly workItemProvider?: WorkItemMutationProvider;
   private readonly workItemCandidateProvider?: WorkItemCandidateReadProvider;
+  private readonly deploymentProvider?: DeploymentReadProvider;
 
   constructor(options: ConductorToolRuntimeOptions = {}) {
     this.providers = options.providers ?? [];
@@ -152,6 +164,7 @@ export class ConductorToolRuntime {
     this.pullRequestProvider = options.pullRequestProvider;
     this.workItemProvider = options.workItemProvider;
     this.workItemCandidateProvider = options.workItemCandidateProvider;
+    this.deploymentProvider = options.deploymentProvider;
   }
 
   get sourceControlMutationsEnabled(): boolean {
@@ -168,6 +181,10 @@ export class ConductorToolRuntime {
 
   get pullRequestReadEnabled(): boolean {
     return Boolean(this.pullRequestProvider);
+  }
+
+  get deploymentReadEnabled(): boolean {
+    return Boolean(this.deploymentProvider);
   }
 
   get workItemReadEnabled(): boolean {
@@ -375,6 +392,34 @@ export class ConductorToolRuntime {
   }
 
 
+  async deploymentStatus(input: GetDeploymentStatusInput): Promise<ExecutionReceipt<DeploymentProjectStatus>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'deployment.status',
+      { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
+      async () => {
+        if (!this.deploymentProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'Deployment read provider is not configured' };
+        return { result: await this.deploymentProvider.getDeploymentStatus({ ...input, project: resolvedProject }) };
+      },
+    );
+  }
+
+  async deploymentLogs(input: GetDeploymentLogsInput): Promise<ExecutionReceipt<DeploymentLogs>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'deployment.logs',
+      { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
+      async () => {
+        if (!this.deploymentProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'Deployment read provider is not configured' };
+        return {
+          result: await this.deploymentProvider.getDeploymentLogs({ ...input, project: resolvedProject }),
+          diagnostics: [{ level: 'info', source: 'vercel', message: 'Deployment logs are bounded and redacted before leaving the provider adapter.' }],
+        };
+      },
+    );
+  }
+
+
   async workItemStatus(input: GetWorkItemStatusInput): Promise<ExecutionReceipt<WorkItemRecord>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
     return await this.executeRead(
@@ -487,6 +532,7 @@ export class ConductorToolRuntime {
       ...(this.operationPreflightEnabled ? [OPERATION_PREFLIGHT_DEFINITION] : []),
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
+      ...(this.deploymentReadEnabled ? DEPLOYMENT_READ_DEFINITIONS : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
       ...(this.sourceControlMutationsEnabled ? MUTATION_DEFINITIONS : []),
       ...(this.workItemMutationsEnabled ? WORK_ITEM_MUTATION_DEFINITIONS : []),

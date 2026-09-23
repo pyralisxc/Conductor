@@ -12,6 +12,7 @@ It does **not** own product meaning, technical truth, development methodology, G
 - **Development OS** — owns the active objective, product-development stage, authorization referent, reasoning continuity, and handoff boundary.
 - **Development Intelligence** — owns read-only technical evidence and project understanding.
 - **GitHub** — initial durable home for repositories, issues, PRs, checks, branches, releases, and history.
+- **Vercel** — deployment authority where configured; Conductor may read bounded deployment/build evidence without absorbing provider ownership.
 - **Conductor** — normalizes execution capability, durable work routing, bounded mutation, Preview integration, and execution receipts without inventing project architecture.
 - **Chat / development clients** — primary human interaction surface; they reason over durable project artifacts instead of requiring a separate Conductor memory system.
 - **Future control surfaces** — optional consumers of Conductor state when real automation or portfolio-operation needs justify them; they are not a prerequisite for the core system.
@@ -123,7 +124,7 @@ npm run verify
 
 ## Tool runtime
 
-The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, repository-development preflight, exact operation-scoped preflight, compact query-time development/work status reconstruction, state-aware pull-request orchestration status, a read-only Development Intelligence adapter, durable issue-backed work routing, and bounded GitHub mutations backed by durable idempotency state.
+The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, repository-development preflight, exact operation-scoped preflight, compact query-time development/work status reconstruction, state-aware pull-request orchestration status, a read-only Development Intelligence adapter, optional read-only Vercel deployment/status-log inspection, durable issue-backed work routing, and bounded GitHub mutations backed by durable idempotency state.
 
 The preferred GitHub identity is a private GitHub App that mints repository-scoped installation tokens and proves operation-specific permissions. Static tokens remain an explicitly degraded migration path.
 

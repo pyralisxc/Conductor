@@ -19,7 +19,7 @@ The `/health` endpoint is public and returns only runtime health and contract ve
 
 `CONDUCTOR_GITHUB_ALLOWED_OWNERS` authorizes repositories under one or more GitHub owners without per-repository environment edits. Projects may be addressed as `owner/repository`; when exactly one owner is authorized, a bare repository name is also accepted. Cross-owner requests fail closed.
 
-`CONDUCTOR_PROJECTS_JSON` is retained as a compatibility environment variable, but its entries are runtime execution bindings: explicit aliases, repository/workspace routing expectations, or per-binding GitHub write policy. They are not project metadata or architecture. An explicit repository cannot be replaced by request input; mismatches fail with `CONFLICT`. Set `githubWrite` to `false` to deny mutations for an otherwise readable binding.
+`CONDUCTOR_PROJECTS_JSON` is retained as a compatibility environment variable, but its entries are runtime execution bindings: explicit aliases, repository/workspace routing expectations, per-binding GitHub write policy, and optional deployment-provider routing. They are not project metadata or architecture. An explicit repository cannot be replaced by request input; mismatches fail with `CONFLICT`. Set `githubWrite` to `false` to deny mutations for an otherwise readable binding. A Vercel-backed binding may add `vercelProject` and optional `vercelTeamId`; these identify provider resources only.
 
 Example:
 
@@ -29,6 +29,11 @@ Example:
     "id": "conductor",
     "repository": "pyralisxc/Conductor",
     "workspace": "/workspace/conductor"
+  },
+  {
+    "id": "Development-Intelligence",
+    "repository": "pyralisxc/Development-Intelligence",
+    "vercelProject": "development-intelligence"
   }
 ]
 ```
@@ -42,6 +47,8 @@ The workspace adapter verifies readable/writable access, bounded Node process ex
 `preflight_operation` is narrower and preferred before one exact effect. It first proves that the operation is actually exposed by the current runtime, then aggregates operation-specific evidence from responsible providers. It does not discover project architecture or choose an operation.
 
 Development Intelligence remains read-only. `DEVINT_MCP_URL` and `DEVINT_AGENT_TOKEN` connect Conductor to its authenticated MCP `project_status` operation. If they are absent, capability and preflight results explicitly report the adapter as unavailable.
+
+The optional Vercel deployment adapter is also read-only in v0. When a binding supplies `vercelProject`, `deployment.status` reads the provider-native project, current production deployment, latest production attempt, recent deployments, source Git SHA/ref when available, and domains. `deployment.logs` reads bounded/redacted deployment-event output for one exact deployment. Vercel remains authoritative for deployment state; Conductor does not persist a deployment ledger or expose deploy/promote/rollback mutations in this tranche.
 
 ## Required configuration
 
@@ -58,6 +65,7 @@ Development Intelligence remains read-only. `DEVINT_MCP_URL` and `DEVINT_AGENT_T
 | `GITHUB_TOKEN` | Transitional least-privilege static token; ignored when App credentials are configured |
 | `DEVINT_MCP_URL` | Development Intelligence MCP endpoint |
 | `DEVINT_AGENT_TOKEN` | Separate machine bearer token for read-only DI access |
+| `CONDUCTOR_VERCEL_TOKEN` | Optional server-side Vercel token used only for configured read-only deployment-provider operations; `VERCEL_TOKEN` is accepted as a fallback |
 | `CONDUCTOR_ENABLE_GITHUB_MUTATIONS` | Set to `1` to expose bounded GitHub write tools |
 | `PORT` | HTTP port; defaults to `3000` |
 
@@ -77,6 +85,7 @@ Deploy behind HTTPS or build the included container. Confirm `/health`, both dis
 
 - No anonymous or static shared-secret mode.
 - No arbitrary shell, generic provider dispatch, force-push, or repository-admin tool.
+- Vercel deployment inspection is read-only: no deploy, retry, promote, rollback, alias mutation, or environment-secret read/write tool is exposed.
 - Merge is bounded to pull requests with exact head/base SHAs. Integration merge rejects `main`, `master`, and the repository default branch. Preview reconciliation accepts only repository-default-branch → `preview`/`vercel-preview` and always uses a merge commit. Default-branch promotion requires a caller-supplied owner approval reference and exact candidate identity; the runtime does not infer approval.
 - Mutation operations are absent unless explicitly enabled with durable atomic idempotency state.
 - No multi-agent, handoff, scheduler, or session subsystem is added here.

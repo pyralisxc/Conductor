@@ -7,7 +7,9 @@ export type ToolOperationName =
   | 'development.status'
   | 'pull-request.status'
   | 'work-item.status'
-  | 'work-item.list';
+  | 'work-item.list'
+  | 'deployment.status'
+  | 'deployment.logs';
 
 export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
@@ -47,7 +49,9 @@ export type DevelopmentCapability =
   | 'work-item.read'
   | 'work-item.write'
   | 'ci.read'
-  | 'development-intelligence.read';
+  | 'development-intelligence.read'
+  | 'deployment.read'
+  | 'deployment.logs.read';
 
 export type ToolErrorCode =
   | 'AUTH_REQUIRED'
@@ -174,6 +178,66 @@ export interface DevelopmentStatusProjection {
     review: DevelopmentStatusWorkItem[];
     truncated: boolean;
   };
+}
+
+
+export interface DeploymentRecord {
+  id: string;
+  url: string | null;
+  state: string | null;
+  target: string | null;
+  createdAt: string | null;
+  readyAt: string | null;
+  sourceRevision: string | null;
+  sourceRef: string | null;
+  sourceRepository: string | null;
+  aliases: string[];
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export interface DeploymentProjectStatus {
+  provider: 'vercel';
+  project: {
+    id: string;
+    name: string;
+    productionBranch: string | null;
+    teamId: string | null;
+  };
+  production: DeploymentRecord | null;
+  latestProductionAttempt: DeploymentRecord | null;
+  recent: DeploymentRecord[];
+  domains: Array<{ name: string; verified: boolean | null }>;
+  observedAt: string;
+}
+
+export interface GetDeploymentStatusInput {
+  project: ProjectReference;
+  limit?: number;
+}
+
+export interface DeploymentLogEntry {
+  createdAt: string | null;
+  type: string | null;
+  level: string | null;
+  text: string;
+}
+
+export interface DeploymentLogs {
+  provider: 'vercel';
+  projectId: string;
+  deploymentId: string;
+  entries: DeploymentLogEntry[];
+  truncated: boolean;
+  source: 'deployment-events';
+  observedAt: string;
+  note: string;
+}
+
+export interface GetDeploymentLogsInput {
+  project: ProjectReference;
+  deploymentId: string;
+  limit?: number;
 }
 
 export interface CreateBranchInput {
@@ -493,6 +557,7 @@ export interface ExecutionIdentifiers {
   issueNumber?: number;
   commentId?: string;
   workflowRunId?: string;
+  deploymentId?: string;
   mergeCommitSha?: string;
 }
 

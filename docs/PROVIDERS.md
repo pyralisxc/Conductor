@@ -8,7 +8,7 @@
 Role: source, branches, PRs, issues/projects, checks, webhooks, releases, GitHub App identity, Actions.
 
 ### Vercel
-Role: web Preview deployments and initial durable Conductor workflow runtime.
+Role: web Preview/production deployments and initial durable Conductor workflow runtime. Conductor now has a bounded read-only deployment adapter for project/deployment status, source revision reconciliation, domains, and exact deployment-event logs. Vercel remains deployment authority; deploy/promote/rollback mutation is not part of the initial adapter.
 
 ### Development Intelligence
 Role: technical project reality, graph/query evidence, overlap/blast-radius support, main↔Preview analysis.
@@ -41,7 +41,7 @@ Do not make the experimental reference implementation a runtime dependency.
 
 Use existing/native capability until a provider becomes a demonstrated limiter.
 
-Conductor adapters are grouped by the semantic execution family they actually implement. GitHub currently implements source-control and durable-work families; a future database, deployment, artifact, or local-execution adapter should receive its own bounded family instead of implementing a generic project mutation interface.
+Conductor adapters are grouped by the semantic execution family they actually implement. GitHub implements source-control and durable-work families. Vercel implements the initial deployment-read family. Future database, artifact, deployment-mutation, or local-execution adapters should receive their own bounded families instead of implementing a generic project mutation interface.
 
 Avoid provider sprawl.
 

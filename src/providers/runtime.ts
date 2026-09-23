@@ -22,6 +22,10 @@ import type {
   CreateWorkItemInput,
   UpdateWorkItemStatusInput,
   UpdateWorkItemClassificationInput,
+  GetDeploymentStatusInput,
+  GetDeploymentLogsInput,
+  DeploymentProjectStatus,
+  DeploymentLogs,
 } from '../runtime/types.js';
 
 export interface RuntimeCapabilityProvider {
@@ -61,6 +65,11 @@ export interface WorkItemMutationProvider extends WorkItemReadProvider {
   createWorkItem(input: CreateWorkItemInput): Promise<WorkItemRecord>;
   updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItemRecord>;
   updateWorkItemClassification(input: UpdateWorkItemClassificationInput): Promise<WorkItemRecord>;
+}
+
+export interface DeploymentReadProvider extends RuntimeCapabilityProvider {
+  getDeploymentStatus(input: GetDeploymentStatusInput): Promise<DeploymentProjectStatus>;
+  getDeploymentLogs(input: GetDeploymentLogsInput): Promise<DeploymentLogs>;
 }
 
 export interface SourceControlMutationProvider extends RuntimeCapabilityProvider {
