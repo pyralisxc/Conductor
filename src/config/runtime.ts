@@ -163,8 +163,8 @@ export function parseRuntimeBindings(value?: string): RuntimeBinding[] {
       repository: project.repository,
       workspace: project.workspace,
       githubWrite: project.githubWrite,
-      vercelProject: project.vercelProject,
-      vercelTeamId: project.vercelTeamId,
+      ...(typeof project.vercelProject === 'string' ? { vercelProject: project.vercelProject } : {}),
+      ...(typeof project.vercelTeamId === 'string' ? { vercelTeamId: project.vercelTeamId } : {}),
     } as RuntimeBinding;
   });
 }
