@@ -98,7 +98,7 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
 
   async getDeploymentStatus(input: GetDeploymentStatusInput): Promise<DeploymentProjectStatus> {
     const binding = this.binding(input.project);
-    this.requireToken();
+    this.tokenValue();
     const limit = clamp(input.limit ?? 10, 1, 50);
     const project = await this.getProject(binding);
     const projectId = stringField(project, 'id') ?? binding.project;
@@ -157,7 +157,7 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
 
   async getDeploymentLogs(input: GetDeploymentLogsInput): Promise<DeploymentLogs> {
     const binding = this.binding(input.project);
-    this.requireToken();
+    this.tokenValue();
     const limit = clamp(input.limit ?? 100, 1, 200);
     const project = await this.getProject(binding);
     const projectId = stringField(project, 'id') ?? binding.project;
@@ -201,8 +201,9 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
     return binding;
   }
 
-  private requireToken(): asserts this is this & { token: string } {
+  private tokenValue(): string {
     if (!this.token) throw { code: 'AUTH_REQUIRED', source: 'vercel', message: 'Vercel deployment access requires CONDUCTOR_VERCEL_TOKEN (or VERCEL_TOKEN)' };
+    return this.token;
   }
 
   private async getProject(binding: VercelProjectBinding): Promise<JsonRecord> {
@@ -222,12 +223,12 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
   }
 
   private async request(path: string, query: Record<string, string>): Promise<Response> {
-    this.requireToken();
+    const token = this.tokenValue();
     const url = new URL(`${this.apiBaseUrl}${path}`);
     for (const [key, value] of Object.entries(query)) if (value) url.searchParams.set(key, value);
     const response = await this.fetch(url, {
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        Authorization: `Bearer ${token}`,
         Accept: 'application/json, application/stream+json, text/plain;q=0.8',
         'User-Agent': 'Conductor-Tool-Runtime',
       },
