@@ -37,13 +37,12 @@ Promotion:
 
 ```text
 preview @ exact SHA
-└── work/promote-<candidate>
-    └── PR -> main
+└── PR -> main (merge commit)
 ```
 
 `main` is never automatically promoted.
 
-After promotion, reconcile accepted Main ancestry back into `preview` with the bounded exact-SHA reconciliation operation. Do not force-update Preview or use another squash for ancestry repair.
+The merge commit preserves Preview ancestry on Main, so routine promotion needs no return PR. If a Main-only content change occurs, carry it into Preview with the bounded exact-SHA reconciliation operation before ordinary development continues. Do not force-update Preview.
 
 ## Project integration
 

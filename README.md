@@ -113,7 +113,7 @@ Work starts from current `preview` and targets `preview`.
 
 Main promotion is a separate exact-candidate operation. A release/promotion proposal never implies approval.
 
-After a successful squash-style Main promotion, accepted Main ancestry is reconciled back into `preview` with an exact-SHA merge commit. Reconciliation never targets production and never substitutes for Main approval.
+Normal Main promotion merges the exact approved Preview candidate with a merge commit, so no return PR is needed. Main-only content changes use exact-SHA reconciliation into Preview before ordinary work resumes. Reconciliation never targets production and never substitutes for Main approval.
 
 ## Quick start
 
