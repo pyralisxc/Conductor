@@ -17,10 +17,12 @@ interface VercelProjectBinding {
   id: string;
   project: string;
   teamId?: string;
+  connectionId?: string;
 }
 
 interface VercelDeploymentProviderOptions {
   token?: string;
+  tokenResolver?: (binding: VercelProjectBinding) => Promise<string | undefined>;
   bindings: VercelProjectBinding[];
   apiBaseUrl?: string;
   fetch?: typeof globalThis.fetch;
@@ -32,6 +34,7 @@ type JsonRecord = Record<string, unknown>;
 export class VercelDeploymentProvider implements DeploymentReadProvider, OperationPreflightProvider {
   readonly id = 'vercel';
   private readonly token?: string;
+  private readonly tokenResolver?: (binding: VercelProjectBinding) => Promise<string | undefined>;
   private readonly bindings: ReadonlyMap<string, VercelProjectBinding>;
   private readonly apiBaseUrl: string;
   private readonly fetch: typeof globalThis.fetch;
@@ -39,6 +42,7 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
 
   constructor(options: VercelDeploymentProviderOptions) {
     this.token = options.token?.trim() || undefined;
+    this.tokenResolver = options.tokenResolver;
     this.bindings = new Map(options.bindings.map(binding => [binding.id, { ...binding }]));
     this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.vercel.com').replace(/\/$/u, '');
     this.fetch = options.fetch ?? globalThis.fetch;
@@ -47,7 +51,9 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
     const configured = this.bindings.size > 0;
-    const authenticated = Boolean(this.token);
+    const authenticated = Boolean(this.token) || Boolean(this.tokenResolver && (await Promise.all(
+      [...this.bindings.values()].filter(binding => binding.connectionId).map(binding => this.tokenResolver!(binding).catch(() => undefined)),
+    )).some(Boolean));
     return [
       capability('deployment.read', configured, authenticated),
       capability('deployment.logs.read', configured, authenticated),
@@ -68,11 +74,11 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
       }, 'NOT_FOUND', 'vercel');
       return [{ provider: 'vercel', status: 'blocked', summary: error.message, error, diagnostics: error.diagnostics }];
     }
-    if (!this.token) {
+    if (!await this.tokenValue(binding).catch(() => undefined)) {
       const error = normalizeToolError({
         code: 'AUTH_REQUIRED',
         source: 'vercel',
-        message: 'Vercel deployment access requires CONDUCTOR_VERCEL_TOKEN (or VERCEL_TOKEN)',
+        message: 'Vercel deployment access requires an active bound account connection or a server token',
       }, 'AUTH_REQUIRED', 'vercel');
       return [{ provider: 'vercel', status: 'blocked', summary: error.message, error, diagnostics: error.diagnostics }];
     }
@@ -98,7 +104,7 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
 
   async getDeploymentStatus(input: GetDeploymentStatusInput): Promise<DeploymentProjectStatus> {
     const binding = this.binding(input.project);
-    this.tokenValue();
+    await this.tokenValue(binding);
     const limit = clamp(input.limit ?? 10, 1, 50);
     const project = await this.getProject(binding);
     const projectId = stringField(project, 'id') ?? binding.project;
@@ -107,8 +113,8 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
         ...scopeQuery(binding),
         projectId,
         limit: String(limit),
-      }),
-      this.getJson(`/v9/projects/${encodeURIComponent(projectId)}/domains`, scopeQuery(binding)),
+      }, binding),
+      this.getJson(`/v9/projects/${encodeURIComponent(projectId)}/domains`, scopeQuery(binding), binding),
     ]);
 
     const recent = arrayField(deploymentPayload, 'deployments')
@@ -120,7 +126,7 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
     const productionId = productionTarget ? (stringField(productionTarget, 'id') ?? stringField(productionTarget, 'uid')) : null;
     let production = productionId ? recent.find(item => item.id === productionId) ?? null : null;
     if (productionId && !production) {
-      const detail = await this.getJson(`/v13/deployments/${encodeURIComponent(productionId)}`, scopeQuery(binding));
+      const detail = await this.getJson(`/v13/deployments/${encodeURIComponent(productionId)}`, scopeQuery(binding), binding);
       production = normalizeDeployment(detail);
     }
     if (!production) {
@@ -157,13 +163,13 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
 
   async getDeploymentLogs(input: GetDeploymentLogsInput): Promise<DeploymentLogs> {
     const binding = this.binding(input.project);
-    this.tokenValue();
+    await this.tokenValue(binding);
     const limit = clamp(input.limit ?? 100, 1, 200);
     const project = await this.getProject(binding);
     const projectId = stringField(project, 'id') ?? binding.project;
     const deployment = await this.getJson(
       `/v13/deployments/${encodeURIComponent(input.deploymentId)}`,
-      scopeQuery(binding),
+      scopeQuery(binding), binding,
     );
     const deploymentProjectId = stringField(deployment, 'projectId')
       ?? (recordField(deployment, 'project') ? stringField(recordField(deployment, 'project')!, 'id') : null);
@@ -177,7 +183,7 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
 
     const response = await this.request(
       `/v3/deployments/${encodeURIComponent(input.deploymentId)}/events`,
-      { ...scopeQuery(binding), direction: 'forward', follow: '0' },
+      { ...scopeQuery(binding), direction: 'forward', follow: '0' }, binding,
     );
     const body = await response.text();
     const events = parseEventStream(body);
@@ -201,20 +207,21 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
     return binding;
   }
 
-  private tokenValue(): string {
-    if (!this.token) throw { code: 'AUTH_REQUIRED', source: 'vercel', message: 'Vercel deployment access requires CONDUCTOR_VERCEL_TOKEN (or VERCEL_TOKEN)' };
-    return this.token;
+  private async tokenValue(binding: VercelProjectBinding): Promise<string> {
+    const token = binding.connectionId && this.tokenResolver ? await this.tokenResolver(binding) : this.token;
+    if (!token) throw { code: 'AUTH_REQUIRED', source: 'vercel', message: 'Vercel deployment access requires an active account connection or CONDUCTOR_VERCEL_TOKEN' };
+    return token;
   }
 
   private async getProject(binding: VercelProjectBinding): Promise<JsonRecord> {
     return await this.getJson(
       `/v9/projects/${encodeURIComponent(binding.project)}`,
-      scopeQuery(binding),
+      scopeQuery(binding), binding,
     );
   }
 
-  private async getJson(path: string, query: Record<string, string>): Promise<JsonRecord> {
-    const response = await this.request(path, query);
+  private async getJson(path: string, query: Record<string, string>, binding: VercelProjectBinding): Promise<JsonRecord> {
+    const response = await this.request(path, query, binding);
     const body = await response.json().catch(() => null);
     if (!body || typeof body !== 'object') {
       throw { code: 'COMMAND_FAILED', source: 'vercel', message: `Vercel returned a non-JSON response for ${path}` };
@@ -222,8 +229,8 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
     return body as JsonRecord;
   }
 
-  private async request(path: string, query: Record<string, string>): Promise<Response> {
-    const token = this.tokenValue();
+  private async request(path: string, query: Record<string, string>, binding: VercelProjectBinding): Promise<Response> {
+    const token = await this.tokenValue(binding);
     const url = new URL(`${this.apiBaseUrl}${path}`);
     for (const [key, value] of Object.entries(query)) if (value) url.searchParams.set(key, value);
     const response = await this.fetch(url, {

@@ -48,6 +48,8 @@ The workspace adapter verifies readable/writable access, bounded Node process ex
 
 Development Intelligence remains read-only. `DEVINT_MCP_URL` and `DEVINT_AGENT_TOKEN` connect Conductor to its authenticated MCP `project_status` operation. If they are absent, capability and preflight results explicitly report the adapter as unavailable.
 
+An owner may connect a Vercel integration at `/connections/vercel` after Conductor owner sign-in. The connection stores a separate encrypted credential for each Vercel installation in Redis. It grants no project operations by itself. Bind a project explicitly with `vercelProject`, `vercelConnectionId` (the displayed `icfg_...` ID), and `vercelTeamId` for a team installation in `CONDUCTOR_PROJECTS_JSON`. Conductor checks that the installation belongs to that team. Local disconnect deletes Conductor's credential immediately; uninstall in Vercel as well to revoke provider access. Rotating `CONDUCTOR_SESSION_SECRET` makes encrypted connections unreadable and requires reconnecting.
+
 The optional Vercel deployment adapter is also read-only in v0. When a binding supplies `vercelProject`, `deployment.status` reads the provider-native project, current production deployment, latest production attempt, recent deployments, source Git SHA/ref when available, and domains. `deployment.logs` reads bounded/redacted deployment-event output for one exact deployment. Vercel remains authoritative for deployment state; Conductor does not persist a deployment ledger or expose deploy/promote/rollback mutations in this tranche.
 
 ## Required configuration
@@ -66,10 +68,12 @@ The optional Vercel deployment adapter is also read-only in v0. When a binding s
 | `DEVINT_MCP_URL` | Development Intelligence MCP endpoint |
 | `DEVINT_AGENT_TOKEN` | Separate machine bearer token for read-only DI access |
 | `CONDUCTOR_VERCEL_TOKEN` | Optional server-side Vercel token used only for configured read-only deployment-provider operations; `VERCEL_TOKEN` is accepted as a fallback |
+| `CONDUCTOR_VERCEL_INTEGRATION_SLUG` | Vercel integration slug for owner initiated installation |
+| `CONDUCTOR_VERCEL_CLIENT_ID` / `CONDUCTOR_VERCEL_CLIENT_SECRET` | OAuth credentials for the Vercel integration connection |
 | `CONDUCTOR_ENABLE_GITHUB_MUTATIONS` | Set to `1` to expose bounded GitHub write tools |
 | `PORT` | HTTP port; defaults to `3000` |
 
-On Vercel or another horizontally scaled deployment, also set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`. `KV_REST_API_URL` and `KV_REST_API_TOKEN` are accepted compatibility aliases. `CONDUCTOR_REQUIRE_SHARED_OAUTH_STATE=1` can enforce the same fail-closed rule on any host. Mutation enablement fails closed unless durable Redis state and either complete GitHub App credentials or the transitional static token are configured. Supplying only one App credential variable is invalid.
+On Vercel or another horizontally scaled deployment, also set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`. `KV_REST_API_URL` and `KV_REST_API_TOKEN` are accepted compatibility aliases. `CONDUCTOR_REQUIRE_SHARED_OAUTH_STATE=1` can enforce the same fail-closed rule on any host. Mutation enablement fails closed unless durable Redis state and either complete GitHub App credentials or the transitional static token are configured. Supplying only one App credential variable is invalid. The Vercel connection flow always requires durable Redis. Register `<CONDUCTOR_PUBLIC_URL>/connections/vercel/callback` as the integration Redirect URL and grant only the deployment/project read scopes for the current adapter. Never place Vercel access tokens in runtime project bindings.
 
 ## Run and inspect
 
