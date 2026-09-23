@@ -40,10 +40,10 @@ This document tests the **current bounded runtime**. Future automation experimen
 23. Main promotion requires an exact head SHA, exact base SHA, repository-default target, and explicit owner approval reference.
 24. Stale promotion identity fails closed.
 25. Conductor cannot infer or bypass Main approval.
-26. After accepted promotion, the repository default branch can reconcile into `preview`/`vercel-preview` only through the exact reconciliation lane.
+26. Normal promotion uses a merge commit, so the exact approved Preview head becomes Main ancestry without a return PR; squash/rebase promotion fails closed.
 27. Preview reconciliation rejects non-default sources and non-Preview targets.
 28. Preview reconciliation always uses a merge commit so accepted ancestry is preserved.
-29. A subsequent work branch can start from the reconciled Preview lineage.
+29. A subsequent work branch starts from Preview directly after normal promotion. Main-only changes use the exact reconciliation lane before ordinary Preview work resumes.
 
 ## Current runtime — reliability and security
 

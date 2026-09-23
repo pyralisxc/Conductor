@@ -26,8 +26,8 @@ When explicitly enabled with durable Redis idempotency state, the current source
 - `pull-request.comment.create` adds an idempotent pull-request comment.
 - `pull-request.labels.update` adds/removes labels while preserving unrelated labels.
 - `pull-request.merge.integration` merges only an exact head/base candidate from a bounded work/repair/audit/release source into a non-accepted integration branch.
-- `pull-request.merge.reconcile-preview` merges only an exact repository-default-branch candidate into `preview` or `vercel-preview`, always using a merge commit so accepted ancestry is preserved after promotion.
-- `pull-request.merge.promote` merges only an exact head/base candidate into the repository default branch and requires a non-empty owner approval reference.
+- `pull-request.merge.reconcile-preview` merges only an exact repository-default-branch candidate into `preview` or `vercel-preview`, always using a merge commit for exceptional Main-only content changes.
+- `pull-request.merge.promote` merges only an exact `preview`/`vercel-preview` head/base candidate into the repository default branch with a merge commit and requires a non-empty owner approval reference. Normal promotion preserves Preview ancestry without a return PR.
 - `work-item.create` creates durable issue-backed work with optional normalized status, kind, and origin.
 - `work-item.update-status` changes only lifecycle status; `done` closes the backing issue and active statuses reopen it.
 - `work-item.classification.update` changes kind and/or origin without changing lifecycle status. `unknown` clears that classification.
@@ -85,7 +85,7 @@ The included in-memory idempotency store is suitable for tests and one-process d
 - generic shell or arbitrary provider dispatch
 - arbitrary push, force-push, unbounded merge, or repository-admin tools
 - inferred or unattended default-branch promotion; promotion requires an exact candidate plus explicit owner approval context
-- arbitrary branch reconciliation or force-updating Preview; post-promotion reconciliation is limited to exact default-branch → Preview ancestry
+- arbitrary branch reconciliation or force-updating Preview; exceptional Main-only reconciliation is limited to exact default-branch → Preview ancestry
 - multi-agent workers or handoffs
 - scheduling and durable waits
 - session management
@@ -108,6 +108,6 @@ The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the confi
 - Provider failures are normalized and visible.
 - A configured deployment provider can distinguish the currently served production deployment from a newer failed production attempt and can return bounded/redacted exact-deployment logs without persisting provider state.
 - Receipts are stable and carry provider identifiers, including merge commit SHA when a merge succeeds.
-- Post-promotion reconciliation accepts only the exact default branch → Preview lane and preserves ancestry with a merge commit.
+- Exceptional Main-only reconciliation accepts only the exact default branch → Preview lane and preserves ancestry with a merge commit.
 - Retrying the same mutation cannot repeat its side effect through the idempotency executor.
 - Existing orchestration policy and tests remain intact.

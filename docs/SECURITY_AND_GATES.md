@@ -30,7 +30,7 @@ Require explicit owner action before main promotion, destructive migration, irre
 
 Mechanical execution may follow that approval. `pull-request.merge.promote` is therefore not autonomous release authority: it requires the exact PR head SHA, exact base SHA, repository-default target, and an owner approval reference. Conductor refuses stale candidates and preserves the merge commit SHA in its receipt.
 
-Post-promotion Preview reconciliation is a separate non-production operation. It requires exact head/base identity, accepts only the repository default branch as source and `preview`/`vercel-preview` as target, and always uses a merge commit. It never grants or infers Main approval.
+Promotion accepts only an exact `preview`/`vercel-preview` candidate and uses a merge commit. This keeps the promoted Preview head in Main ancestry; no routine reverse PR is needed. Preview reconciliation is a separate non-production operation for Main-only changes. It requires exact head/base identity, accepts only the repository default branch as source and `preview`/`vercel-preview` as target, and always uses a merge commit. It never grants or infers Main approval.
 
 ## Self-hosted runner
 

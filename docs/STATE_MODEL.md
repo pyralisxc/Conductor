@@ -78,7 +78,7 @@ Reconstructable and normally **not** stored as another authority:
 - Creating, classifying, or selecting work does not authorize execution.
 - Provider capability never substitutes for authorization.
 - `preview` is an integrated candidate, not production acceptance.
-- After accepted promotion, Main ancestry is reconciled back into Preview through the bounded exact-SHA reconciliation lane rather than force-updating branch history.
+- Normal accepted promotion merges Preview into Main with a merge commit, preserving Preview ancestry without a return PR. Main-only content changes require the bounded exact-SHA reconciliation lane before ordinary Preview work resumes.
 - Main promotion approval is bound to an exact candidate SHA.
 - Unknown or conflicting classification remains explicit rather than being inferred from names or prose.
 - Concrete task tracking belongs in the work-item system, not Markdown backlog files.
