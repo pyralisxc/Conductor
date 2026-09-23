@@ -110,6 +110,27 @@ test('Vercel provider reports missing authentication without exposing deployment
   assert.equal(preflight?.[0]?.error?.code, 'AUTH_REQUIRED');
 });
 
+test('Vercel account connection resolves only the selected installation and fails closed after disconnect', async () => {
+  let connected = true;
+  const seen: string[] = [];
+  const instance = new VercelDeploymentProvider({
+    bindings: [{ id: 'conductor', project: 'conductor', teamId: 'team_A', connectionId: 'icfg_A' }],
+    tokenResolver: async binding => {
+      seen.push(`${binding.connectionId}:${binding.teamId}`);
+      return connected && binding.connectionId === 'icfg_A' && binding.teamId === 'team_A' ? 'installation-token' : undefined;
+    },
+    fetch: async (_url, options) => {
+      assert.equal((options?.headers as Record<string, string>).Authorization, 'Bearer installation-token');
+      return Response.json({ id: 'prj_conductor', name: 'conductor' });
+    },
+  });
+  assert.equal((await instance.preflightOperation({ id: 'conductor' }, 'deployment.status'))?.[0]?.status, 'ready');
+  connected = false;
+  assert.equal((await instance.getCapabilities()).every(item => !item.available), true);
+  assert.equal((await instance.preflightOperation({ id: 'conductor' }, 'deployment.status'))?.[0]?.error?.code, 'AUTH_REQUIRED');
+  assert.ok(seen.every(value => value === 'icfg_A:team_A'));
+});
+
 test('runtime and MCP expose Vercel deployment reads only when a deployment provider is configured', async () => {
   const { instance } = provider();
   const runtime = new ConductorToolRuntime({
@@ -159,4 +180,9 @@ test('runtime bindings accept Vercel deployment routing without creating project
     vercelProject: 'development-intelligence',
     vercelTeamId: 'team_1',
   });
+});
+
+test('runtime binding requires an installation identifier for connected Vercel credentials', () => {
+  assert.equal(parseRuntimeBindings('[{"id":"conductor","vercelProject":"conductor","vercelConnectionId":"icfg_123"}]')[0]?.vercelConnectionId, 'icfg_123');
+  assert.throws(() => parseRuntimeBindings('[{"id":"conductor","vercelConnectionId":"other"}]'), /vercelConnectionId/u);
 });

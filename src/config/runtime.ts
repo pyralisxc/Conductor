@@ -5,6 +5,7 @@ import { DevelopmentIntelligenceProvider, UnavailableDevelopmentIntelligenceProv
 import type { ToolRuntimeProvider } from '../providers/runtime.js';
 import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
 import { VercelDeploymentProvider } from '../providers/vercel.js';
+import { vercelInstallationToken } from '../transport/vercel-connections.js';
 import { IdempotentMutationExecutor } from '../runtime/idempotency.js';
 import { RedisIdempotencyStore } from '../runtime/redis-idempotency.js';
 
@@ -15,6 +16,7 @@ export interface RuntimeBinding {
   githubWrite?: boolean;
   vercelProject?: string;
   vercelTeamId?: string;
+  vercelConnectionId?: string;
 }
 
 export interface RuntimeEnvironment extends Record<string, string | undefined> {
@@ -68,12 +70,13 @@ export function createRuntimeFromEnvironment(
   }
 
   const vercelBindings = bindings.flatMap((binding) => binding.vercelProject
-    ? [{ id: binding.id, project: binding.vercelProject, teamId: binding.vercelTeamId }]
+    ? [{ id: binding.id, project: binding.vercelProject, teamId: binding.vercelTeamId, connectionId: binding.vercelConnectionId }]
     : []);
   let vercelProvider: VercelDeploymentProvider | undefined;
   if (vercelBindings.length > 0) {
     vercelProvider = new VercelDeploymentProvider({
       token: environment.CONDUCTOR_VERCEL_TOKEN ?? environment.VERCEL_TOKEN,
+      tokenResolver: (binding) => binding.connectionId ? vercelInstallationToken(binding.connectionId, binding.teamId) : Promise.resolve(undefined),
       bindings: vercelBindings,
     });
     providers.push(vercelProvider);
@@ -158,6 +161,9 @@ export function parseRuntimeBindings(value?: string): RuntimeBinding[] {
     if (project.vercelTeamId !== undefined && typeof project.vercelTeamId !== 'string') {
       throw new Error(`Runtime binding ${project.id} vercelTeamId must be a string`);
     }
+    if (project.vercelConnectionId !== undefined && (typeof project.vercelConnectionId !== 'string' || !/^icfg_[\w-]+$/u.test(project.vercelConnectionId))) {
+      throw new Error(`Runtime binding ${project.id} vercelConnectionId must be a Vercel installation ID`);
+    }
     return {
       id: project.id,
       repository: project.repository,
@@ -165,6 +171,7 @@ export function parseRuntimeBindings(value?: string): RuntimeBinding[] {
       githubWrite: project.githubWrite,
       ...(typeof project.vercelProject === 'string' ? { vercelProject: project.vercelProject } : {}),
       ...(typeof project.vercelTeamId === 'string' ? { vercelTeamId: project.vercelTeamId } : {}),
+      ...(typeof project.vercelConnectionId === 'string' ? { vercelConnectionId: project.vercelConnectionId } : {}),
     } as RuntimeBinding;
   });
 }

@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { handleVercelConnectionRequest } from './vercel-connections.js';
 import {
   clearOwnerSession,
   normalizeReturnTo,
@@ -85,6 +86,7 @@ export async function handleOAuthHttpRequest(
   res: ServerResponse,
   requestUrl: URL,
 ): Promise<boolean> {
+  if (await handleVercelConnectionRequest(req, res, requestUrl)) return true;
   if ((requestUrl.pathname === '/.well-known/oauth-protected-resource'
       || requestUrl.pathname === '/.well-known/oauth-protected-resource/mcp')
     && req.method === 'GET') {
