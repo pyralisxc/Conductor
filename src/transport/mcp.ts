@@ -27,7 +27,7 @@ const errorSchema = z.object({
 
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation',
-  'development.status', 'pull-request.status', 'work-item.status', 'work-item.list',
+  'development.status', 'pull-request.status', 'deployment.status', 'deployment.logs', 'work-item.status', 'work-item.list',
   'git.branch.create', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
@@ -262,6 +262,33 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
     }, async (input) => result(await runtime.pullRequestStatus(input)));
   }
 
+
+  if (runtime.deploymentReadEnabled) {
+    server.registerTool('deployment.status', {
+      title: 'Read deployment status',
+      description: 'Read the configured Vercel project, current production deployment, latest production attempt, recent deployments, source Git revisions, and domains. Vercel remains authoritative for deployment state.',
+      inputSchema: z.object({
+        project: projectSchema,
+        limit: z.number().int().min(1).max(50).default(10),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.deploymentStatus(input)));
+
+    server.registerTool('deployment.logs', {
+      title: 'Read deployment logs',
+      description: 'Read bounded, redacted Vercel deployment event logs for one exact deployment. This surface is intended for deployment/build diagnosis and does not expose credentials.',
+      inputSchema: z.object({
+        project: projectSchema,
+        deploymentId: z.string().min(3).max(256),
+        limit: z.number().int().min(1).max(200).default(100),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.deploymentLogs(input)));
+  }
 
   if (runtime.workItemReadEnabled) {
     server.registerTool('work-item.status', {

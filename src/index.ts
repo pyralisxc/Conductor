@@ -5,6 +5,7 @@ export * from './providers/github.js';
 export * from './providers/github-auth.js';
 export * from './providers/workspace.js';
 export * from './providers/development-intelligence.js';
+export * from './providers/vercel.js';
 export * from './config/runtime.js';
 export * from './runtime/types.js';
 export * from './runtime/errors.js';

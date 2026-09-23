@@ -4,6 +4,7 @@ import { GitHubAppCredentialProvider } from '../providers/github-auth.js';
 import { DevelopmentIntelligenceProvider, UnavailableDevelopmentIntelligenceProvider } from '../providers/development-intelligence.js';
 import type { ToolRuntimeProvider } from '../providers/runtime.js';
 import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
+import { VercelDeploymentProvider } from '../providers/vercel.js';
 import { IdempotentMutationExecutor } from '../runtime/idempotency.js';
 import { RedisIdempotencyStore } from '../runtime/redis-idempotency.js';
 
@@ -12,6 +13,8 @@ export interface RuntimeBinding {
   repository?: string;
   workspace?: string;
   githubWrite?: boolean;
+  vercelProject?: string;
+  vercelTeamId?: string;
 }
 
 export interface RuntimeEnvironment extends Record<string, string | undefined> {
@@ -23,6 +26,8 @@ export interface RuntimeEnvironment extends Record<string, string | undefined> {
   DEVINT_MCP_URL?: string;
   DEVINT_AGENT_TOKEN?: string;
   CONDUCTOR_ENABLE_GITHUB_MUTATIONS?: string;
+  CONDUCTOR_VERCEL_TOKEN?: string;
+  VERCEL_TOKEN?: string;
   UPSTASH_REDIS_REST_URL?: string;
   UPSTASH_REDIS_REST_TOKEN?: string;
   KV_REST_API_URL?: string;
@@ -62,8 +67,20 @@ export function createRuntimeFromEnvironment(
     providers.push(new WorkspaceRuntimeProvider({ projects: workspaceBindings }));
   }
 
+  const vercelBindings = bindings.flatMap((binding) => binding.vercelProject
+    ? [{ id: binding.id, project: binding.vercelProject, teamId: binding.vercelTeamId }]
+    : []);
+  let vercelProvider: VercelDeploymentProvider | undefined;
+  if (vercelBindings.length > 0) {
+    vercelProvider = new VercelDeploymentProvider({
+      token: environment.CONDUCTOR_VERCEL_TOKEN ?? environment.VERCEL_TOKEN,
+      bindings: vercelBindings,
+    });
+    providers.push(vercelProvider);
+  }
+
   const sourceControlMutationsEnabled = environment.CONDUCTOR_ENABLE_GITHUB_MUTATIONS === '1';
-  if (!sourceControlMutationsEnabled) return new ConductorToolRuntime({ providers, projectResolver: githubProvider, pullRequestProvider: githubProvider, workItemProvider: githubProvider, workItemCandidateProvider: githubProvider });
+  if (!sourceControlMutationsEnabled) return new ConductorToolRuntime({ providers, projectResolver: githubProvider, pullRequestProvider: githubProvider, workItemProvider: githubProvider, workItemCandidateProvider: githubProvider, deploymentProvider: vercelProvider });
   if (!githubProvider || (!environment.GITHUB_TOKEN && !githubApp)) {
     throw new Error('GitHub mutations require an authorized owner/project and GitHub authentication');
   }
@@ -82,6 +99,7 @@ export function createRuntimeFromEnvironment(
     pullRequestProvider: githubProvider,
     workItemProvider: githubProvider,
     workItemCandidateProvider: githubProvider,
+    deploymentProvider: vercelProvider,
   });
 }
 
@@ -134,11 +152,19 @@ export function parseRuntimeBindings(value?: string): RuntimeBinding[] {
     if (project.githubWrite !== undefined && typeof project.githubWrite !== 'boolean') {
       throw new Error(`Runtime binding ${project.id} githubWrite must be a boolean`);
     }
+    if (project.vercelProject !== undefined && typeof project.vercelProject !== 'string') {
+      throw new Error(`Runtime binding ${project.id} vercelProject must be a string`);
+    }
+    if (project.vercelTeamId !== undefined && typeof project.vercelTeamId !== 'string') {
+      throw new Error(`Runtime binding ${project.id} vercelTeamId must be a string`);
+    }
     return {
       id: project.id,
       repository: project.repository,
       workspace: project.workspace,
       githubWrite: project.githubWrite,
+      vercelProject: project.vercelProject,
+      vercelTeamId: project.vercelTeamId,
     } as RuntimeBinding;
   });
 }
