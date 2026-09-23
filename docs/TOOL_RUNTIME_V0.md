@@ -13,6 +13,8 @@ v0 always exposes the core non-mutating runtime tools:
 - `preflight_operation(project, operation)` is exposed when at least one configured provider can supply operation-level evidence. It verifies whether one exact exposed Conductor operation can execute against the supplied routing referent, aggregates only responsible providers, and never infers which operation the project needs.
 - `development.status(project, limit?)` reconstructs compact inspect-time preflight plus ready/in-progress/blocked/review work. Each active work item includes same-repository PR candidates discovered through native issue timeline cross-references and reuses exact PR check/workflow truth. It never ranks or selects work.
 - `pull-request.status(project, pullRequestNumber, previous?)` is exposed when a GitHub PR provider is configured and returns exact head/base identity plus labels, check/workflow truth and a derived orchestration state. A caller may supply its prior head/state observation to detect meaningful transitions without Conductor storing PR history.
+- `deployment.status(project, limit?)` is exposed when a deployment read provider is configured and returns provider-native current production, latest production attempt, recent deployments, source revision/ref where available, and deployment domains.
+- `deployment.logs(project, deploymentId, limit?)` reads one exact deployment's bounded/redacted event output. Provider event retention/coverage remains explicit and is not treated as a complete runtime archive.
 - `work-item.status(project, issueNumber)` reads one durable work item with normalized lifecycle status, kind, and origin.
 - `work-item.list(project, ...)` lists issue-backed work and can filter by normalized status, kind, and origin. Pull requests are excluded.
 
@@ -68,7 +70,7 @@ Provider exceptions do not escape as ambiguous client failures.
 
 `ConductorToolRuntime` owns the stable facade and receipt boundary.
 
-Provider adapters report real capability and preflight evidence. They do not change the runtime contract. Provider-neutrality is organized by semantic capability family rather than a generic provider read/write/execute interface: source-control mutation, work-item mutation, intelligence/preflight, and future database/deployment/artifact families may evolve independently. Development Intelligence may implement only read/query capabilities. Project/repository identifiers entering the runtime are execution-routing referents supplied by callers; Conductor does not expand them into a project model.
+Provider adapters report real capability and preflight evidence. They do not change the runtime contract. Provider-neutrality is organized by semantic capability family rather than a generic provider read/write/execute interface: source-control mutation, work-item mutation, intelligence/preflight, deployment read, and future database/artifact/local-execution families may evolve independently. Vercel is the first deployment-read implementation; it does not implement source-control mutation semantics. Development Intelligence may implement only read/query capabilities. Project/repository identifiers entering the runtime are execution-routing referents supplied by callers; Conductor does not expand them into a project model.
 
 Operation preflight is evidence aggregation, not planning. An operation must first be exposed by the configured runtime. Responsible providers then prove or qualify the exact capability/permission lane they own. GitHub App evidence is operation-specific; static-token repository-role evidence remains degraded because it cannot prove fine-grained operation permissions.
 
@@ -87,6 +89,7 @@ The included in-memory idempotency store is suitable for tests and one-process d
 - multi-agent workers or handoffs
 - scheduling and durable waits
 - session management
+- arbitrary deployment mutation (`deploy`, `retry`, `promote`, `rollback`) in the read-only Vercel tranche
 - a provider-specific orchestration transport beyond the thin authenticated MCP adapter
 - a second source of project intelligence
 
@@ -103,6 +106,7 @@ The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the confi
 - Pull-request status distinguishes external-gate waiting, expected pre-seal checkpoint mismatch, sealed-head verification requirements, real verification failure, and technical promotion readiness without inferring authorization.
 - Repeating a prior observation with the same head and orchestration state reports no meaningful transition.
 - Provider failures are normalized and visible.
+- A configured deployment provider can distinguish the currently served production deployment from a newer failed production attempt and can return bounded/redacted exact-deployment logs without persisting provider state.
 - Receipts are stable and carry provider identifiers, including merge commit SHA when a merge succeeds.
 - Post-promotion reconciliation accepts only the exact default branch → Preview lane and preserves ancestry with a merge commit.
 - Retrying the same mutation cannot repeat its side effect through the idempotency executor.
