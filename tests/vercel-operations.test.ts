@@ -62,7 +62,10 @@ test('deployment cleanup protects current production and active builds', async (
   const { provider, calls, project } = fixture();
   await assert.rejects(
     provider.deleteDeployment({ project, deploymentId: 'dpl_old', idempotencyKey: 'delete-current-production' }),
-    (error: unknown) => (error as { message?: string }).message?.includes('currently serving production') === true,
+    (error: unknown) => {
+      assert.match((error as { message?: string }).message ?? JSON.stringify(error), /currently serving production/u);
+      return true;
+    },
   );
   await assert.rejects(
     provider.deleteDeployment({ project, deploymentId: 'dpl_building', idempotencyKey: 'delete-active-build' }),
