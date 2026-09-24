@@ -83,6 +83,7 @@ export interface VercelOperationsProvider extends DeploymentReadProvider {
   createGitDeployment(input: VercelGitDeploymentInput): Promise<Record<string, unknown>>;
   promote(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
   rollback(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
+  deleteDeployment(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
   upsertEnvironment(input: VercelEnvInput): Promise<Record<string, unknown>>;
   updateEnvironment(input: VercelEnvEditInput): Promise<Record<string, unknown>>;
   removeEnvironment(input: VercelEnvRemoveInput): Promise<Record<string, unknown>>;
