@@ -38,12 +38,12 @@ function fixture() {
 test('Vercel operations scope exact deployments and require production approval', async () => {
   const { provider, calls, project } = fixture();
   const before = calls.length;
-  await assert.rejects(provider.redeploy({ project, deploymentId: 'dpl_other', idempotencyKey: 'wrong-project' }), /outside the bound project/);
+  await assert.rejects(provider.redeploy({ project, deploymentId: 'dpl_other', idempotencyKey: 'wrong-project' }), (error: unknown) => (error as { message?: string }).message?.includes('outside the bound project') === true);
   assert.equal(calls.slice(before).some(call => call.method === 'POST'), false);
-  await assert.rejects(provider.redeploy({ project, deploymentId: 'dpl_old', idempotencyKey: 'need-approval' }), /approval/);
+  await assert.rejects(provider.redeploy({ project, deploymentId: 'dpl_old', idempotencyKey: 'need-approval' }), (error: unknown) => (error as { message?: string }).message?.includes('approval') === true);
   const deployed = await provider.redeploy({ project, deploymentId: 'dpl_preview', idempotencyKey: 'redeploy-preview' });
   assert.equal(deployed.deploymentId, 'dpl_new');
-  await assert.rejects(provider.promote({ project, deploymentId: 'dpl_preview', idempotencyKey: 'need-approval' }), /approval/);
+  await assert.rejects(provider.promote({ project, deploymentId: 'dpl_preview', idempotencyKey: 'need-approval' }), (error: unknown) => (error as { message?: string }).message?.includes('approval') === true);
   const promoted = await provider.promote({ project, deploymentId: 'dpl_preview', approvalReference: 'owner-approved:exact-preview-commit', idempotencyKey: 'promote-preview' });
   assert.equal(promoted.verified, true);
   const rolled = await provider.rollback({ project, deploymentId: 'dpl_old', approvalReference: 'owner-approved:exact-old-commit', idempotencyKey: 'rollback-old' });
@@ -52,7 +52,7 @@ test('Vercel operations scope exact deployments and require production approval'
 
 test('exact Git source must match the linked project and full SHA', async () => {
   const { provider, calls, project } = fixture();
-  await assert.rejects(provider.createGitDeployment({ project, repository: 'other/app', ref: 'preview', sha: 'a'.repeat(40), target: 'preview', idempotencyKey: 'wrong-source' }), /linkage/);
+  await assert.rejects(provider.createGitDeployment({ project, repository: 'other/app', ref: 'preview', sha: 'a'.repeat(40), target: 'preview', idempotencyKey: 'wrong-source' }), (error: unknown) => (error as { message?: string }).message?.includes('linkage') === true);
   const deployed = await provider.createGitDeployment({ project, repository: 'owner/app', ref: 'preview', sha: 'a'.repeat(40), target: 'preview', idempotencyKey: 'exact-source' });
   assert.equal(deployed.sourceRevision, 'a'.repeat(40));
   assert.deepEqual((calls.find(call => call.path === '/v13/deployments' && call.method === 'POST')?.body as Record<string, unknown>).gitSource, { type: 'github', org: 'owner', repo: 'app', ref: 'preview', sha: 'a'.repeat(40) });
@@ -73,7 +73,7 @@ test('variable values stay out of audit, receipts and durable idempotency state'
   const audit = await provider.getAudit({ project });
   assert.doesNotMatch(JSON.stringify(audit), /top-secret-test-value|should-not-return/);
   assert.equal((audit.usageAndBilling as Record<string, unknown>).status, 'unavailable');
-  await assert.rejects(provider.updateEnvironment({ ...input, envId: 'env_wrong' }), /do not match/);
+  await assert.rejects(provider.updateEnvironment({ ...input, envId: 'env_wrong' }), (error: unknown) => (error as { message?: string }).message?.includes('do not match') === true);
   const updated = await provider.updateEnvironment({ ...input, envId: 'env_1', value: 'new-secret' });
   assert.doesNotMatch(JSON.stringify(updated), /new-secret/);
   const removed = await provider.removeEnvironment({ project, envId: 'env_1', key: 'API_TOKEN', idempotencyKey: 'variable-remove-1' });
