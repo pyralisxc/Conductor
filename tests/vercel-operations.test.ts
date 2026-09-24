@@ -18,7 +18,10 @@ function fixture() {
       if (url.pathname === '/v13/deployments/dpl_old') return Response.json({ id: 'dpl_old', projectId: 'prj_app', readyState: 'READY', target: 'production' });
       if (url.pathname === '/v13/deployments/dpl_other') return Response.json({ id: 'dpl_other', projectId: 'prj_other', readyState: 'READY' });
       if (url.pathname === '/v13/deployments/dpl_preview') return Response.json({ id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: 'preview' });
-      if (url.pathname === '/v13/deployments' && method === 'POST') return Response.json({ id: 'dpl_new', readyState: 'BUILDING' });
+      if (url.pathname === '/v13/deployments' && method === 'POST') {
+        if (body?.gitSource && body.target === 'preview') return Response.json({ error: { message: 'Invalid target' } }, { status: 400 });
+        return Response.json({ id: 'dpl_new', readyState: 'BUILDING' });
+      }
       if (url.pathname.includes('/promote/') || url.pathname.includes('/rollback/')) { production = url.pathname.split('/').at(-1)!; return new Response(null, { status: 201 }); }
       if (url.pathname === '/v10/projects/prj_app/env' && method === 'GET') return Response.json({ envs });
       if (url.pathname === '/v10/projects/prj_app/env' && method === 'POST' && body?.value === 'secret-trigger') return Response.json({ error: { message: 'rejected secret-trigger' } }, { status: 400 });
@@ -56,7 +59,9 @@ test('exact Git source must match the linked project and full SHA', async () => 
   await assert.rejects(provider.createGitDeployment({ project, repository: 'other/app', ref: 'preview', sha: 'a'.repeat(40), target: 'preview', idempotencyKey: 'wrong-source' }), (error: unknown) => (error as { message?: string }).message?.includes('linkage') === true);
   const deployed = await provider.createGitDeployment({ project, repository: 'owner/app', ref: 'preview', sha: 'a'.repeat(40), target: 'preview', idempotencyKey: 'exact-source' });
   assert.equal(deployed.sourceRevision, 'a'.repeat(40));
-  assert.deepEqual((calls.find(call => call.path === '/v13/deployments' && call.method === 'POST')?.body as Record<string, unknown>).gitSource, { type: 'github', org: 'owner', repo: 'app', ref: 'preview', sha: 'a'.repeat(40) });
+  const body = calls.find(call => call.path === '/v13/deployments' && call.method === 'POST')?.body as Record<string, unknown>;
+  assert.deepEqual(body.gitSource, { type: 'github', org: 'owner', repo: 'app', ref: 'preview', sha: 'a'.repeat(40) });
+  assert.equal('target' in body, false);
 });
 
 test('explicit repository binding blocks a mismatched Vercel project before deployment writes', async () => {
