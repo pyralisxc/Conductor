@@ -89,11 +89,18 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     }
     try {
       const resolved = await this.getProject(binding);
+      const environmentOperation = operation === 'deployment.env.list' || operation.startsWith('deployment.env.');
+      if (environmentOperation) {
+        // Project read access does not imply access to project environment variables.
+        await this.listEnvironment({ project });
+      }
       return [{
         provider: 'vercel',
         status: operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit' || operation === 'deployment.runtime-logs' || operation === 'deployment.env.list' ? 'ready' : 'degraded',
         summary: `Vercel project ${resolved.name} (${resolved.id}) is bound for ${operation}`,
-        diagnostics: [{ level: 'info', source: 'vercel', message: 'Vercel project binding and read credential verified; write permission cannot be proven without a mutation.' }],
+        diagnostics: [{ level: 'info', source: 'vercel', message: environmentOperation
+          ? 'Environment metadata read verified; write permission cannot be proven without a mutation.'
+          : 'Vercel project binding and read credential verified; write permission cannot be proven without a mutation.' }],
       }];
     } catch (error) {
       const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', 'vercel');
