@@ -26,6 +26,7 @@ import type {
   GetDeploymentLogsInput,
   DeploymentProjectStatus,
   DeploymentLogs,
+  VercelProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput,
 } from '../runtime/types.js';
 
 export interface RuntimeCapabilityProvider {
@@ -70,6 +71,19 @@ export interface WorkItemMutationProvider extends WorkItemReadProvider {
 export interface DeploymentReadProvider extends RuntimeCapabilityProvider {
   getDeploymentStatus(input: GetDeploymentStatusInput): Promise<DeploymentProjectStatus>;
   getDeploymentLogs(input: GetDeploymentLogsInput): Promise<DeploymentLogs>;
+}
+
+export interface VercelOperationsProvider extends DeploymentReadProvider {
+  getAudit(input: VercelProjectInput): Promise<Record<string, unknown>>;
+  getRuntimeLogs(input: VercelRuntimeLogsInput): Promise<Record<string, unknown>>;
+  listEnvironment(input: VercelProjectInput): Promise<Record<string, unknown>>;
+  redeploy(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
+  createGitDeployment(input: VercelGitDeploymentInput): Promise<Record<string, unknown>>;
+  promote(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
+  rollback(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
+  upsertEnvironment(input: VercelEnvInput): Promise<Record<string, unknown>>;
+  updateEnvironment(input: VercelEnvEditInput): Promise<Record<string, unknown>>;
+  removeEnvironment(input: VercelEnvRemoveInput): Promise<Record<string, unknown>>;
 }
 
 export interface SourceControlMutationProvider extends RuntimeCapabilityProvider {
