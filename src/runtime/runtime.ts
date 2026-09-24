@@ -9,6 +9,7 @@ import {
   type WorkItemCandidateReadProvider,
   type WorkItemMutationProvider,
   type DeploymentReadProvider,
+  type VercelOperationsProvider,
 } from '../providers/runtime.js';
 import { normalizeToolError } from './errors.js';
 import {
@@ -52,6 +53,7 @@ import {
   type GetDeploymentLogsInput,
   type DeploymentProjectStatus,
   type DeploymentLogs,
+  type VercelProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput,
 } from './types.js';
 import { IdempotentMutationExecutor } from './idempotency.js';
 
@@ -89,6 +91,21 @@ const PULL_REQUEST_READ_DEFINITION: ToolDefinition = {
 const DEPLOYMENT_READ_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.status', description: 'Read Vercel deployment/production state for one configured execution referent.', mutates: false },
   { name: 'deployment.logs', description: 'Read bounded/redacted deployment event logs for one exact Vercel deployment.', mutates: false },
+];
+
+const VERCEL_AUDIT_DEFINITIONS: readonly ToolDefinition[] = [
+  { name: 'deployment.audit', description: 'Read bounded project, environment, deployment, and supported account posture.', mutates: false },
+  { name: 'deployment.runtime-logs', description: 'Read bounded redacted runtime logs for one exact deployment.', mutates: false },
+  { name: 'deployment.env.list', description: 'List project variable metadata without secret values.', mutates: false },
+];
+const VERCEL_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
+  { name: 'deployment.redeploy', description: 'Redeploy one exact bound deployment.', mutates: true },
+  { name: 'deployment.git.create', description: 'Create a deployment from exact linked Git source.', mutates: true },
+  { name: 'deployment.promote', description: 'Promote one exact READY deployment to production.', mutates: true },
+  { name: 'deployment.rollback', description: 'Rollback to one exact prior READY deployment.', mutates: true },
+  { name: 'deployment.env.upsert', description: 'Upsert one project environment variable.', mutates: true },
+  { name: 'deployment.env.update', description: 'Update one exact project environment variable.', mutates: true },
+  { name: 'deployment.env.remove', description: 'Remove one exact project environment variable.', mutates: true },
 ];
 
 const WORK_ITEM_READ_DEFINITIONS: readonly ToolDefinition[] = [
@@ -138,7 +155,7 @@ export interface ConductorToolRuntimeOptions {
   pullRequestProvider?: PullRequestReadProvider;
   workItemProvider?: WorkItemMutationProvider;
   workItemCandidateProvider?: WorkItemCandidateReadProvider;
-  deploymentProvider?: DeploymentReadProvider;
+  deploymentProvider?: VercelOperationsProvider;
 }
 
 export class ConductorToolRuntime {
@@ -154,7 +171,7 @@ export class ConductorToolRuntime {
   private readonly pullRequestProvider?: PullRequestReadProvider;
   private readonly workItemProvider?: WorkItemMutationProvider;
   private readonly workItemCandidateProvider?: WorkItemCandidateReadProvider;
-  private readonly deploymentProvider?: DeploymentReadProvider;
+  private readonly deploymentProvider?: VercelOperationsProvider;
 
   constructor(options: ConductorToolRuntimeOptions = {}) {
     this.providers = options.providers ?? [];
@@ -189,6 +206,8 @@ export class ConductorToolRuntime {
   get deploymentReadEnabled(): boolean {
     return Boolean(this.deploymentProvider);
   }
+
+  get vercelMutationEnabled(): boolean { return Boolean(this.deploymentProvider && this.mutationExecutor); }
 
   get workItemReadEnabled(): boolean {
     return Boolean(this.workItemProvider);
@@ -423,6 +442,38 @@ export class ConductorToolRuntime {
   }
 
 
+
+  private async vercelRead<Result>(operation: ToolOperationName, input: VercelProjectInput, read: (provider: VercelOperationsProvider, project: ProjectReference) => Promise<Result>): Promise<ExecutionReceipt<Result>> {
+    const project = this.resolveProjectReference(input.project);
+    return this.executeRead(operation, { kind: 'project', id: project.id, ref: project.ref }, async () => {
+      if (!this.deploymentProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'Vercel provider is not configured' };
+      return { result: await read(this.deploymentProvider, project) };
+    });
+  }
+  async deploymentAudit(input: VercelProjectInput) { return this.vercelRead('deployment.audit', input, (provider, project) => provider.getAudit({ project })); }
+  async deploymentRuntimeLogs(input: VercelRuntimeLogsInput) { return this.vercelRead('deployment.runtime-logs', input, (provider, project) => provider.getRuntimeLogs({ ...input, project })); }
+  async deploymentEnvironmentList(input: VercelProjectInput) { return this.vercelRead('deployment.env.list', input, (provider, project) => provider.listEnvironment({ project })); }
+
+  private async vercelMutation<Result>(operation: import('./types.js').MutationOperationName, input: VercelProjectInput & { idempotencyKey: string }, mutate: (provider: VercelOperationsProvider, project: ProjectReference) => Promise<Result>): Promise<ExecutionReceipt<Result>> {
+    const project = this.resolveProjectReference(input.project);
+    if (!/^[A-Za-z0-9._:/-]{8,200}$/u.test(input.idempotencyKey)) throw new Error('Invalid idempotency key');
+    if (!this.mutationExecutor || !this.deploymentProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'Vercel mutations require a provider and durable idempotency' };
+    return this.mutationExecutor.execute({
+      key: input.idempotencyKey, fingerprint: mutationFingerprint(operation, { ...input, project }), operation,
+      target: { kind: 'project', id: project.id, ref: project.ref },
+    }, async () => {
+      const result = await mutate(this.deploymentProvider!, project);
+      return { result, identifiers: typeof (result as Record<string, unknown>).deploymentId === 'string' ? { deploymentId: (result as Record<string, string>).deploymentId } : undefined };
+    });
+  }
+  async vercelRedeploy(input: VercelDeploymentInput) { return this.vercelMutation('deployment.redeploy', input, (provider, project) => provider.redeploy({ ...input, project })); }
+  async vercelCreateGitDeployment(input: VercelGitDeploymentInput) { return this.vercelMutation('deployment.git.create', input, (provider, project) => provider.createGitDeployment({ ...input, project })); }
+  async vercelPromote(input: VercelDeploymentInput) { return this.vercelMutation('deployment.promote', input, (provider, project) => provider.promote({ ...input, project })); }
+  async vercelRollback(input: VercelDeploymentInput) { return this.vercelMutation('deployment.rollback', input, (provider, project) => provider.rollback({ ...input, project })); }
+  async vercelEnvUpsert(input: VercelEnvInput) { return this.vercelMutation('deployment.env.upsert', input, (provider, project) => provider.upsertEnvironment({ ...input, project })); }
+  async vercelEnvUpdate(input: VercelEnvEditInput) { return this.vercelMutation('deployment.env.update', input, (provider, project) => provider.updateEnvironment({ ...input, project })); }
+  async vercelEnvRemove(input: VercelEnvRemoveInput) { return this.vercelMutation('deployment.env.remove', input, (provider, project) => provider.removeEnvironment({ ...input, project })); }
+
   async workItemStatus(input: GetWorkItemStatusInput): Promise<ExecutionReceipt<WorkItemRecord>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
     return await this.executeRead(
@@ -535,7 +586,8 @@ export class ConductorToolRuntime {
       ...(this.operationPreflightEnabled ? [OPERATION_PREFLIGHT_DEFINITION] : []),
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
-      ...(this.deploymentReadEnabled ? DEPLOYMENT_READ_DEFINITIONS : []),
+      ...(this.deploymentReadEnabled ? [...DEPLOYMENT_READ_DEFINITIONS, ...VERCEL_AUDIT_DEFINITIONS] : []),
+      ...(this.vercelMutationEnabled ? VERCEL_MUTATION_DEFINITIONS : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
       ...(this.sourceControlMutationsEnabled ? MUTATION_DEFINITIONS : []),
       ...(this.workItemMutationsEnabled ? WORK_ITEM_MUTATION_DEFINITIONS : []),

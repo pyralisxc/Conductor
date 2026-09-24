@@ -31,11 +31,13 @@ const errorSchema = z.object({
 
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation',
-  'development.status', 'pull-request.status', 'deployment.status', 'deployment.logs', 'work-item.status', 'work-item.list',
+  'development.status', 'pull-request.status', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'work-item.status', 'work-item.list',
   'git.branch.create', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
   'work-item.create', 'work-item.update-status', 'work-item.classification.update',
+  'deployment.redeploy', 'deployment.git.create', 'deployment.promote', 'deployment.rollback',
+  'deployment.env.upsert', 'deployment.env.update', 'deployment.env.remove',
 ]);
 
 const receiptBase = {
@@ -140,6 +142,7 @@ const mutationReceiptSchema = z.union([
       issueNumber: z.number().optional(),
       commentId: z.string().optional(),
       workflowRunId: z.string().optional(),
+      deploymentId: z.string().optional(),
       mergeCommitSha: z.string().optional(),
     }).optional(),
     idempotency: idempotencySchema,
@@ -323,6 +326,42 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthSecurity },
     }, async (input) => result(await runtime.deploymentLogs(input)));
+  }
+
+
+  if (runtime.deploymentReadEnabled) {
+    const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+    const readTool = (name: 'deployment.audit' | 'deployment.runtime-logs' | 'deployment.env.list', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any) => Promise<object>) => {
+      server.registerTool(name, { title, description, inputSchema, outputSchema: readReceiptSchema, annotations: readOnly, _meta: { securitySchemes: oauthSecurity } },
+        async (input) => result(await run(input)));
+    };
+    readTool('deployment.audit', 'Audit Vercel project operations', 'Bounded project, domains, aliases, custom environments, deployment and environment metadata. Unsupported account usage and billing are explicit.', z.object({ project: projectSchema }), input => runtime.deploymentAudit(input));
+    readTool('deployment.runtime-logs', 'Read Vercel runtime logs', 'Read bounded redacted runtime logs for one exact bound deployment.', z.object({ project: projectSchema, deploymentId: z.string().min(3), limit: z.number().int().min(1).max(100).default(50) }), input => runtime.deploymentRuntimeLogs(input));
+    readTool('deployment.env.list', 'List Vercel variable metadata', 'List exact project variable metadata; values are never returned.', z.object({ project: projectSchema }), input => runtime.deploymentEnvironmentList(input));
+  }
+
+  if (runtime.vercelMutationEnabled) {
+    const idempotencyKey = z.string().min(8).max(200);
+    const deploymentId = z.string().regex(/^dpl_[A-Za-z0-9]+$/u);
+    const approvalReference = z.string().optional().describe('Exact owner approval for production actions; must begin owner-approved:');
+    const base = { project: projectSchema, idempotencyKey };
+    const deployment = z.object({ ...base, deploymentId, approvalReference });
+    const variable = z.object({ ...base, key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u), value: z.string(), type: z.enum(['plain', 'encrypted', 'sensitive']), target: z.array(z.enum(['production','preview','development'])).min(1).max(3), gitBranch: z.string().optional(), customEnvironmentIds: z.array(z.string()).max(20).optional(), approvalReference });
+    const writeTool = (name: 'deployment.redeploy' | 'deployment.git.create' | 'deployment.promote' | 'deployment.rollback' | 'deployment.env.upsert' | 'deployment.env.update' | 'deployment.env.remove', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any) => Promise<object>, destructive = false) => {
+      server.registerTool(name, { title, description, inputSchema, outputSchema: mutationOutputSchema,
+        annotations: { readOnlyHint: false, destructiveHint: destructive, idempotentHint: true, openWorldHint: true },
+        _meta: { securitySchemes: oauthWriteSecurity } }, async (input, extra) => {
+        await requireScopedWrite(extra.authInfo, 'develop', input.project as ProjectReference);
+        return result(await run(input));
+      });
+    };
+    writeTool('deployment.redeploy', 'Redeploy exact Vercel deployment', 'Redeploy one bound deployment. Production sources require exact owner approval.', deployment, input => runtime.vercelRedeploy(input));
+    writeTool('deployment.git.create', 'Deploy exact Git revision', 'Deploy linked repository full commit SHA and explicit ref to preview or approved production.', z.object({ ...base, repository: z.string(), ref: z.string(), sha: z.string().regex(/^[0-9a-f]{40}$/iu), target: z.enum(['preview','production']), approvalReference }), input => runtime.vercelCreateGitDeployment(input));
+    writeTool('deployment.promote', 'Promote READY Vercel deployment', 'Point production at one exact READY bound deployment after owner approval.', deployment, input => runtime.vercelPromote(input), true);
+    writeTool('deployment.rollback', 'Rollback READY Vercel deployment', 'Point production at one exact prior READY bound deployment after owner approval.', deployment, input => runtime.vercelRollback(input), true);
+    writeTool('deployment.env.upsert', 'Upsert Vercel environment variable', 'Write-only value; production requires exact owner approval; receipt has metadata only.', variable, input => runtime.vercelEnvUpsert(input));
+    writeTool('deployment.env.update', 'Update exact Vercel environment variable', 'Write-only value with exact variable ID/key and scoped targets.', variable.extend({ envId: z.string().min(3) }), input => runtime.vercelEnvUpdate(input));
+    writeTool('deployment.env.remove', 'Remove exact Vercel environment variable', 'Remove exact ID/key after confirming project and production approval if applicable.', z.object({ ...base, envId: z.string().min(3), key: z.string(), approvalReference }), input => runtime.vercelEnvRemove(input), true);
   }
 
   if (runtime.workItemReadEnabled) {
@@ -578,6 +617,7 @@ function requireWriteScope(scopes?: string[]): void {
 function writeAction(operation: string): WorkAction | undefined {
   if (operation === 'work-item.create') return 'route-work';
   if (operation === 'pull-request.status' || operation === 'work-item.status' || operation === 'work-item.list') return undefined;
+  if (operation.startsWith('deployment.') && !['deployment.status','deployment.logs','deployment.audit','deployment.runtime-logs','deployment.env.list'].includes(operation)) return 'develop';
   if (operation.startsWith('git.') || operation.startsWith('pull-request.') || operation.startsWith('work-item.')) return 'develop';
   return undefined;
 }
