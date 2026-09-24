@@ -56,26 +56,27 @@ This document tests the **current bounded runtime**. Future automation experimen
 39. Environment upsert/update/remove operates on one exact bound project and exact key/ID/target; production-scoped changes require exact owner approval.
 40. Environment values remain write-only: secret material never appears in receipts, diagnostics, audit output, or recoverable idempotency state.
 41. Cross-project Vercel writes require an explicit exact repository/project/installation binding plus the active repository work scope; installation-wide provider reach alone never authorizes mutation.
+42. `deployment.delete` removes only one exact terminal bound deployment: current production and active builds are refused, historical production artifacts require exact owner approval, and idempotent replay does not repeat deletion.
 
 ## Current runtime — release and reconciliation
 
-42. Main promotion requires an exact head SHA, exact base SHA, repository-default target, and explicit owner approval reference.
-43. Stale promotion identity fails closed.
-44. Conductor cannot infer or bypass Main approval.
-45. Normal promotion uses a merge commit, so the exact approved Preview head becomes Main ancestry without a return PR; squash/rebase promotion fails closed.
-46. Preview reconciliation rejects non-default sources and non-Preview targets.
-47. Preview reconciliation always uses a merge commit so accepted ancestry is preserved.
-48. A subsequent work branch starts from Preview directly after normal promotion. Main-only changes use the exact reconciliation lane before ordinary Preview work resumes.
+43. Main promotion requires an exact head SHA, exact base SHA, repository-default target, and explicit owner approval reference.
+44. Stale promotion identity fails closed.
+45. Conductor cannot infer or bypass Main approval.
+46. Normal promotion uses a merge commit, so the exact approved Preview head becomes Main ancestry without a return PR; squash/rebase promotion fails closed.
+47. Preview reconciliation rejects non-default sources and non-Preview targets.
+48. Preview reconciliation always uses a merge commit so accepted ancestry is preserved.
+49. A subsequent work branch starts from Preview directly after normal promotion. Main-only changes use the exact reconciliation lane before ordinary Preview work resumes.
 
 ## Current runtime — reliability and security
 
-49. Restarting the hosted runtime does not lose durable mutation idempotency when Redis is configured.
-50. Expired GitHub App installation credentials are reminted through the credential provider.
-51. GitHub/Vercel/provider failure leaves provider-native state authoritative.
-52. Production-only secrets are not required by ordinary Preview development.
-53. A self-hosted/local runner does not execute untrusted public code by default.
-54. Every consequential merge or provider-mutation receipt retains the exact resulting provider identity plus relevant approval/reconciliation evidence.
-55. Public `/health` exposes only runtime readiness/contract information and can be reconciled to the expected deployed Git revision through provider evidence.
+50. Restarting the hosted runtime does not lose durable mutation idempotency when Redis is configured.
+51. Expired GitHub App installation credentials are reminted through the credential provider.
+52. GitHub/Vercel/provider failure leaves provider-native state authoritative.
+53. Production-only secrets are not required by ordinary Preview development.
+54. A self-hosted/local runner does not execute untrusted public code by default.
+55. Every consequential merge or provider-mutation receipt retains the exact resulting provider identity plus relevant approval/reconciliation evidence.
+56. Public `/health` exposes only runtime readiness/contract information and can be reconciled to the expected deployed Git revision through provider evidence.
 
 ## Deferred experiments — not current product commitments
 
