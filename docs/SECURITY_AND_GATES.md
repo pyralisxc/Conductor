@@ -51,3 +51,10 @@ Use stable work, integration, reconciliation, release-candidate, and provider-ev
 Every meaningful mutation retains triggering request, governing policy, evidence/reason, resulting state, and owner override path.
 
 Authorization grants, invalidations, exact consequential approvals, and execution receipts are durable. The combined Work Envelope remains an ephemeral, reconstructable projection.
+
+
+## Vercel operations
+
+The Vercel adapter scopes operations to a configured project and connection. Exact deployment IDs are checked against that project before redeploy, promotion, rollback, or runtime log reads. Deployment creation requires an exact linked Git repository, ref, and full SHA. Production traffic and production variable changes require a caller-supplied exact owner approval reference that Development OS must bind to the current user instruction and target; Preview readiness does not imply production approval. Mutations require the connected client's code-work scope and durable idempotency. After a traffic mutation, receipts report the observed production target and whether it matches; an unverified receipt is not proof of traffic movement.
+
+Environment values are write-only. Variable list and audit responses project metadata fields only; mutation receipts, errors and durable idempotency records never include the value. The one-way fingerprint includes the submitted value without storing it. Broad project audit reads report the bounded team plan when supported and explicitly identify unavailable spend/usage/budget information instead of scraping private dashboards.

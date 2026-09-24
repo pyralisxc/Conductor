@@ -9,7 +9,10 @@ export type ToolOperationName =
   | 'work-item.status'
   | 'work-item.list'
   | 'deployment.status'
-  | 'deployment.logs';
+  | 'deployment.logs'
+  | 'deployment.audit'
+  | 'deployment.runtime-logs'
+  | 'deployment.env.list';
 
 export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
@@ -25,7 +28,14 @@ export type MutationOperationName =
   | 'pull-request.merge.promote'
   | 'work-item.create'
   | 'work-item.update-status'
-  | 'work-item.classification.update';
+  | 'work-item.classification.update'
+  | 'deployment.redeploy'
+  | 'deployment.git.create'
+  | 'deployment.promote'
+  | 'deployment.rollback'
+  | 'deployment.env.upsert'
+  | 'deployment.env.update'
+  | 'deployment.env.remove';
 
 export type RuntimeOperationName =
   | ToolOperationName
@@ -51,7 +61,11 @@ export type DevelopmentCapability =
   | 'ci.read'
   | 'development-intelligence.read'
   | 'deployment.read'
-  | 'deployment.logs.read';
+  | 'deployment.logs.read'
+  | 'deployment.audit.read'
+  | 'deployment.write'
+  | 'deployment.env.read'
+  | 'deployment.env.write';
 
 export type ToolErrorCode =
   | 'AUTH_REQUIRED'
@@ -590,3 +604,11 @@ export interface FailedExecutionReceipt extends ReceiptBase {
 export type ExecutionReceipt<Result> =
   | SuccessfulExecutionReceipt<Result>
   | FailedExecutionReceipt;
+
+export interface VercelProjectInput { project: ProjectReference }
+export interface VercelDeploymentInput extends VercelProjectInput { deploymentId: string; idempotencyKey: string; approvalReference?: string }
+export interface VercelGitDeploymentInput extends VercelProjectInput { repository: string; ref: string; sha: string; target: 'preview' | 'production'; idempotencyKey: string; approvalReference?: string }
+export interface VercelEnvInput extends VercelProjectInput { key: string; value: string; type: 'plain' | 'encrypted' | 'sensitive'; target: ('production' | 'preview' | 'development')[]; gitBranch?: string; customEnvironmentIds?: string[]; idempotencyKey: string; approvalReference?: string }
+export interface VercelEnvEditInput extends VercelEnvInput { envId: string }
+export interface VercelEnvRemoveInput extends VercelProjectInput { envId: string; key: string; idempotencyKey: string; approvalReference?: string }
+export interface VercelRuntimeLogsInput extends VercelProjectInput { deploymentId: string; limit?: number }

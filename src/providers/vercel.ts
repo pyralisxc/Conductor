@@ -9,9 +9,10 @@ import type {
   GetDeploymentStatusInput,
   OperationPreflightCheck,
   ProjectReference,
+  VercelProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput,
   RuntimeOperationName,
 } from '../runtime/types.js';
-import type { DeploymentReadProvider, OperationPreflightProvider } from './runtime.js';
+import type { VercelOperationsProvider, OperationPreflightProvider } from './runtime.js';
 
 interface VercelProjectBinding {
   id: string;
@@ -31,7 +32,7 @@ interface VercelDeploymentProviderOptions {
 
 type JsonRecord = Record<string, unknown>;
 
-export class VercelDeploymentProvider implements DeploymentReadProvider, OperationPreflightProvider {
+export class VercelDeploymentProvider implements VercelOperationsProvider, OperationPreflightProvider {
   readonly id = 'vercel';
   private readonly token?: string;
   private readonly tokenResolver?: (binding: VercelProjectBinding) => Promise<string | undefined>;
@@ -57,6 +58,10 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
     return [
       capability('deployment.read', configured, authenticated),
       capability('deployment.logs.read', configured, authenticated),
+      capability('deployment.audit.read', configured, authenticated),
+      capability('deployment.env.read', configured, authenticated),
+      capability('deployment.write', configured, authenticated),
+      capability('deployment.env.write', configured, authenticated),
     ];
   }
 
@@ -64,7 +69,7 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
     project: ProjectReference,
     operation: RuntimeOperationName,
   ): Promise<OperationPreflightCheck[] | undefined> {
-    if (operation !== 'deployment.status' && operation !== 'deployment.logs') return undefined;
+    if (!operation.startsWith('deployment.')) return undefined;
     const binding = this.bindings.get(project.id);
     if (!binding) {
       const error = normalizeToolError({
@@ -86,9 +91,9 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
       const resolved = await this.getProject(binding);
       return [{
         provider: 'vercel',
-        status: 'ready',
-        summary: `Vercel project ${resolved.name} (${resolved.id}) is readable for ${operation}`,
-        diagnostics: [{ level: 'info', source: 'vercel', message: 'Vercel project binding and read credential were verified without mutating provider state.' }],
+        status: operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit' || operation === 'deployment.runtime-logs' || operation === 'deployment.env.list' ? 'ready' : 'degraded',
+        summary: `Vercel project ${resolved.name} (${resolved.id}) is bound for ${operation}`,
+        diagnostics: [{ level: 'info', source: 'vercel', message: 'Vercel project binding and read credential verified; write permission cannot be proven without a mutation.' }],
       }];
     } catch (error) {
       const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', 'vercel');
@@ -201,6 +206,174 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
     };
   }
 
+
+  private async boundProject(project: ProjectReference): Promise<{ binding: VercelProjectBinding; id: string; data: JsonRecord }> {
+    const binding = this.binding(project);
+    const data = await this.getProject(binding);
+    const id = stringField(data, 'id');
+    if (!id) throw { code: 'NOT_FOUND', source: 'vercel', message: 'Bound Vercel project has no stable ID' };
+    return { binding, id, data };
+  }
+
+  private async exactDeployment(project: ProjectReference, deploymentId: string) {
+    if (!/^dpl_[A-Za-z0-9]+$/u.test(deploymentId)) throw { code: 'CONFLICT', source: 'vercel', message: 'An exact deployment ID is required' };
+    const bound = await this.boundProject(project);
+    const detail = await this.getJson(`/v13/deployments/${encodeURIComponent(deploymentId)}`, scopeQuery(bound.binding), bound.binding);
+    if (stringField(detail, 'projectId') !== bound.id) {
+      throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'Deployment is outside the bound project' };
+    }
+    return { ...bound, detail };
+  }
+
+  private requireProductionApproval(reference?: string): void {
+    if (!reference || !/^owner-approved:[A-Za-z0-9._:/-]{8,180}$/u.test(reference)) {
+      throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'Exact owner approval reference is required for production changes' };
+    }
+  }
+
+  async redeploy(input: VercelDeploymentInput): Promise<Record<string, unknown>> {
+    const bound = await this.exactDeployment(input.project, input.deploymentId);
+    const original = normalizeDeployment(bound.detail);
+    if (original?.target === 'production') this.requireProductionApproval(input.approvalReference);
+    const response = await this.request('/v13/deployments', scopeQuery(bound.binding), bound.binding, {
+      method: 'POST', body: { name: stringField(bound.data, 'name') ?? bound.binding.project, project: bound.id, deploymentId: input.deploymentId },
+    });
+    const created = await response.json() as JsonRecord;
+    const id = stringField(created, 'id') ?? stringField(created, 'uid');
+    if (!id) throw { code: 'COMMAND_FAILED', source: 'vercel', message: 'Vercel did not return a redeployment ID; reconcile provider state before retrying' };
+    return { provider: 'vercel', projectId: bound.id, deploymentId: id, sourceDeploymentId: input.deploymentId, state: stringField(created, 'readyState') ?? stringField(created, 'state'), observedAt: this.now().toISOString() };
+  }
+
+  async createGitDeployment(input: VercelGitDeploymentInput): Promise<Record<string, unknown>> {
+    if (!/^[0-9a-f]{40}$/iu.test(input.sha) || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(input.repository) || !/^[A-Za-z0-9._/-]+$/u.test(input.ref)) {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'Exact Git repository, ref, and full SHA are required' };
+    }
+    if (input.target === 'production') this.requireProductionApproval(input.approvalReference);
+    const bound = await this.boundProject(input.project);
+    const link = recordField(bound.data, 'link');
+    const [org, repo] = input.repository.split('/');
+    const linkedRepo = stringField(link ?? {}, 'repo');
+    const linkedOrg = stringField(link ?? {}, 'org');
+    if (!link || !linkedRepo || !([repo?.toLowerCase(), input.repository.toLowerCase()].includes(linkedRepo.toLowerCase())) || (linkedOrg && linkedOrg.toLowerCase() !== org?.toLowerCase())) {
+      throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'Git repository does not match the Vercel project Git linkage' };
+    }
+    const response = await this.request('/v13/deployments', scopeQuery(bound.binding), bound.binding, {
+      method: 'POST', body: {
+        name: stringField(bound.data, 'name') ?? bound.binding.project, project: bound.id,
+        target: input.target, gitSource: { type: 'github', org, repo, ref: input.ref, sha: input.sha },
+      },
+    });
+    const created = await response.json() as JsonRecord;
+    const id = stringField(created, 'id') ?? stringField(created, 'uid');
+    if (!id) throw { code: 'COMMAND_FAILED', source: 'vercel', message: 'Vercel did not return a deployment ID; reconcile provider state before retrying' };
+    return { provider: 'vercel', projectId: bound.id, deploymentId: id, sourceRevision: input.sha, sourceRef: input.ref, target: input.target, state: stringField(created, 'readyState') ?? stringField(created, 'state') };
+  }
+
+  private async changeTraffic(input: VercelDeploymentInput, mode: 'promote' | 'rollback'): Promise<Record<string, unknown>> {
+    this.requireProductionApproval(input.approvalReference);
+    const bound = await this.exactDeployment(input.project, input.deploymentId);
+    if (stringField(bound.detail, 'readyState') !== 'READY') throw { code: 'CONFLICT', source: 'vercel', message: 'Target deployment must be READY' };
+    if (mode === 'rollback' && stringField(bound.detail, 'target') !== 'production') throw { code: 'CONFLICT', source: 'vercel', message: 'Rollback target must be a prior production deployment' };
+    const path = mode === 'promote'
+      ? `/v10/projects/${encodeURIComponent(bound.id)}/promote/${encodeURIComponent(input.deploymentId)}`
+      : `/v1/projects/${encodeURIComponent(bound.id)}/rollback/${encodeURIComponent(input.deploymentId)}`;
+    await this.request(path, scopeQuery(bound.binding), bound.binding, { method: 'POST' });
+    const project = await this.getProject(bound.binding);
+    const target = recordField(recordField(project, 'targets') ?? {}, 'production');
+    const observed = target ? (stringField(target, 'id') ?? stringField(target, 'uid')) : null;
+    return { provider: 'vercel', projectId: bound.id, deploymentId: input.deploymentId, action: mode, productionDeploymentId: observed, verified: observed === input.deploymentId, observedAt: this.now().toISOString() };
+  }
+  async promote(input: VercelDeploymentInput) { return this.changeTraffic(input, 'promote'); }
+  async rollback(input: VercelDeploymentInput) { return this.changeTraffic(input, 'rollback'); }
+
+  async listEnvironment(input: VercelProjectInput): Promise<Record<string, unknown>> {
+    const bound = await this.boundProject(input.project);
+    const payload = await this.getJson(`/v10/projects/${encodeURIComponent(bound.id)}/env`, { ...scopeQuery(bound.binding), decrypt: 'false' }, bound.binding);
+    const raw = arrayField(payload, 'envs');
+    return { provider: 'vercel', projectId: bound.id, variables: raw.slice(0, 200).map(item => envMetadata(record(item) ?? {})), truncated: raw.length > 200, observedAt: this.now().toISOString() };
+  }
+
+  private async exactEnvironment(project: ProjectReference, envId: string, key: string) {
+    const bound = await this.boundProject(project);
+    const listed = await this.listEnvironment({ project });
+    const variables = listed.variables as Record<string, unknown>[];
+    const variable = variables.find(item => item.id === envId && item.key === key);
+    if (!variable) throw { code: 'NOT_FOUND', source: 'vercel', message: 'Exact variable ID and key do not match the bound project' };
+    return { ...bound, variable };
+  }
+
+  async upsertEnvironment(input: VercelEnvInput): Promise<Record<string, unknown>> {
+    validateEnvInput(input);
+    if (input.target.includes('production')) this.requireProductionApproval(input.approvalReference);
+    const bound = await this.boundProject(input.project);
+    const existing = await this.listEnvironment(input);
+    const sameKey = (existing.variables as JsonRecord[]).filter(item => item.key === input.key);
+    if (sameKey.some(item => JSON.stringify(item.target) !== JSON.stringify(input.target) || item.gitBranch !== (input.gitBranch ?? null) || JSON.stringify(item.customEnvironmentIds) !== JSON.stringify(input.customEnvironmentIds ?? []))) {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'Variable key already exists with a different target; use exact ID update' };
+    }
+    await this.request(`/v10/projects/${encodeURIComponent(bound.id)}/env`, { ...scopeQuery(bound.binding), upsert: 'true' }, bound.binding, {
+      method: 'POST', body: { key: input.key, value: input.value, type: input.type, target: input.target, ...(input.gitBranch ? { gitBranch: input.gitBranch } : {}), ...(input.customEnvironmentIds ? { customEnvironmentIds: input.customEnvironmentIds } : {}) },
+    });
+    const listed = await this.listEnvironment(input);
+    return { provider: 'vercel', projectId: bound.id, key: input.key, variables: (listed.variables as Record<string, unknown>[]).filter(item => item.key === input.key), verified: (listed.variables as Record<string, unknown>[]).some(item => item.key === input.key) };
+  }
+
+  async updateEnvironment(input: VercelEnvEditInput): Promise<Record<string, unknown>> {
+    validateEnvInput(input);
+    const bound = await this.exactEnvironment(input.project, input.envId, input.key);
+    if (input.target.includes('production') || (bound.variable.target as string[] | undefined)?.includes('production')) this.requireProductionApproval(input.approvalReference);
+    await this.request(`/v9/projects/${encodeURIComponent(bound.id)}/env/${encodeURIComponent(input.envId)}`, scopeQuery(bound.binding), bound.binding, {
+      method: 'PATCH', body: { key: input.key, value: input.value, type: input.type, target: input.target, ...(input.gitBranch ? { gitBranch: input.gitBranch } : {}), ...(input.customEnvironmentIds ? { customEnvironmentIds: input.customEnvironmentIds } : {}) },
+    });
+    const listed = await this.listEnvironment(input);
+    const variable = (listed.variables as Record<string, unknown>[]).find(item => item.id === input.envId && item.key === input.key);
+    return { provider: 'vercel', projectId: bound.id, variable: variable ?? null, verified: Boolean(variable) };
+  }
+
+  async removeEnvironment(input: VercelEnvRemoveInput): Promise<Record<string, unknown>> {
+    const bound = await this.exactEnvironment(input.project, input.envId, input.key);
+    if ((bound.variable.target as string[] | undefined)?.includes('production')) this.requireProductionApproval(input.approvalReference);
+    await this.request(`/v9/projects/${encodeURIComponent(bound.id)}/env/${encodeURIComponent(input.envId)}`, scopeQuery(bound.binding), bound.binding, { method: 'DELETE' });
+    const listed = await this.listEnvironment(input);
+    return { provider: 'vercel', projectId: bound.id, envId: input.envId, key: input.key, verifiedRemoved: !(listed.variables as Record<string, unknown>[]).some(item => item.id === input.envId) };
+  }
+
+  async getRuntimeLogs(input: VercelRuntimeLogsInput): Promise<Record<string, unknown>> {
+    const bound = await this.exactDeployment(input.project, input.deploymentId);
+    const limit = clamp(input.limit ?? 50, 1, 100);
+    const payload = await this.getJson(`/v1/projects/${encodeURIComponent(bound.id)}/deployments/${encodeURIComponent(input.deploymentId)}/runtime-logs`, { ...scopeQuery(bound.binding), limit: String(limit) }, bound.binding);
+    const entries = Array.isArray(payload) ? payload : arrayField(payload, 'logs').length ? arrayField(payload, 'logs') : arrayField(payload, 'data');
+    return { provider: 'vercel', projectId: bound.id, deploymentId: input.deploymentId, entries: entries.slice(0, limit).map(normalizeLogEntry).filter(Boolean), truncated: entries.length > limit, observedAt: this.now().toISOString() };
+  }
+
+  async getAudit(input: VercelProjectInput): Promise<Record<string, unknown>> {
+    const bound = await this.boundProject(input.project);
+    const requests = [
+      this.getJson(`/v9/projects/${encodeURIComponent(bound.id)}/domains`, scopeQuery(bound.binding), bound.binding),
+      this.getJson(`/v9/projects/${encodeURIComponent(bound.id)}/custom-environments`, scopeQuery(bound.binding), bound.binding),
+      this.getJson('/v4/aliases', { ...scopeQuery(bound.binding), projectId: bound.id, limit: '50' }, bound.binding),
+      this.getJson('/v6/deployments', { ...scopeQuery(bound.binding), projectId: bound.id, limit: '20' }, bound.binding),
+      this.listEnvironment(input),
+      this.getJson('/v10/projects', { ...scopeQuery(bound.binding), limit: '50' }, bound.binding),
+      bound.binding.teamId ? this.getJson(`/v2/teams/${encodeURIComponent(bound.binding.teamId)}`, {}, bound.binding) : Promise.reject(new Error('No bound team')),
+    ];
+    const outcomes = await Promise.allSettled(requests);
+    const section = (index: number, field: string) => outcomes[index]?.status === 'fulfilled'
+      ? { status: 'available', data: arrayField(outcomes[index].value as JsonRecord, field).slice(0, 50).map(item => field === 'deployments' ? normalizeDeployment(item) : field === 'envs' ? envMetadata(record(item) ?? {}) : safeAuditItem(item)) }
+      : { status: 'unavailable', reason: 'Vercel API did not provide this read for the bound project' };
+    const vars = outcomes[4]?.status === 'fulfilled' ? { status: 'available', data: (outcomes[4].value as JsonRecord).variables } : { status: 'unavailable' };
+    const team = outcomes[6]?.status === 'fulfilled' ? outcomes[6].value as JsonRecord : null;
+    const teamPlan = team ? stringField(recordField(team, 'billing') ?? {}, 'plan') : null;
+    return {
+      provider: 'vercel', projectId: bound.id, observedAt: this.now().toISOString(),
+      team: team ? { status: 'available', id: stringField(team, 'id') ?? bound.binding.teamId, name: stringField(team, 'name'), slug: stringField(team, 'slug'), plan: teamPlan } : { status: 'unavailable' },
+      projectInventory: section(5, 'projects'),
+      project: { id: bound.id, name: stringField(bound.data, 'name'), productionBranch: stringField(recordField(bound.data, 'link') ?? {}, 'productionBranch'), framework: stringField(bound.data, 'framework'), rootDirectory: stringField(bound.data, 'rootDirectory'), deploymentProtection: safeAuditItem(recordField(bound.data, 'ssoProtection') ?? {}) },
+      domains: section(0, 'domains'), customEnvironments: section(1, 'environments'), aliases: section(2, 'aliases'), deployments: section(3, 'deployments'), variables: vars,
+      usageAndBilling: { status: teamPlan ? 'partial' : 'unavailable', plan: teamPlan, reason: 'Spend, usage, limits and budget require a verified supported API and are unavailable here' },
+    };
+  }
+
   private binding(project: ProjectReference): VercelProjectBinding {
     const binding = this.bindings.get(project.id);
     if (!binding) throw { code: 'NOT_FOUND', source: 'vercel', message: `No Vercel deployment binding is configured for ${project.id}` };
@@ -229,7 +402,7 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
     return body as JsonRecord;
   }
 
-  private async request(path: string, query: Record<string, string>, binding: VercelProjectBinding): Promise<Response> {
+  private async request(path: string, query: Record<string, string>, binding: VercelProjectBinding, options?: { method: 'POST' | 'PATCH' | 'DELETE'; body?: object }): Promise<Response> {
     const token = await this.tokenValue(binding);
     const url = new URL(`${this.apiBaseUrl}${path}`);
     for (const [key, value] of Object.entries(query)) if (value) url.searchParams.set(key, value);
@@ -238,7 +411,9 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
         Authorization: `Bearer ${token}`,
         Accept: 'application/json, application/stream+json, text/plain;q=0.8',
         'User-Agent': 'Conductor-Tool-Runtime',
+        ...(options ? { 'Content-Type': 'application/json' } : {}),
       },
+      ...(options ? { method: options.method, ...(options.body ? { body: JSON.stringify(options.body) } : {}) } : {}),
     });
     if (response.ok) return response;
     const text = await response.text().catch(() => '');
@@ -248,12 +423,12 @@ export class VercelDeploymentProvider implements DeploymentReadProvider, Operati
       const error = recordField(parsed, 'error');
       message = (error && stringField(error, 'message')) ?? stringField(parsed, 'message') ?? message;
     } catch {}
-    throw { status: response.status, source: 'vercel', message };
+    throw { status: response.status, source: 'vercel', message: options ? `Vercel mutation failed with status ${response.status}` : message };
   }
 }
 
 function capability(
-  capabilityName: 'deployment.read' | 'deployment.logs.read',
+  capabilityName: 'deployment.read' | 'deployment.logs.read' | 'deployment.audit.read' | 'deployment.env.read' | 'deployment.write' | 'deployment.env.write',
   configured: boolean,
   authenticated: boolean,
 ): CapabilityAvailability {
@@ -262,7 +437,7 @@ function capability(
     capability: capabilityName,
     available,
     provider: 'vercel',
-    access: 'read',
+    access: capabilityName.endsWith('.write') ? 'write' : 'read',
     auth: authenticated ? 'ready' : 'required',
     health: available ? 'ready' : 'unavailable',
     diagnostics: available ? [] : [{
@@ -391,4 +566,22 @@ function timestamp(value: unknown): string | null {
 }
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+function envMetadata(item: JsonRecord): JsonRecord {
+  return { id: stringField(item, 'id'), key: stringField(item, 'key'), type: stringField(item, 'type'),
+    target: stringArray(item.target), gitBranch: stringField(item, 'gitBranch'),
+    customEnvironmentIds: stringArray(item.customEnvironmentIds), createdAt: timestamp(item.createdAt), updatedAt: timestamp(item.updatedAt) };
+}
+function safeAuditItem(value: unknown): JsonRecord {
+  const item = record(value) ?? {};
+  return Object.fromEntries(['id', 'uid', 'name', 'slug', 'type', 'state', 'verified', 'projectId', 'deploymentId', 'url', 'createdAt', 'updatedAt', 'alias']
+    .filter(key => typeof item[key] === 'string' || typeof item[key] === 'number' || typeof item[key] === 'boolean')
+    .map(key => [key, item[key]]));
+}
+function validateEnvInput(input: VercelEnvInput): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(input.key) || !input.target.length || input.target.some(target => !['production','preview','development'].includes(target))) {
+    throw { code: 'CONFLICT', source: 'vercel', message: 'Exact variable key and target are required' };
+  }
+  if (input.gitBranch && (input.target.length !== 1 || input.target[0] !== 'preview')) throw { code: 'CONFLICT', source: 'vercel', message: 'Git branch scope requires preview target' };
 }
