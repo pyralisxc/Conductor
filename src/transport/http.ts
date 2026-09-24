@@ -5,17 +5,20 @@ import { TOOL_RUNTIME_CONTRACT_VERSION } from '../runtime/types.js';
 import type { AccessTokenVerifier } from './auth.js';
 import { CONDUCTOR_READ_SCOPE, CONDUCTOR_WRITE_SCOPE } from './auth.js';
 import { createConductorMcpServer } from './mcp.js';
+import type { WorkScopeAuthorizer } from './work-scope.js';
 
 export interface ConductorHttpHandlerOptions {
   runtime: ConductorToolRuntime;
   verifier: AccessTokenVerifier;
   publicUrl: string;
   oauthIssuer: string;
+  workScope?: WorkScopeAuthorizer;
   handleOAuthRequest?: (
     request: IncomingMessage,
     response: ServerResponse,
     url: URL,
   ) => Promise<boolean>;
+  handleWorkScopeRequest?: (request: IncomingMessage, response: ServerResponse, url: URL) => Promise<boolean>;
 }
 
 export function createConductorHttpHandler(options: ConductorHttpHandlerOptions) {
@@ -38,6 +41,7 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
       return;
     }
     if (options.handleOAuthRequest && await options.handleOAuthRequest(request, response, url)) return;
+    if (options.handleWorkScopeRequest && await options.handleWorkScopeRequest(request, response, url)) return;
     if (request.method === 'GET' && (
       url.pathname === '/.well-known/oauth-protected-resource' ||
       url.pathname === '/.well-known/oauth-protected-resource/mcp'
@@ -63,7 +67,7 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
     }
 
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    const server = createConductorMcpServer(options.runtime);
+    const server = createConductorMcpServer(options.runtime, options.workScope);
     try {
       await server.connect(transport);
       await transport.handleRequest(request, response);

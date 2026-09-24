@@ -84,10 +84,10 @@ export function clearOwnerSession(res: ServerResponse): void {
 }
 
 export function normalizeReturnTo(value: string | null): string {
-  if (!value || (!value.startsWith('/oauth/authorize?') && value !== '/connections/vercel')) return '/login';
+  if (!value || (!value.startsWith('/oauth/authorize?') && value !== '/connections/vercel' && value !== '/work-scope')) return '/login';
   try {
     const parsed = new URL(value, 'https://conductor.local');
-    return parsed.origin === 'https://conductor.local' && (parsed.pathname === '/oauth/authorize' || (parsed.pathname === '/connections/vercel' && !parsed.search))
+    return parsed.origin === 'https://conductor.local' && (parsed.pathname === '/oauth/authorize' || ((parsed.pathname === '/connections/vercel' || parsed.pathname === '/work-scope') && !parsed.search))
       ? `${parsed.pathname}${parsed.search}`
       : '/login';
   } catch {

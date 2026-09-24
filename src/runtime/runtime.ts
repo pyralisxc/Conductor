@@ -142,6 +142,9 @@ export interface ConductorToolRuntimeOptions {
 }
 
 export class ConductorToolRuntime {
+  resolveProjectReference(project: ProjectReference): ProjectReference {
+    return this.projectResolver?.resolveProjectReference(project) ?? project;
+  }
   private readonly providers: ToolRuntimeProvider[];
   private readonly now: () => Date;
   private readonly createOperationId: () => string;
