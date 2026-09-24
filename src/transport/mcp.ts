@@ -351,7 +351,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       server.registerTool(name, { title, description, inputSchema, outputSchema: mutationOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: destructive, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity } }, async (input, extra) => {
-        await requireScopedWrite(extra.authInfo, 'develop', input.project);
+        await requireScopedWrite(extra.authInfo, 'develop', input.project as ProjectReference);
         return result(await run(input));
       });
     };
