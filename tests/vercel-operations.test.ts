@@ -81,6 +81,13 @@ test('variable values stay out of audit, receipts and durable idempotency state'
   assert.equal(removed.verifiedRemoved, true);
 });
 
+test('runtime log preflight does not claim endpoint permission from project read', async () => {
+  const { provider, project } = fixture();
+  const preflight = (await provider.preflightOperation(project, 'deployment.runtime-logs'))?.[0];
+  assert.equal(preflight?.status, 'degraded');
+  assert.match(preflight?.diagnostics[0]?.message ?? '', /runtime-log endpoint access is unverified/u);
+});
+
 test('runtime logs stay bound and redact secrets', async () => {
   const { provider, project } = fixture();
   const logs = await provider.getRuntimeLogs({ project, deploymentId: 'dpl_preview', limit: 10 });
@@ -96,4 +103,26 @@ test('provider write errors cannot echo submitted secret values', async () => {
   assert.equal(failed.status, 'failed');
   assert.doesNotMatch(JSON.stringify(failed), /secret-trigger/);
   assert.doesNotMatch(JSON.stringify(await runtime.vercelEnvUpsert(input)), /secret-trigger/);
+});
+
+test('environment preflight checks environment permission independently of project read', async () => {
+  const calls: string[] = [];
+  const provider = new VercelDeploymentProvider({
+    token: 'test-token',
+    bindings: [{ id: 'app', project: 'app', teamId: 'team_1' }],
+    fetch: async input => {
+      const path = new URL(String(input)).pathname;
+      calls.push(path);
+      if (path === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app' });
+      return Response.json({ error: { message: 'Project not found.' } }, { status: 404 });
+    },
+  });
+  const project = { id: 'app' };
+  assert.equal((await provider.preflightOperation(project, 'deployment.status'))?.[0]?.status, 'ready');
+  for (const operation of ['deployment.env.list', 'deployment.env.upsert', 'deployment.env.update', 'deployment.env.remove'] as const) {
+    const result = (await provider.preflightOperation(project, operation))?.[0];
+    assert.equal(result?.status, 'blocked');
+    assert.equal(result?.error?.code, 'NOT_FOUND');
+  }
+  assert.equal(calls.filter(path => path === '/v10/projects/prj_app/env').length, 4);
 });
