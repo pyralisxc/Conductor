@@ -14,13 +14,15 @@ function fixture() {
   return { grants, store, authorizer, auth };
 }
 
-test('the default client may work only in its primary repository', async () => {
+test('the default client may route issues broadly but work only in its primary repository', async () => {
   const { authorizer, auth } = fixture();
   await authorizer.assertAllowed(auth, 'develop', { id: 'conductor', repository: 'pyralisxc/Conductor' });
   await authorizer.assertAllowed(auth, 'route-work', { id: 'conductor', repository: 'pyralisxc/Conductor' });
-  await assert.rejects(authorizer.assertAllowed(auth, 'route-work', { id: 'other', repository: 'pyralisxc/Other' }), /outside/);
+  await authorizer.assertAllowed(auth, 'route-work', { id: 'other', repository: 'pyralisxc/Other' });
   await assert.rejects(authorizer.assertAllowed(auth, 'develop', { id: 'other', repository: 'pyralisxc/Other' }), /outside/);
   await assert.rejects(authorizer.assertAllowed(undefined, 'develop', { id: 'conductor', repository: 'pyralisxc/Conductor' }), /identity/);
+  await assert.rejects(authorizer.assertAllowed(undefined, 'route-work', { id: 'other', repository: 'pyralisxc/Other' }), /identity/);
+  await assert.rejects(authorizer.assertAllowed(auth, 'route-work', { id: 'invalid' }), /exact/);
 });
 
 test('owner grant separates routing from development and is bound to one client', async () => {
@@ -28,22 +30,21 @@ test('owner grant separates routing from development and is bound to one client'
   const id = clientFingerprint(auth.clientId);
   await store.set(id, parseWorkScopeGrant({
     primaryRepository: 'pyralisxc/Conductor',
-    routeRepositories: ['pyralisxc/Development-OS'],
     developRepositories: ['pyralisxc/Construction'],
     expiresAt: Date.now() + 60_000,
   }));
   await authorizer.assertAllowed(auth, 'route-work', { id: 'Development-OS', repository: 'pyralisxc/Development-OS' });
   await assert.rejects(authorizer.assertAllowed(auth, 'develop', { id: 'Development-OS', repository: 'pyralisxc/Development-OS' }), /outside/);
   await authorizer.assertAllowed(auth, 'develop', { id: 'Construction', repository: 'pyralisxc/Construction' });
-  await assert.rejects(authorizer.assertAllowed({ ...auth, clientId: 'another-client' }, 'route-work', { id: 'Development-OS', repository: 'pyralisxc/Development-OS' }), /outside/);
+  await assert.rejects(authorizer.assertAllowed({ ...auth, clientId: 'another-client' }, 'develop', { id: 'Construction', repository: 'pyralisxc/Construction' }), /outside/);
   await store.delete(id);
-  await assert.rejects(authorizer.assertAllowed(auth, 'route-work', { id: 'Development-OS', repository: 'pyralisxc/Development-OS' }), /outside/);
+  await assert.rejects(authorizer.assertAllowed(auth, 'develop', { id: 'Construction', repository: 'pyralisxc/Construction' }), /outside/);
 });
 
 test('expired and malformed grants fail closed', async () => {
   assert.throws(() => parseWorkScopeGrant({ primaryRepository: 'pyralisxc/Conductor', expiresAt: Date.now() - 1 }), /expire/);
   assert.throws(() => parseWorkScopeGrant({ primaryRepository: 'not-a-repository', expiresAt: Date.now() + 60_000 }), /exact/);
   const { grants, authorizer, auth } = fixture();
-  grants.set(clientFingerprint(auth.clientId), { primaryRepository: 'pyralisxc/Conductor', routeRepositories: ['pyralisxc/Other'], developRepositories: [], expiresAt: Date.now() - 1 });
-  await assert.rejects(authorizer.assertAllowed(auth, 'route-work', { id: 'other', repository: 'pyralisxc/Other' }), /outside/);
+  grants.set(clientFingerprint(auth.clientId), { primaryRepository: 'pyralisxc/Conductor', developRepositories: [], expiresAt: Date.now() - 1 });
+  await assert.rejects(authorizer.assertAllowed(auth, 'develop', { id: 'other', repository: 'pyralisxc/Other' }), /outside/);
 });
