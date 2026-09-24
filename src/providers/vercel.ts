@@ -306,6 +306,11 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     validateEnvInput(input);
     if (input.target.includes('production')) this.requireProductionApproval(input.approvalReference);
     const bound = await this.boundProject(input.project);
+    const existing = await this.listEnvironment(input);
+    const sameKey = (existing.variables as JsonRecord[]).filter(item => item.key === input.key);
+    if (sameKey.some(item => JSON.stringify(item.target) !== JSON.stringify(input.target) || item.gitBranch !== (input.gitBranch ?? null) || JSON.stringify(item.customEnvironmentIds) !== JSON.stringify(input.customEnvironmentIds ?? []))) {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'Variable key already exists with a different target; use exact ID update' };
+    }
     await this.request(`/v10/projects/${encodeURIComponent(bound.id)}/env`, { ...scopeQuery(bound.binding), upsert: 'true' }, bound.binding, {
       method: 'POST', body: { key: input.key, value: input.value, type: input.type, target: input.target, ...(input.gitBranch ? { gitBranch: input.gitBranch } : {}), ...(input.customEnvironmentIds ? { customEnvironmentIds: input.customEnvironmentIds } : {}) },
     });
@@ -337,7 +342,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     const bound = await this.exactDeployment(input.project, input.deploymentId);
     const limit = clamp(input.limit ?? 50, 1, 100);
     const payload = await this.getJson(`/v1/projects/${encodeURIComponent(bound.id)}/deployments/${encodeURIComponent(input.deploymentId)}/runtime-logs`, { ...scopeQuery(bound.binding), limit: String(limit) }, bound.binding);
-    const entries = arrayField(payload, 'logs').length ? arrayField(payload, 'logs') : arrayField(payload, 'data');
+    const entries = Array.isArray(payload) ? payload : arrayField(payload, 'logs').length ? arrayField(payload, 'logs') : arrayField(payload, 'data');
     return { provider: 'vercel', projectId: bound.id, deploymentId: input.deploymentId, entries: entries.slice(0, limit).map(normalizeLogEntry).filter(Boolean), truncated: entries.length > limit, observedAt: this.now().toISOString() };
   }
 

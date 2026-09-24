@@ -21,6 +21,7 @@ function fixture() {
       if (url.pathname === '/v13/deployments' && method === 'POST') return Response.json({ id: 'dpl_new', readyState: 'BUILDING' });
       if (url.pathname.includes('/promote/') || url.pathname.includes('/rollback/')) { production = url.pathname.split('/').at(-1)!; return new Response(null, { status: 201 }); }
       if (url.pathname === '/v10/projects/prj_app/env' && method === 'GET') return Response.json({ envs });
+      if (url.pathname === '/v10/projects/prj_app/env' && method === 'POST' && body?.value === 'secret-trigger') return Response.json({ error: { message: 'rejected secret-trigger' } }, { status: 400 });
       if (url.pathname === '/v10/projects/prj_app/env' && method === 'POST') { envs = [{ id: 'env_1', key: body?.key, type: body?.type, target: body?.target, value: body?.value }]; return Response.json({ created: envs[0] }); }
       if (url.pathname === '/v9/projects/prj_app/env/env_1' && method === 'PATCH') { envs = [{ id: 'env_1', key: body?.key, type: body?.type, target: body?.target, value: body?.value }]; return Response.json(envs[0]); }
       if (url.pathname === '/v9/projects/prj_app/env/env_1' && method === 'DELETE') { envs = []; return Response.json({}); }
@@ -85,4 +86,14 @@ test('runtime logs stay bound and redact secrets', async () => {
   const logs = await provider.getRuntimeLogs({ project, deploymentId: 'dpl_preview', limit: 10 });
   assert.doesNotMatch(JSON.stringify(logs), /TOKEN=hidden/);
   assert.match(JSON.stringify(logs), /redacted/);
+});
+
+test('provider write errors cannot echo submitted secret values', async () => {
+  const { provider, project } = fixture();
+  const runtime = new ConductorToolRuntime({ providers: [provider], deploymentProvider: provider, mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }) });
+  const input = { project, key: 'API_TOKEN', value: 'secret-trigger', type: 'sensitive' as const, target: ['preview' as const], idempotencyKey: 'variable-failed-secret' };
+  const failed = await runtime.vercelEnvUpsert(input);
+  assert.equal(failed.status, 'failed');
+  assert.doesNotMatch(JSON.stringify(failed), /secret-trigger/);
+  assert.doesNotMatch(JSON.stringify(await runtime.vercelEnvUpsert(input)), /secret-trigger/);
 });
