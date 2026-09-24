@@ -36,7 +36,7 @@ It does **not** own product meaning, technical truth, development methodology, G
 
 - GitHub + private GitHub App
 - GitHub Actions
-- Vercel for the hosted MCP runtime
+- Vercel for the hosted MCP runtime and bounded deployment operations
 - Development Intelligence
 - Development OS
 - ChatGPT / compatible development clients
@@ -124,9 +124,11 @@ npm run verify
 
 ## Tool runtime
 
-The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, repository-development preflight, exact operation-scoped preflight, compact query-time development/work status reconstruction, state-aware pull-request orchestration status, a read-only Development Intelligence adapter, optional read-only Vercel deployment/status-log inspection, durable issue-backed work routing, and bounded GitHub mutations backed by durable idempotency state.
+The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scoped GitHub discovery, repository-development preflight, exact operation-scoped preflight, compact query-time development/work status reconstruction, state-aware pull-request orchestration status, a read-only Development Intelligence adapter, connected Vercel discovery/audit plus bounded deployment and environment operations, durable issue-backed work routing including cross-repository issue maintenance, active-repository work scope, and bounded GitHub mutations backed by durable idempotency state.
 
 The preferred GitHub identity is a private GitHub App that mints repository-scoped installation tokens and proves operation-specific permissions. Static tokens remain an explicitly degraded migration path.
+
+Vercel reads may inspect one uniquely Git-linked project through an owner-connected installation. Vercel writes require an exact project/repository binding, active repository work scope, durable idempotency, and explicit owner approval for production traffic or production-variable changes. Environment values are write-only through Conductor. Runtime-log access remains permission-sensitive and is reported as degraded when the connected installation cannot prove or perform the exact endpoint read.
 
 See `docs/TOOL_RUNTIME_V0.md`, `docs/GITHUB_AUTHORIZATION.md`, and `docs/MCP_RUNTIME.md` for the current contracts.
 
