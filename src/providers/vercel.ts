@@ -311,7 +311,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     const response = await this.request('/v13/deployments', scopeQuery(bound.binding), bound.binding, {
       method: 'POST', body: {
         name: stringField(bound.data, 'name') ?? bound.binding.project, project: bound.id,
-        target: input.target, gitSource: { type: 'github', org, repo, ref: input.ref, sha: input.sha },
+        ...(input.target === 'production' ? { target: 'production' } : {}),
+        gitSource: { type: 'github', org, repo, ref: input.ref, sha: input.sha },
       },
     });
     const created = await response.json() as JsonRecord;
