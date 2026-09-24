@@ -37,7 +37,7 @@ test('Vercel entrypoint mounts the owner work-scope page', async () => {
     assert.ok(cookie);
     const page = await fetch(`${base}/work-scope`, { headers: { cookie } });
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /Additional issue routing repositories/);
+    assert.match(await page.text(), /Additional code work repositories/);
   } finally {
     server.close();
     await once(server, 'close');

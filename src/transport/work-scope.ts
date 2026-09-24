@@ -7,7 +7,6 @@ export type WorkAction = 'route-work' | 'develop';
 
 export interface WorkScopeGrant {
   primaryRepository: string;
-  routeRepositories: string[];
   developRepositories: string[];
   expiresAt: number;
 }
@@ -31,18 +30,16 @@ export function normalizeRepository(value: string): string {
 
 export function parseWorkScopeGrant(input: {
   primaryRepository: string;
-  routeRepositories?: string[];
   developRepositories?: string[];
   expiresAt: number;
 }): WorkScopeGrant {
   const primaryRepository = normalizeRepository(input.primaryRepository);
-  const routeRepositories = [...new Set((input.routeRepositories ?? []).map(normalizeRepository))];
   const developRepositories = [...new Set((input.developRepositories ?? []).map(normalizeRepository))];
-  if (routeRepositories.length > 20 || developRepositories.length > 20) throw new Error('Too many work-scope destinations');
+  if (developRepositories.length > 20) throw new Error('Too many work-scope destinations');
   if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > Date.now() + 24 * 60 * 60 * 1000) {
     throw new Error('Work scope must expire within 24 hours');
   }
-  return { primaryRepository, routeRepositories, developRepositories, expiresAt: input.expiresAt };
+  return { primaryRepository, developRepositories, expiresAt: input.expiresAt };
 }
 
 export class RedisWorkScopeStore implements WorkScopeStore {
@@ -76,13 +73,12 @@ export class WorkScopeAuthorizer {
     this.defaultRepository = normalizeRepository(defaultRepository);
   }
 
-  async describe(clientId: string): Promise<{ clientFingerprint: string; primaryRepository: string; routeRepositories: string[]; developRepositories: string[]; expiresAt: number | null }> {
+  async describe(clientId: string): Promise<{ clientFingerprint: string; primaryRepository: string; developRepositories: string[]; expiresAt: number | null }> {
     const fingerprint = clientFingerprint(clientId);
     const grant = await this.store.get(fingerprint);
     return {
       clientFingerprint: fingerprint,
       primaryRepository: grant?.primaryRepository ?? this.defaultRepository,
-      routeRepositories: grant?.routeRepositories ?? [],
       developRepositories: grant?.developRepositories ?? [],
       expiresAt: grant?.expiresAt ?? null,
     };
@@ -92,11 +88,12 @@ export class WorkScopeAuthorizer {
     if (!auth?.clientId) throw new Error('Authenticated client identity is required');
     // The caller supplies a routing referent. Resolve aliases before invoking this guard.
     const repository = normalizeRepository(project.repository ?? project.id);
+    // Routing remains subject to the provider's repository access and the
+    // session's destination/visibility decision, but needs no code-work grant.
+    if (action === 'route-work') return;
     const grant = await this.store.get(clientFingerprint(auth.clientId));
     const primary = grant?.primaryRepository ?? this.defaultRepository;
-    const permitted = repository === primary || Boolean(grant && (
-      action === 'route-work' ? grant.routeRepositories : grant.developRepositories
-    ).includes(repository));
+    const permitted = repository === primary || Boolean(grant?.developRepositories.includes(repository));
     if (!permitted) throw new Error(`${action} is outside this client's owner-approved repository scope`);
   }
 }
