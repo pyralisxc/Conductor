@@ -273,6 +273,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     this.requireProductionApproval(input.approvalReference);
     const bound = await this.exactDeployment(input.project, input.deploymentId);
     if (stringField(bound.detail, 'readyState') !== 'READY') throw { code: 'CONFLICT', source: 'vercel', message: 'Target deployment must be READY' };
+    if (mode === 'rollback' && stringField(bound.detail, 'target') !== 'production') throw { code: 'CONFLICT', source: 'vercel', message: 'Rollback target must be a prior production deployment' };
     const path = mode === 'promote'
       ? `/v10/projects/${encodeURIComponent(bound.id)}/promote/${encodeURIComponent(input.deploymentId)}`
       : `/v1/projects/${encodeURIComponent(bound.id)}/rollback/${encodeURIComponent(input.deploymentId)}`;
@@ -348,17 +349,23 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       this.getJson('/v4/aliases', { ...scopeQuery(bound.binding), projectId: bound.id, limit: '50' }, bound.binding),
       this.getJson('/v6/deployments', { ...scopeQuery(bound.binding), projectId: bound.id, limit: '20' }, bound.binding),
       this.listEnvironment(input),
+      this.getJson('/v10/projects', { ...scopeQuery(bound.binding), limit: '50' }, bound.binding),
+      bound.binding.teamId ? this.getJson(`/v2/teams/${encodeURIComponent(bound.binding.teamId)}`, {}, bound.binding) : Promise.reject(new Error('No bound team')),
     ];
     const outcomes = await Promise.allSettled(requests);
     const section = (index: number, field: string) => outcomes[index]?.status === 'fulfilled'
       ? { status: 'available', data: arrayField(outcomes[index].value as JsonRecord, field).slice(0, 50).map(item => field === 'deployments' ? normalizeDeployment(item) : field === 'envs' ? envMetadata(record(item) ?? {}) : safeAuditItem(item)) }
       : { status: 'unavailable', reason: 'Vercel API did not provide this read for the bound project' };
     const vars = outcomes[4]?.status === 'fulfilled' ? { status: 'available', data: (outcomes[4].value as JsonRecord).variables } : { status: 'unavailable' };
+    const team = outcomes[6]?.status === 'fulfilled' ? outcomes[6].value as JsonRecord : null;
+    const teamPlan = team ? stringField(recordField(team, 'billing') ?? {}, 'plan') : null;
     return {
       provider: 'vercel', projectId: bound.id, observedAt: this.now().toISOString(),
+      team: team ? { status: 'available', id: stringField(team, 'id') ?? bound.binding.teamId, name: stringField(team, 'name'), slug: stringField(team, 'slug'), plan: teamPlan } : { status: 'unavailable' },
+      projectInventory: section(5, 'projects'),
       project: { id: bound.id, name: stringField(bound.data, 'name'), productionBranch: stringField(recordField(bound.data, 'link') ?? {}, 'productionBranch'), framework: stringField(bound.data, 'framework'), rootDirectory: stringField(bound.data, 'rootDirectory'), deploymentProtection: safeAuditItem(recordField(bound.data, 'ssoProtection') ?? {}) },
       domains: section(0, 'domains'), customEnvironments: section(1, 'environments'), aliases: section(2, 'aliases'), deployments: section(3, 'deployments'), variables: vars,
-      usageAndBilling: { status: 'unavailable', reason: 'No verified stable project-scoped usage/billing API is configured' },
+      usageAndBilling: { status: teamPlan ? 'partial' : 'unavailable', plan: teamPlan, reason: 'Spend, usage, limits and budget require a verified supported API and are unavailable here' },
     };
   }
 
