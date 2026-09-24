@@ -131,6 +131,83 @@ test('Vercel account connection resolves only the selected installation and fail
   assert.ok(seen.every(value => value === 'icfg_A:team_A'));
 });
 
+test('unbound repository reads use only one connected team and verified Git linkage; writes remain bound', async () => {
+  const requests: { path: string; team: string | null; method: string }[] = [];
+  let connected = true;
+  const instance = new VercelDeploymentProvider({
+    bindings: [{ id: 'conductor', project: 'conductor', connectionId: 'icfg_A', teamId: 'team_A' }],
+    tokenResolver: async () => connected ? 'installation-token' : undefined,
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      requests.push({ path: url.pathname, team: url.searchParams.get('teamId'), method: init?.method ?? 'GET' });
+      assert.equal((init?.headers as Record<string, string>).Authorization, 'Bearer installation-token');
+      if (url.pathname === '/v9/projects') return Response.json({
+        projects: [{ id: 'prj_di', name: 'different-slug', link: { type: 'github', org: 'pyralisxc', repo: 'Development-Intelligence' } }],
+        pagination: { next: null },
+      });
+      if (url.pathname === '/v9/projects/prj_di') return Response.json({ id: 'prj_di', name: 'different-slug', link: { type: 'github', org: 'pyralisxc', repo: 'Development-Intelligence' } });
+      if (url.pathname === '/v6/deployments') return Response.json({ deployments: [{ id: 'dpl_live', projectId: 'prj_di', target: 'production', readyState: 'READY' }] });
+      if (url.pathname === '/v9/projects/prj_di/domains') return Response.json({ domains: [] });
+      if (url.pathname === '/v10/projects/prj_di/env') return Response.json({ envs: [{ id: 'env_1', key: 'TOKEN', value: 'private-value', target: ['production'] }] });
+      if (url.pathname === '/v13/deployments/dpl_live') return Response.json({ id: 'dpl_live', projectId: 'prj_di' });
+      if (url.pathname === '/v3/deployments/dpl_live/events') return Response.json([]);
+      return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
+    },
+  });
+  const project = { id: 'Development-Intelligence', repository: 'pyralisxc/Development-Intelligence' };
+  assert.equal((await instance.preflightOperation(project, 'deployment.status'))?.[0]?.status, 'ready');
+  const status = await instance.getDeploymentStatus({ project });
+  assert.equal(status.project.id, 'prj_di');
+  assert.equal((await instance.getDeploymentLogs({ project, deploymentId: 'dpl_live' })).projectId, 'prj_di');
+  assert.doesNotMatch(JSON.stringify(await instance.listEnvironment({ project })), /private-value/u);
+  assert.equal(requests.every(request => request.team === 'team_A' && request.method === 'GET'), true);
+  assert.equal((await instance.preflightOperation(project, 'deployment.env.upsert'))?.[0]?.error?.code, 'NOT_FOUND');
+  await assert.rejects(instance.redeploy({ project, deploymentId: 'dpl_live', idempotencyKey: 'read-cannot-write' }), (error: unknown) => (error as { code?: string }).code === 'NOT_FOUND');
+  assert.equal(requests.every(request => request.method === 'GET'), true);
+  connected = false;
+  assert.equal((await instance.preflightOperation(project, 'deployment.status'))?.[0]?.error?.code, 'AUTH_REQUIRED');
+});
+
+test('unbound Vercel discovery rejects ambiguous installations and mismatched or duplicate Git links', async () => {
+  const project = { id: 'Development-Intelligence', repository: 'pyralisxc/Development-Intelligence' };
+  const bindings = [
+    { id: 'conductor', project: 'conductor', connectionId: 'icfg_A', teamId: 'team_A' },
+    { id: 'another', project: 'another', connectionId: 'icfg_B', teamId: 'team_B' },
+  ];
+  const ambiguous = new VercelDeploymentProvider({ bindings, tokenResolver: async () => 'token', fetch: async () => { throw new Error('must not access Vercel'); } });
+  assert.equal((await ambiguous.preflightOperation(project, 'deployment.status'))?.[0]?.error?.code, 'CONFLICT');
+
+  for (const projects of [
+    [{ id: 'prj_di', link: { type: 'github', org: 'somebody-else', repo: 'Development-Intelligence' } }],
+    [{ id: 'prj_a', link: { type: 'github', org: 'pyralisxc', repo: 'Development-Intelligence' } }, { id: 'prj_b', link: { type: 'github', org: 'pyralisxc', repo: 'Development-Intelligence' } }],
+  ]) {
+    const instance = new VercelDeploymentProvider({
+      bindings: [bindings[0]!], tokenResolver: async () => 'token',
+      fetch: async input => new URL(String(input)).pathname === '/v9/projects'
+        ? Response.json({ projects, pagination: { next: null } })
+        : Response.json({ error: 'No matching detail' }, { status: 404 }),
+    });
+    assert.equal((await instance.preflightOperation(project, 'deployment.status'))?.[0]?.error?.code, 'NOT_FOUND');
+  }
+
+  const linked = { id: 'prj_di', link: { type: 'github', org: 'pyralisxc', repo: 'Development-Intelligence' } };
+  const stale = new VercelDeploymentProvider({
+    bindings: [bindings[0]!], tokenResolver: async () => 'token',
+    fetch: async input => new URL(String(input)).pathname === '/v9/projects'
+      ? Response.json({ projects: [linked], pagination: { next: null } })
+      : Response.json({ id: 'prj_di', link: { type: 'github', org: 'different-owner', repo: 'Development-Intelligence' } }),
+  });
+  assert.equal((await stale.preflightOperation(project, 'deployment.status'))?.[0]?.error?.code, 'NOT_FOUND');
+
+  const incomplete = new VercelDeploymentProvider({
+    bindings: [bindings[0]!], tokenResolver: async () => 'token',
+    fetch: async input => new URL(String(input)).pathname === '/v9/projects'
+      ? Response.json({ projects: [linked], pagination: { next: 123 } })
+      : Response.json(linked),
+  });
+  assert.equal((await incomplete.preflightOperation(project, 'deployment.status'))?.[0]?.error?.code, 'NOT_FOUND');
+});
+
 test('runtime and MCP expose Vercel deployment reads only when a deployment provider is configured', async () => {
   const { instance } = provider();
   const runtime = new ConductorToolRuntime({
