@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluateAuthorization, type WorkEnvelope } from '../src/index.js';
+import { evaluateAuthorization, evaluateWorkItemCreationAuthorization, type WorkEnvelope } from '../src/index.js';
 
 function envelope(stage: WorkEnvelope['stage'] = 'build'): WorkEnvelope {
   return {
@@ -61,6 +61,45 @@ test('provider capability never substitutes for standing authorization', () => {
     referent: work.authorization.referent,
   });
   assert.equal(decision.status, 'blocked');
+});
+
+test('route-work authorizes same-project issue routing without develop or Build', () => {
+  const work = envelope('explore');
+  work.authorization.actionClasses = ['inspect', 'route-work'];
+  assert.equal(evaluateWorkItemCreationAuthorization(work, {
+    project: work.project, referent: work.authorization.referent,
+  }).status, 'allowed');
+  assert.equal(evaluateAuthorization(work, {
+    actionClass: 'develop', project: work.project, referent: work.authorization.referent,
+  }).status, 'blocked');
+});
+
+test('cross-project routing requires the exact destination in the current grant', () => {
+  const work = envelope('explore');
+  work.authorization.actionClasses = ['route-work'];
+  work.authorization.routingDestinations = ['pyralisxc/Development-OS'];
+  const request = {
+    project: 'pyralisxc/Development-OS',
+    referent: work.authorization.referent,
+  };
+  assert.equal(evaluateWorkItemCreationAuthorization(work, request).status, 'allowed');
+  assert.equal(evaluateWorkItemCreationAuthorization(work, { ...request, project: 'pyralisxc/Other' }).status, 'blocked');
+  assert.equal(evaluateWorkItemCreationAuthorization(work, { ...request, referent: 'other-task' }).status, 'blocked');
+  work.authorization.routingDestinations = [];
+  assert.equal(evaluateWorkItemCreationAuthorization(work, request).status, 'blocked');
+});
+
+test('route-work cannot authorize source mutation or survive a revoked grant', () => {
+  const work = envelope();
+  work.authorization.actionClasses = ['route-work'];
+  work.authorization.routingDestinations = ['pyralisxc/Development-OS'];
+  assert.equal(evaluateAuthorization(work, {
+    actionClass: 'develop', project: 'pyralisxc/Development-OS', referent: work.authorization.referent,
+  }).status, 'blocked');
+  work.authorization.status = 'revoked';
+  assert.equal(evaluateAuthorization(work, {
+    actionClass: 'route-work', project: 'pyralisxc/Development-OS', referent: work.authorization.referent,
+  }).status, 'blocked');
 });
 
 test('main promotion requires approval bound to the exact candidate SHA', () => {

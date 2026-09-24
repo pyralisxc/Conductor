@@ -18,6 +18,8 @@ Conductor mints installation tokens per repository instead of distributing the A
 
 Repository reach, operation permission, Development OS authorization, and consequential approval are separate checks. Passing one never implies the others.
 
+Durable issue routing uses the distinct `route-work` action class. A grant can route within its active project, or to exact repositories listed in `routingDestinations`; it cannot authorize source changes in either location. The grant retains the active referent while the destination changes. Revocation, expiry, exclusions, and referent changes block routing. Provider access and visibility of the destination still need separate verification. `work-item.create` is the routing operation; its MCP credential and GitHub App permissions prove provider access, not the current Development OS grant. The caller must evaluate the current routing grant before invoking it. Do not send sensitive findings to a destination with broader visibility.
+
 ## Secrets
 
 Separate Preview credentials, Production credentials, GitHub App credentials, model/API credentials, and local hardware credentials.
