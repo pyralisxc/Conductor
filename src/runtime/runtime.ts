@@ -47,6 +47,7 @@ import {
   type WorkItemRecord,
   type WorkItemList,
   type CreateWorkItemInput,
+  type CommentWorkItemInput,
   type UpdateWorkItemStatusInput,
   type UpdateWorkItemClassificationInput,
   type GetDeploymentStatusInput,
@@ -115,6 +116,7 @@ const WORK_ITEM_READ_DEFINITIONS: readonly ToolDefinition[] = [
 
 const WORK_ITEM_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'work-item.create', description: 'Create one durable work item in the owning project.', mutates: true },
+  { name: 'work-item.comment.create', description: 'Add evidence or a consolidation link to one existing issue.', mutates: true },
   { name: 'work-item.update-status', description: 'Move one durable work item to an explicit normalized status.', mutates: true },
   { name: 'work-item.classification.update', description: 'Update normalized work kind and/or origin without changing lifecycle status.', mutates: true },
 ];
@@ -503,6 +505,13 @@ export class ConductorToolRuntime {
     return await this.executeWorkItemMutation(input, 'work-item.create', async (provider) => {
       const result = await provider.createWorkItem(input);
       return { result, identifiers: { issueNumber: result.issueNumber } };
+    });
+  }
+
+  async commentWorkItem(input: CommentWorkItemInput) {
+    return await this.executeWorkItemMutation(input, 'work-item.comment.create', async (provider) => {
+      const result = await provider.commentWorkItem(input);
+      return { result, identifiers: { issueNumber: result.issueNumber, commentId: result.commentId } };
     });
   }
 
