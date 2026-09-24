@@ -100,7 +100,7 @@ export interface AuthorizationDecision {
   approvalId?: string;
 }
 
-/** Development OS authorization for the work-item.create routing operation. */
+/** Development OS authorization for issue routing and maintenance operations. */
 export function evaluateWorkItemCreationAuthorization(
   envelope: WorkEnvelope,
   request: Omit<AuthorizationRequest, 'actionClass' | 'candidateSha' | 'approval'>,

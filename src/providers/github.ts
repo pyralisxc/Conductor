@@ -32,6 +32,7 @@ import type {
   MutableWorkItemOrigin,
   WorkItemClassificationSource,
   CreateWorkItemInput,
+  CommentWorkItemInput,
   UpdateWorkItemStatusInput,
   UpdateWorkItemClassificationInput,
 } from '../runtime/types.js';
@@ -610,6 +611,19 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     return workItemFromIssue(repository, created);
   }
 
+  async commentWorkItem(input: CommentWorkItemInput): Promise<{ repository: string; issueNumber: number; commentId: string; url: string }> {
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['work-item.comment.create']);
+    assertIssueNumber(input.issueNumber);
+    const body = input.body.trim();
+    if (!body || body.length > 100000) throw { code: 'CONFLICT', message: 'Issue comment must contain 1-100000 characters' };
+    const current = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {}, credential);
+    assertIssueIsWorkItem(current);
+    const created = await this.request<{ id: number; html_url: string }>(repository, `/issues/${input.issueNumber}/comments`, {
+      method: 'POST', body: JSON.stringify({ body }),
+    }, credential);
+    return { repository, issueNumber: input.issueNumber, commentId: String(created.id), url: created.html_url };
+  }
+
   async updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItemRecord> {
     const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['work-item.update-status']);
     assertIssueNumber(input.issueNumber);
@@ -1027,6 +1041,7 @@ type GitHubWriteOperation =
   | 'pull-request.merge.reconcile-preview'
   | 'pull-request.merge.promote'
   | 'work-item.create'
+  | 'work-item.comment.create'
   | 'work-item.update-status'
   | 'work-item.classification.update';
 
@@ -1062,6 +1077,7 @@ const GITHUB_WRITE_OPERATION_PERMISSIONS: Readonly<Record<
   'pull-request.merge.reconcile-preview': { contents: 'write' },
   'pull-request.merge.promote': { contents: 'write' },
   'work-item.create': { issues: 'write' },
+  'work-item.comment.create': { issues: 'write' },
   'work-item.update-status': { issues: 'write' },
   'work-item.classification.update': { issues: 'write' },
 };

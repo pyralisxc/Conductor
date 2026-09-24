@@ -27,6 +27,7 @@ export type MutationOperationName =
   | 'pull-request.merge.reconcile-preview'
   | 'pull-request.merge.promote'
   | 'work-item.create'
+  | 'work-item.comment.create'
   | 'work-item.update-status'
   | 'work-item.classification.update'
   | 'deployment.redeploy'
@@ -486,6 +487,13 @@ export interface UpdateWorkItemStatusInput {
   project: ProjectReference;
   issueNumber: number;
   status: MutableWorkItemStatus;
+  idempotencyKey: string;
+}
+
+export interface CommentWorkItemInput {
+  project: ProjectReference;
+  issueNumber: number;
+  body: string;
   idempotencyKey: string;
 }
 

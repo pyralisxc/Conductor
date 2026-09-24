@@ -60,6 +60,10 @@ function githubProvider() {
         return Response.json(issue(), { status: 201 });
       }
       if (url.endsWith('/issues/7') && method === 'GET') return Response.json(issue());
+      if (url.endsWith('/issues/8') && method === 'GET') return Response.json({ ...issue(), number: 8, pull_request: {} });
+      if (url.endsWith('/issues/7/comments') && method === 'POST') {
+        return Response.json({ id: 23, html_url: 'https://github.com/pyralisxc/Development-Intelligence/issues/7#issuecomment-23' }, { status: 201 });
+      }
       if (url.includes('/issues?') && method === 'GET') return Response.json([
         issue(),
         {
@@ -99,6 +103,15 @@ test('GitHub issues normalize lifecycle, kind, and origin without replacing nati
   assert.equal(created.status, 'ready');
   assert.equal(created.kind, 'investigation');
   assert.equal(created.origin, 'di-finding');
+
+  const comment = await provider.commentWorkItem({
+    project, issueNumber: 7, body: 'New evidence belongs on this issue.', idempotencyKey: 'work-item:comment:7:evidence',
+  });
+  assert.equal(comment.issueNumber, 7);
+  assert.equal(comment.commentId, '23');
+  await assert.rejects(provider.commentWorkItem({
+    project, issueNumber: 8, body: 'This is a pull request.', idempotencyKey: 'work-item:comment:8:blocked',
+  }), (error: unknown) => Boolean(error && typeof error === 'object' && 'message' in error && String(error.message).includes('not a work item')));
 
   const status = await provider.getWorkItemStatus({ project, issueNumber: 7 });
   assert.equal(status.status, 'ready');
@@ -182,6 +195,7 @@ test('runtime and MCP expose human-directed work routing and classification', as
       'work-item.status',
       'work-item.list',
       'work-item.create',
+      'work-item.comment.create',
       'work-item.update-status',
       'work-item.classification.update',
     ]) {
@@ -200,6 +214,7 @@ test('runtime and MCP expose human-directed work routing and classification', as
     'work-item.status',
     'work-item.list',
     'work-item.create',
+    'work-item.comment.create',
     'work-item.update-status',
     'work-item.classification.update',
   ]) {
