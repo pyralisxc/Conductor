@@ -17,6 +17,7 @@ import type { VercelOperationsProvider, OperationPreflightProvider } from './run
 interface VercelProjectBinding {
   id: string;
   project: string;
+  repository?: string;
   teamId?: string;
   connectionId?: string;
 }
@@ -212,9 +213,15 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
 
   private async boundProject(project: ProjectReference): Promise<{ binding: VercelProjectBinding; id: string; data: JsonRecord }> {
     const binding = this.binding(project);
+    if (binding.repository && project.repository && binding.repository.toLowerCase() !== project.repository.toLowerCase()) {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'Requested repository does not match the configured Vercel binding' };
+    }
     const data = await this.getProject(binding);
     const id = stringField(data, 'id');
     if (!id) throw { code: 'NOT_FOUND', source: 'vercel', message: 'Bound Vercel project has no stable ID' };
+    if (binding.repository && !linkedRepository(data, binding.repository)) {
+      throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'Configured repository does not match the Vercel project Git linkage' };
+    }
     return { binding, id, data };
   }
 

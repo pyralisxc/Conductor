@@ -59,6 +59,22 @@ test('exact Git source must match the linked project and full SHA', async () => 
   assert.deepEqual((calls.find(call => call.path === '/v13/deployments' && call.method === 'POST')?.body as Record<string, unknown>).gitSource, { type: 'github', org: 'owner', repo: 'app', ref: 'preview', sha: 'a'.repeat(40) });
 });
 
+test('explicit repository binding blocks a mismatched Vercel project before deployment writes', async () => {
+  const calls: string[] = [];
+  const provider = new VercelDeploymentProvider({
+    token: 'test-token',
+    bindings: [{ id: 'DI', project: 'prj_DI123', teamId: 'team_1', repository: 'pyralisxc/Development-Intelligence' }],
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      calls.push(`${init?.method ?? 'GET'} ${path}`);
+      if (path === '/v9/projects/prj_DI123') return Response.json({ id: 'prj_DI123', link: { type: 'github', org: 'somebody-else', repo: 'Development-Intelligence' } });
+      return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
+    },
+  });
+  await assert.rejects(provider.redeploy({ project: { id: 'DI', repository: 'pyralisxc/Development-Intelligence' }, deploymentId: 'dpl_preview', idempotencyKey: 'wrong-linked-project' }), (error: unknown) => (error as { code?: string }).code === 'PERMISSION_DENIED');
+  assert.deepEqual(calls, ['GET /v9/projects/prj_DI123']);
+});
+
 test('variable values stay out of audit, receipts and durable idempotency state', async () => {
   const { provider, project } = fixture();
   const runtime = new ConductorToolRuntime({ providers: [provider], deploymentProvider: provider, mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }) });
