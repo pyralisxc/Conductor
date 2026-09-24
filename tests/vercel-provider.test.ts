@@ -6,7 +6,9 @@ import {
   ConductorToolRuntime,
   VercelDeploymentProvider,
   createConductorMcpServer,
+  mergeVercelBindings,
   parseRuntimeBindings,
+  parseVercelBindingOverlay,
 } from '../src/index.js';
 
 const oldSha = 'a'.repeat(40);
@@ -262,4 +264,18 @@ test('runtime bindings accept Vercel deployment routing without creating project
 test('runtime binding requires an installation identifier for connected Vercel credentials', () => {
   assert.equal(parseRuntimeBindings('[{"id":"conductor","vercelProject":"conductor","vercelConnectionId":"icfg_123"}]')[0]?.vercelConnectionId, 'icfg_123');
   assert.throws(() => parseRuntimeBindings('[{"id":"conductor","vercelConnectionId":"other"}]'), /vercelConnectionId/u);
+});
+
+test('additive Vercel binding preserves existing routing and rejects conflicting or loose permissions', () => {
+  const base = parseRuntimeBindings('[{"id":"conductor","repository":"pyralisxc/Conductor","vercelProject":"conductor","vercelConnectionId":"icfg_A","vercelTeamId":"team_A"},{"id":"Development-Intelligence","repository":"pyralisxc/Development-Intelligence","githubWrite":false}]');
+  const overlay = parseVercelBindingOverlay('[{"id":"Development-Intelligence","repository":"pyralisxc/Development-Intelligence","vercelProject":"prj_DI123","vercelConnectionId":"icfg_A","vercelTeamId":"team_A"}]');
+  const merged = mergeVercelBindings(base, overlay);
+  assert.equal(merged[0]?.vercelProject, 'conductor');
+  assert.equal(merged[1]?.vercelProject, 'prj_DI123');
+  assert.equal(merged[1]?.githubWrite, false);
+  assert.equal(base[1]?.vercelProject, undefined);
+  assert.throws(() => mergeVercelBindings(base, [{ ...overlay[0]!, repository: 'other/Development-Intelligence' }]), /conflicts/u);
+  assert.throws(() => mergeVercelBindings(base, [{ ...overlay[0]!, id: 'other-alias' }]), /already bound/u);
+  assert.throws(() => parseVercelBindingOverlay('[{"id":"DI","repository":"pyralisxc/DI","vercelProject":"di","vercelConnectionId":"icfg_A"}]'), /exact project ID/u);
+  assert.throws(() => parseVercelBindingOverlay('[{"id":"DI","repository":"pyralisxc/DI","vercelProject":"prj_DI123","vercelConnectionId":"icfg_A","githubWrite":true}]'), /unsupported field/u);
 });
