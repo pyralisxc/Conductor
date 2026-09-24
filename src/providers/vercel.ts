@@ -70,8 +70,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     operation: RuntimeOperationName,
   ): Promise<OperationPreflightCheck[] | undefined> {
     if (!operation.startsWith('deployment.')) return undefined;
-    const binding = this.bindings.get(project.id);
-    if (!binding) {
+    const explicit = this.bindings.get(project.id);
+    if (!explicit && !isDeploymentRead(operation)) {
       const error = normalizeToolError({
         code: 'NOT_FOUND',
         source: 'vercel',
@@ -79,16 +79,10 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       }, 'NOT_FOUND', 'vercel');
       return [{ provider: 'vercel', status: 'blocked', summary: error.message, error, diagnostics: error.diagnostics }];
     }
-    if (!await this.tokenValue(binding).catch(() => undefined)) {
-      const error = normalizeToolError({
-        code: 'AUTH_REQUIRED',
-        source: 'vercel',
-        message: 'Vercel deployment access requires an active bound account connection or a server token',
-      }, 'AUTH_REQUIRED', 'vercel');
-      return [{ provider: 'vercel', status: 'blocked', summary: error.message, error, diagnostics: error.diagnostics }];
-    }
     try {
-      const resolved = await this.getProject(binding);
+      const { binding, data: resolved } = explicit
+        ? await this.boundProject(project)
+        : await this.readProject(project);
       const environmentOperation = operation === 'deployment.env.list' || operation.startsWith('deployment.env.');
       if (environmentOperation) {
         // Project read access does not imply access to project environment variables.
@@ -97,7 +91,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       return [{
         provider: 'vercel',
         status: operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit' || operation === 'deployment.env.list' ? 'ready' : 'degraded',
-        summary: `Vercel project ${resolved.name} (${resolved.id}) is bound for ${operation}`,
+        summary: `Vercel project ${resolved.name} (${resolved.id}) is ${explicit ? 'bound' : 'uniquely linked for read access'} for ${operation}`,
         diagnostics: [{ level: 'info', source: 'vercel', message: operation === 'deployment.runtime-logs'
           ? 'Project read verified; runtime-log endpoint access is unverified. An exact deployment read may still return PERMISSION_DENIED.'
           : environmentOperation
@@ -121,10 +115,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   }
 
   async getDeploymentStatus(input: GetDeploymentStatusInput): Promise<DeploymentProjectStatus> {
-    const binding = this.binding(input.project);
-    await this.tokenValue(binding);
+    const { binding, data: project } = await this.readProject(input.project);
     const limit = clamp(input.limit ?? 10, 1, 50);
-    const project = await this.getProject(binding);
     const projectId = stringField(project, 'id') ?? binding.project;
     const [deploymentPayload, domainPayload] = await Promise.all([
       this.getJson('/v6/deployments', {
@@ -180,10 +172,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   }
 
   async getDeploymentLogs(input: GetDeploymentLogsInput): Promise<DeploymentLogs> {
-    const binding = this.binding(input.project);
-    await this.tokenValue(binding);
+    const { binding, data: project } = await this.readProject(input.project);
     const limit = clamp(input.limit ?? 100, 1, 200);
-    const project = await this.getProject(binding);
     const projectId = stringField(project, 'id') ?? binding.project;
     const deployment = await this.getJson(
       `/v13/deployments/${encodeURIComponent(input.deploymentId)}`,
@@ -191,7 +181,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     );
     const deploymentProjectId = stringField(deployment, 'projectId')
       ?? (recordField(deployment, 'project') ? stringField(recordField(deployment, 'project')!, 'id') : null);
-    if (deploymentProjectId && deploymentProjectId !== projectId) {
+    if (deploymentProjectId !== projectId) {
       throw {
         code: 'PERMISSION_DENIED',
         source: 'vercel',
@@ -228,9 +218,50 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     return { binding, id, data };
   }
 
-  private async exactDeployment(project: ProjectReference, deploymentId: string) {
+  // Discovery is confined to one already configured installation and team. It
+  // never creates a write binding and never falls back to a server-wide token.
+  private async readProject(project: ProjectReference): Promise<{ binding: VercelProjectBinding; id: string; data: JsonRecord }> {
+    if (this.bindings.has(project.id)) return this.boundProject(project);
+    if (!project.repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(project.repository)) {
+      throw { code: 'NOT_FOUND', source: 'vercel', message: 'Unbound Vercel reads require an exact Git repository' };
+    }
+    const connections = new Map<string, VercelProjectBinding>();
+    for (const binding of this.bindings.values()) {
+      if (binding.connectionId) connections.set(`${binding.connectionId}:${binding.teamId ?? 'personal'}`, binding);
+    }
+    if (connections.size !== 1) {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'Unbound Vercel reads require one unambiguous connected installation and team' };
+    }
+    const installation = [...connections.values()][0]!;
+    await this.tokenValue(installation);
+    const matches: string[] = [];
+    let until: string | undefined;
+    const seen = new Set<string>();
+    for (let page = 0; page < 10; page++) {
+      const payload = await this.getJson('/v9/projects', { ...scopeQuery(installation), limit: '100', ...(until ? { until } : {}) }, installation);
+      for (const value of arrayField(payload, 'projects')) {
+        const candidate = record(value);
+        const id = candidate && stringField(candidate, 'id');
+        if (id && linkedRepository(candidate, project.repository)) matches.push(id);
+      }
+      const next = recordField(payload, 'pagination')?.next;
+      if (next === null || next === undefined) {
+        if (matches.length !== 1) break;
+        const binding = { ...installation, id: project.id, project: matches[0]! };
+        const data = await this.getProject(binding);
+        if (stringField(data, 'id') !== binding.project || !linkedRepository(data, project.repository)) break;
+        return { binding, id: binding.project, data };
+      }
+      until = String(next);
+      if (!/^\d+$/u.test(until) || seen.has(until)) break;
+      seen.add(until);
+    }
+    throw { code: 'NOT_FOUND', source: 'vercel', message: 'No unique, fully verified Vercel project matches the requested repository in the connected installation' };
+  }
+
+  private async exactDeployment(project: ProjectReference, deploymentId: string, readOnly = false) {
     if (!/^dpl_[A-Za-z0-9]+$/u.test(deploymentId)) throw { code: 'CONFLICT', source: 'vercel', message: 'An exact deployment ID is required' };
-    const bound = await this.boundProject(project);
+    const bound = readOnly ? await this.readProject(project) : await this.boundProject(project);
     const detail = await this.getJson(`/v13/deployments/${encodeURIComponent(deploymentId)}`, scopeQuery(bound.binding), bound.binding);
     if (stringField(detail, 'projectId') !== bound.id) {
       throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'Deployment is outside the bound project' };
@@ -300,7 +331,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   async rollback(input: VercelDeploymentInput) { return this.changeTraffic(input, 'rollback'); }
 
   async listEnvironment(input: VercelProjectInput): Promise<Record<string, unknown>> {
-    const bound = await this.boundProject(input.project);
+    const bound = await this.readProject(input.project);
     const payload = await this.getJson(`/v10/projects/${encodeURIComponent(bound.id)}/env`, { ...scopeQuery(bound.binding), decrypt: 'false' }, bound.binding);
     const raw = arrayField(payload, 'envs');
     return { provider: 'vercel', projectId: bound.id, variables: raw.slice(0, 200).map(item => envMetadata(record(item) ?? {})), truncated: raw.length > 200, observedAt: this.now().toISOString() };
@@ -352,7 +383,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   }
 
   async getRuntimeLogs(input: VercelRuntimeLogsInput): Promise<Record<string, unknown>> {
-    const bound = await this.exactDeployment(input.project, input.deploymentId);
+    const bound = await this.exactDeployment(input.project, input.deploymentId, true);
     const limit = clamp(input.limit ?? 50, 1, 100);
     const payload = await this.getJson(`/v1/projects/${encodeURIComponent(bound.id)}/deployments/${encodeURIComponent(input.deploymentId)}/runtime-logs`, { ...scopeQuery(bound.binding), limit: String(limit) }, bound.binding);
     const entries = Array.isArray(payload) ? payload : arrayField(payload, 'logs').length ? arrayField(payload, 'logs') : arrayField(payload, 'data');
@@ -360,7 +391,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   }
 
   async getAudit(input: VercelProjectInput): Promise<Record<string, unknown>> {
-    const bound = await this.boundProject(input.project);
+    const bound = await this.readProject(input.project);
     const requests = [
       this.getJson(`/v9/projects/${encodeURIComponent(bound.id)}/domains`, scopeQuery(bound.binding), bound.binding),
       this.getJson(`/v9/projects/${encodeURIComponent(bound.id)}/custom-environments`, scopeQuery(bound.binding), bound.binding),
@@ -464,6 +495,21 @@ function capability(
 
 function scopeQuery(binding: VercelProjectBinding): Record<string, string> {
   return binding.teamId ? { teamId: binding.teamId } : {};
+}
+
+function isDeploymentRead(operation: RuntimeOperationName): boolean {
+  return operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit'
+    || operation === 'deployment.runtime-logs' || operation === 'deployment.env.list';
+}
+
+function linkedRepository(project: JsonRecord, repository: string): boolean {
+  const link = recordField(project, 'link');
+  if (!link || stringField(link, 'type') && stringField(link, 'type') !== 'github') return false;
+  const [org, repo] = repository.toLowerCase().split('/');
+  const linkedRepo = stringField(link, 'repo')?.toLowerCase();
+  const linkedOrg = stringField(link, 'org')?.toLowerCase();
+  return Boolean(linkedRepo && ((linkedRepo === `${org}/${repo}` && (!linkedOrg || linkedOrg === org))
+    || (linkedRepo === repo && linkedOrg === org)));
 }
 
 function normalizeDeployment(value: unknown): DeploymentRecord | null {
