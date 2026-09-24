@@ -1,27 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createRuntimeFromEnvironment } from '../src/config/runtime.js';
-import { createConductorHttpHandler } from '../src/transport/http.js';
-import { handleOAuthHttpRequest } from '../src/transport/oauth-http.js';
-import {
-  assertOAuthConfiguration,
-  oauthPublicBaseUrl,
-  SelfHostedAccessTokenVerifier,
-} from '../src/transport/oauth.js';
+import { createConfiguredHttpHandler } from '../src/config/http-handler.js';
 
-let handler: ReturnType<typeof createConductorHttpHandler> | undefined;
+let handler: ReturnType<typeof createConfiguredHttpHandler> | undefined;
 
-function conductorHandler(): ReturnType<typeof createConductorHttpHandler> {
+function conductorHandler(): ReturnType<typeof createConfiguredHttpHandler> {
   if (handler) return handler;
-
-  assertOAuthConfiguration();
-  const publicUrl = oauthPublicBaseUrl();
-  handler = createConductorHttpHandler({
-    runtime: createRuntimeFromEnvironment(),
-    publicUrl,
-    oauthIssuer: publicUrl,
-    verifier: new SelfHostedAccessTokenVerifier(),
-    handleOAuthRequest: handleOAuthHttpRequest,
-  });
+  handler = createConfiguredHttpHandler();
   return handler;
 }
 
