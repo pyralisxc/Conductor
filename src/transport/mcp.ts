@@ -123,6 +123,12 @@ const preflightReceiptSchema = z.union([
 
 const oauthSecurity = [{ type: 'oauth2', scopes: ['conductor.read'] }];
 const oauthWriteSecurity = [{ type: 'oauth2', scopes: ['conductor.read', 'conductor.write'] }];
+const workContextSchema = z.string().min(20).max(1024).describe('Token from work-scope.begin for this conversation’s active repository; required for code/deployment writes');
+
+function withoutWorkContext<T extends Record<string, unknown>>(input: T): Omit<T, 'workContext'> {
+  const { workContext: _context, ...operationInput } = input;
+  return operationInput;
+}
 
 const idempotencySchema = z.object({
   key: z.string(),
@@ -173,21 +179,21 @@ const readReceiptSchema = z.object({ receipt: z.union([
 ]) });
 
 export function createConductorMcpServer(runtime: ConductorToolRuntime, workScope?: WorkScopeAuthorizer): McpServer {
-  async function requireScopedWrite(auth: AuthInfo | undefined, action: WorkAction, project: ProjectReference): Promise<void> {
+  async function requireScopedWrite(auth: AuthInfo | undefined, action: WorkAction, project: ProjectReference, workContext?: string): Promise<void> {
     requireWriteScope(auth?.scopes);
     if (!workScope) throw new Error('Owner-managed work scope is not configured');
-    await workScope.assertAllowed(auth, action, runtime.resolveProjectReference(project));
+    await workScope.assertAllowed(auth, action, runtime.resolveProjectReference(project), workContext);
   }
   const server = new McpServer(
     { name: 'conductor', version: '0.1.0' },
     {
-      instructions: 'Call capabilities first in a fresh conversation. Use preflight_project for repository-development session readiness and preflight_operation before one exact operation. Treat unavailable or blocked checks as hard evidence; do not infer hidden access or project meaning.',
+      instructions: 'Call capabilities first in a fresh conversation. Establish the active repository from the user or workspace, then call work-scope.begin once and reuse its workContext for code and deployment writes; issue routing to another repository does not change the active repository. Use preflight_project for readiness and preflight_operation with workContext before one exact write. Treat unavailable or blocked checks as hard evidence; do not infer hidden access or project meaning.',
     },
   );
 
   if (workScope) server.registerTool('work-scope.identity', {
     title: 'Identify this connected client for owner scope management',
-    description: 'Return this OAuth client fingerprint and current code-work scope. Issue routing also depends on provider access and the active session authorization. Share the fingerprint with the owner to set a temporary wider scope in the Conductor owner page.',
+    description: 'Return this OAuth client fingerprint and any owner-granted code-work exceptions. Start each conversation’s active repository with work-scope.begin. Issue routing depends on provider access and current session authorization. Share the fingerprint with the owner to grant a temporary wider scope in the Conductor owner page.',
     inputSchema: z.object({}),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: { securitySchemes: oauthSecurity },
@@ -196,6 +202,19 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     if (!clientId) throw new Error('Authenticated client identity is required');
     const scope = await workScope.describe(clientId);
     return { content: [{ type: 'text', text: JSON.stringify(scope) }] };
+  });
+
+  if (workScope) server.registerTool('work-scope.begin', {
+    title: 'Begin code work in the active repository',
+    description: 'After establishing this conversation’s active repository from the user or workspace, call once with its exact owner/repository. Reuse the returned workContext for code and deployment writes in this conversation. Do not switch the active repository merely to work on an issue routed elsewhere; ask the owner for an additional scoped grant. The declaration is agent supplied and cannot independently prove the chat’s workspace.',
+    inputSchema: z.object({ repository: z.string().min(3).describe('Exact owner/repository of the active development project') }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    _meta: { securitySchemes: oauthWriteSecurity },
+  }, async ({ repository }, extra) => {
+    requireWriteScope(extra.authInfo?.scopes);
+    const clientId = extra.authInfo?.clientId;
+    if (!clientId) throw new Error('Authenticated client identity is required');
+    return { content: [{ type: 'text', text: JSON.stringify(workScope.begin(clientId, repository)) }] };
   });
 
   server.registerTool('capabilities', {
@@ -236,6 +255,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       inputSchema: z.object({
         project: projectSchema,
         operation: runtimeOperationSchema,
+        workContext: workContextSchema.optional(),
       }),
       outputSchema: readReceiptSchema,
       annotations: {
@@ -250,11 +270,11 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       const action = writeAction(input.operation);
       if (receipt.status === 'succeeded' && action) {
         try {
-          await requireScopedWrite(extra.authInfo, action, input.project);
+          await requireScopedWrite(extra.authInfo, action, input.project, input.workContext);
           receipt.result.checks.push({ provider: 'work-scope', status: 'ready', summary: 'Owner-managed repository scope permits this operation', diagnostics: [] });
         } catch {
           receipt.result.status = 'blocked';
-          receipt.result.checks.push({ provider: 'work-scope', status: 'blocked', summary: 'Owner-managed repository scope does not permit this operation', diagnostics: [{ level: 'warning', source: 'work-scope', code: 'PERMISSION_DENIED', message: 'Ask the owner to set the exact work scope.' }] });
+          receipt.result.checks.push({ provider: 'work-scope', status: 'blocked', summary: 'Active repository context or owner exception does not permit this operation', diagnostics: [{ level: 'warning', source: 'work-scope', code: 'PERMISSION_DENIED', message: 'Begin work-scope.begin for the active repository, or ask the owner to grant an exact additional repository.' }] });
         }
       }
       return result(receipt);
@@ -344,15 +364,15 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     const idempotencyKey = z.string().min(8).max(200);
     const deploymentId = z.string().regex(/^dpl_[A-Za-z0-9]+$/u);
     const approvalReference = z.string().optional().describe('Exact owner approval for production actions; must begin owner-approved:');
-    const base = { project: projectSchema, idempotencyKey };
+    const base = { project: projectSchema, idempotencyKey, workContext: workContextSchema };
     const deployment = z.object({ ...base, deploymentId, approvalReference });
     const variable = z.object({ ...base, key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u), value: z.string(), type: z.enum(['plain', 'encrypted', 'sensitive']), target: z.array(z.enum(['production','preview','development'])).min(1).max(3), gitBranch: z.string().optional(), customEnvironmentIds: z.array(z.string()).max(20).optional(), approvalReference });
     const writeTool = (name: 'deployment.redeploy' | 'deployment.git.create' | 'deployment.promote' | 'deployment.rollback' | 'deployment.env.upsert' | 'deployment.env.update' | 'deployment.env.remove', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any) => Promise<object>, destructive = false) => {
       server.registerTool(name, { title, description, inputSchema, outputSchema: mutationOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: destructive, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity } }, async (input, extra) => {
-        await requireScopedWrite(extra.authInfo, 'develop', input.project as ProjectReference);
-        return result(await run(input));
+        await requireScopedWrite(extra.authInfo, 'develop', input.project as ProjectReference, input.workContext as string);
+        return result(await run(withoutWorkContext(input)));
       });
     };
     writeTool('deployment.redeploy', 'Redeploy exact Vercel deployment', 'Redeploy one bound deployment. Production sources require exact owner approval.', deployment, input => runtime.vercelRedeploy(input));
@@ -399,6 +419,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       description: 'Create one work/* branch from an exact full Git SHA. Requires durable idempotency and conductor.write.',
       inputSchema: z.object({
         project: projectSchema,
+        workContext: workContextSchema,
         branch: z.string().min(6),
         fromSha: z.string().regex(/^[0-9a-f]{40}$/i),
         idempotencyKey: z.string().min(8).max(200),
@@ -407,8 +428,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project);
-      return result(await runtime.createBranch(input));
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.createBranch(withoutWorkContext(input)));
     });
 
     server.registerTool('git.commit.create', {
@@ -416,6 +437,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       description: 'Create one bounded commit, including tracked-file deletions via null content, and advance a work/* branch only when its head matches expectedHeadSha.',
       inputSchema: z.object({
         project: projectSchema,
+        workContext: workContextSchema,
         branch: z.string().min(6),
         expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
         message: z.string().min(1).max(500),
@@ -426,8 +448,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project);
-      return result(await runtime.createCommit(input));
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.createCommit(withoutWorkContext(input)));
     });
 
     server.registerTool('pull-request.create', {
@@ -435,6 +457,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       description: 'Open a work/* pull request against an explicit branch. Creating a proposal is allowed; merging or promoting accepted branches is a separate consequential operation.',
       inputSchema: z.object({
         project: projectSchema,
+        workContext: workContextSchema,
         head: z.string().min(6),
         base: z.string().min(1).max(255).describe('Target branch for the pull request, for example main, preview, or vercel-preview'),
         title: z.string().min(1).max(256),
@@ -446,8 +469,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project);
-      return result(await runtime.createPullRequest(input));
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.createPullRequest(withoutWorkContext(input)));
     });
 
     server.registerTool('pull-request.comment.create', {
@@ -455,6 +478,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       description: 'Add one idempotent comment to a pull request in an authorized repository.',
       inputSchema: z.object({
         project: projectSchema,
+        workContext: workContextSchema,
         pullRequestNumber: z.number().int().positive(),
         body: z.string().min(1),
         idempotencyKey: z.string().min(8).max(200),
@@ -463,8 +487,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project);
-      return result(await runtime.commentPullRequest(input));
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.commentPullRequest(withoutWorkContext(input)));
     });
 
 
@@ -473,6 +497,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       description: 'Add or remove labels while preserving unrelated labels. Requires conductor.write.',
       inputSchema: z.object({
         project: projectSchema,
+        workContext: workContextSchema,
         pullRequestNumber: z.number().int().positive(),
         add: z.array(z.string().min(1).max(100)).max(50).optional(),
         remove: z.array(z.string().min(1).max(100)).max(50).optional(),
@@ -482,8 +507,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project);
-      return result(await runtime.updatePullRequestLabels(input));
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.updatePullRequestLabels(withoutWorkContext(input)));
     });
 
     server.registerTool('pull-request.merge.integration', {
@@ -491,6 +516,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       description: 'Merge an exact PR head/base candidate into a non-default integration branch. Main/master/default branches are rejected.',
       inputSchema: z.object({
         project: projectSchema,
+        workContext: workContextSchema,
         pullRequestNumber: z.number().int().positive(),
         expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
         expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/i),
@@ -501,8 +527,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project);
-      return result(await runtime.mergeIntegrationPullRequest(input));
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.mergeIntegrationPullRequest(withoutWorkContext(input)));
     });
 
     server.registerTool('pull-request.merge.reconcile-preview', {
@@ -510,6 +536,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       description: 'Merge an exact repository-default-branch PR candidate into preview/vercel-preview using a merge commit. This repairs post-promotion ancestry and never targets production.',
       inputSchema: z.object({
         project: projectSchema,
+        workContext: workContextSchema,
         pullRequestNumber: z.number().int().positive(),
         expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
         expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/i),
@@ -519,8 +546,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project);
-      return result(await runtime.reconcilePreviewPullRequest(input));
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.reconcilePreviewPullRequest(withoutWorkContext(input)));
     });
 
     server.registerTool('pull-request.merge.promote', {
@@ -528,6 +555,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       description: 'Merge an exact approved Preview candidate into the repository default branch with a merge commit. Requires exact head SHA, exact base SHA, and an owner approval reference.',
       inputSchema: z.object({
         project: projectSchema,
+        workContext: workContextSchema,
         pullRequestNumber: z.number().int().positive(),
         expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
         expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/i),
@@ -539,8 +567,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project);
-      return result(await runtime.promotePullRequest(input));
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.promotePullRequest(withoutWorkContext(input)));
     });
   }
 
@@ -572,6 +600,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       description: 'Update normalized work kind and/or origin. Use unknown to clear a classification; unrelated labels and lifecycle status are preserved.',
       inputSchema: z.object({
         project: projectSchema,
+        workContext: workContextSchema,
         issueNumber: z.number().int().positive(),
         kind: workItemKindSchema.optional(),
         origin: workItemOriginSchema.optional(),
@@ -583,8 +612,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project);
-      return result(await runtime.updateWorkItemClassification(input));
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.updateWorkItemClassification(withoutWorkContext(input)));
     });
 
     server.registerTool('work-item.update-status', {
@@ -592,6 +621,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       description: 'Move one durable work item to an explicit normalized status. done closes the backing issue; any active status reopens it.',
       inputSchema: z.object({
         project: projectSchema,
+        workContext: workContextSchema,
         issueNumber: z.number().int().positive(),
         status: workItemWriteStatusSchema,
         idempotencyKey: z.string().min(8).max(200),
@@ -600,8 +630,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project);
-      return result(await runtime.updateWorkItemStatus(input));
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.updateWorkItemStatus(withoutWorkContext(input)));
     });
   }
 
