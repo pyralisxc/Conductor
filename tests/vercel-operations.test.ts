@@ -69,11 +69,17 @@ test('deployment cleanup protects current production and active builds', async (
   );
   await assert.rejects(
     provider.deleteDeployment({ project, deploymentId: 'dpl_building', idempotencyKey: 'delete-active-build' }),
-    (error: unknown) => (error as { message?: string }).message?.includes('terminal') === true,
+    (error: unknown) => {
+      assert.match((error as { message?: string }).message ?? JSON.stringify(error), /terminal/u);
+      return true;
+    },
   );
   await assert.rejects(
     provider.deleteDeployment({ project, deploymentId: 'dpl_prod_old', idempotencyKey: 'delete-historical-production' }),
-    (error: unknown) => (error as { message?: string }).message?.includes('approval') === true,
+    (error: unknown) => {
+      assert.match((error as { message?: string }).message ?? JSON.stringify(error), /approval/u);
+      return true;
+    },
   );
 
   const preview = await provider.deleteDeployment({ project, deploymentId: 'dpl_preview', idempotencyKey: 'delete-preview' });
