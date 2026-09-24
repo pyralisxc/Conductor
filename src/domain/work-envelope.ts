@@ -11,6 +11,7 @@ export type WorkMode =
 
 export type ActionClass =
   | 'inspect'
+  | 'route-work'
   | 'develop'
   | 'integrate-preview'
   | 'promote-main'
@@ -20,6 +21,8 @@ export interface AuthorizationGrant {
   id: string;
   actionClasses: ActionClass[];
   referent: string;
+  /** Exact destination repositories permitted for routing outside the active project. */
+  routingDestinations?: string[];
   exclusions: ActionClass[];
   issuedAt: string;
   expiresOn?: string;
@@ -97,6 +100,14 @@ export interface AuthorizationDecision {
   approvalId?: string;
 }
 
+/** Development OS authorization for the work-item.create routing operation. */
+export function evaluateWorkItemCreationAuthorization(
+  envelope: WorkEnvelope,
+  request: Omit<AuthorizationRequest, 'actionClass' | 'candidateSha' | 'approval'>,
+): AuthorizationDecision {
+  return evaluateAuthorization(envelope, { ...request, actionClass: 'route-work' });
+}
+
 export function evaluateAuthorization(
   envelope: WorkEnvelope,
   request: AuthorizationRequest,
@@ -105,7 +116,10 @@ export function evaluateAuthorization(
   const reasons: string[] = [];
   const grant = envelope.authorization;
 
-  if (request.project !== envelope.project) reasons.push('project does not match the Work Envelope');
+  if (request.project !== envelope.project && (
+    request.actionClass !== 'route-work' ||
+    !grant.routingDestinations?.includes(request.project)
+  )) reasons.push('project is outside the authorized routing scope');
   if (request.referent !== grant.referent) reasons.push('authorization referent changed');
   if (grant.status === 'revoked') reasons.push('authorization grant was revoked');
   if (grant.expiresOn && Date.parse(grant.expiresOn) <= now.getTime()) reasons.push('authorization grant expired');
