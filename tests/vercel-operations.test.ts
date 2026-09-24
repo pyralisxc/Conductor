@@ -81,6 +81,13 @@ test('variable values stay out of audit, receipts and durable idempotency state'
   assert.equal(removed.verifiedRemoved, true);
 });
 
+test('runtime log preflight does not claim endpoint permission from project read', async () => {
+  const { provider, project } = fixture();
+  const preflight = (await provider.preflightOperation(project, 'deployment.runtime-logs'))?.[0];
+  assert.equal(preflight?.status, 'degraded');
+  assert.match(preflight?.diagnostics[0]?.message ?? '', /runtime-log endpoint access is unverified/u);
+});
+
 test('runtime logs stay bound and redact secrets', async () => {
   const { provider, project } = fixture();
   const logs = await provider.getRuntimeLogs({ project, deploymentId: 'dpl_preview', limit: 10 });
