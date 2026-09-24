@@ -15,7 +15,9 @@ The current foundation includes:
 - bounded branch/commit/PR operations with idempotent receipts;
 - exact-SHA Preview integration and explicit Main promotion;
 - read-only Development Intelligence preflight;
+- active-repository work scope with bounded cross-repository issue routing and maintenance;
 - GitHub Issue-backed work items with normalized status, kind, and origin;
+- connected Vercel discovery/audit, exact deployment operations, and write-only environment-variable mutation;
 - hosted MCP/OAuth access.
 
 This foundation should remain useful without scheduling, autonomous task selection, or a separate control-plane database.
