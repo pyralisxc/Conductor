@@ -18,6 +18,10 @@ Conductor mints installation tokens per repository instead of distributing the A
 
 Repository reach, operation permission, Development OS authorization, and consequential approval are separate checks. Passing one never implies the others.
 
+Durable issue routing uses the distinct `route-work` action class. Development OS grants retain the active referent and can name exact routing destinations without authorizing code changes. Revocation, expiry, exclusions, and referent changes block this semantic decision. Provider access and visibility of the destination still need separate verification.
+
+The MCP server independently enforces an owner-managed repository scope for each OAuth client on every mutation. The single configured primary repository is the default. The owner may temporarily replace the primary repository and list additional exact repositories for `work-item.create` routing or code/development writes separately at `/work-scope`, using the fingerprint reported by `work-scope.identity`. Temporary scopes expire within 24 hours and can be revoked immediately; expiration returns to the default primary repository. The server resolves repository aliases before checking scope and fails closed on storage errors. A chat instruction alone cannot expand server permissions. This server grant proves owner permission to reach a repository, while Development OS still governs present task intent. Do not send sensitive findings to a destination with broader visibility.
+
 ## Secrets
 
 Separate Preview credentials, Production credentials, GitHub App credentials, model/API credentials, and local hardware credentials.

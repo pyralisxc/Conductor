@@ -2,6 +2,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import * as z from 'zod/v4';
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
 import { CONDUCTOR_WRITE_SCOPE } from './auth.js';
+import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import type { ProjectReference } from '../runtime/types.js';
+import type { WorkAction, WorkScopeAuthorizer } from './work-scope.js';
+import { clientFingerprint } from './work-scope.js';
 
 const diagnosticSchema = z.object({
   level: z.enum(['info', 'warning', 'error']),
@@ -165,13 +169,31 @@ const readReceiptSchema = z.object({ receipt: z.union([
   failedReceiptSchema,
 ]) });
 
-export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServer {
+export function createConductorMcpServer(runtime: ConductorToolRuntime, workScope?: WorkScopeAuthorizer): McpServer {
+  async function requireScopedWrite(auth: AuthInfo | undefined, action: WorkAction, project: ProjectReference): Promise<void> {
+    requireWriteScope(auth?.scopes);
+    if (!workScope) throw new Error('Owner-managed work scope is not configured');
+    await workScope.assertAllowed(auth, action, runtime.resolveProjectReference(project));
+  }
   const server = new McpServer(
     { name: 'conductor', version: '0.1.0' },
     {
       instructions: 'Call capabilities first in a fresh conversation. Use preflight_project for repository-development session readiness and preflight_operation before one exact operation. Treat unavailable or blocked checks as hard evidence; do not infer hidden access or project meaning.',
     },
   );
+
+  if (workScope) server.registerTool('work-scope.identity', {
+    title: 'Identify this connected client for owner scope management',
+    description: 'Return this OAuth client fingerprint and current repository work scope. Share the fingerprint with the owner to set a temporary wider scope in the Conductor owner page.',
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: { securitySchemes: oauthSecurity },
+  }, async (_input, extra) => {
+    const clientId = extra.authInfo?.clientId;
+    if (!clientId) throw new Error('Authenticated client identity is required');
+    const scope = await workScope.describe(clientId);
+    return { content: [{ type: 'text', text: JSON.stringify(scope) }] };
+  });
 
   server.registerTool('capabilities', {
     title: 'Report Conductor capabilities',
@@ -220,7 +242,20 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
         openWorldHint: false,
       },
       _meta: { securitySchemes: oauthSecurity },
-    }, async (input) => result(await runtime.preflightOperation(input)));
+    }, async (input, extra) => {
+      const receipt = await runtime.preflightOperation(input);
+      const action = writeAction(input.operation);
+      if (receipt.status === 'succeeded' && action) {
+        try {
+          await requireScopedWrite(extra.authInfo, action, input.project);
+          receipt.result.checks.push({ provider: 'work-scope', status: 'ready', summary: 'Owner-managed repository scope permits this operation', diagnostics: [] });
+        } catch {
+          receipt.result.status = 'blocked';
+          receipt.result.checks.push({ provider: 'work-scope', status: 'blocked', summary: 'Owner-managed repository scope does not permit this operation', diagnostics: [{ level: 'warning', source: 'work-scope', code: 'PERMISSION_DENIED', message: 'Ask the owner to set the exact work scope.' }] });
+        }
+      }
+      return result(receipt);
+    });
   }
 
   if (runtime.developmentStatusReadEnabled) {
@@ -333,7 +368,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'develop', input.project);
       return result(await runtime.createBranch(input));
     });
 
@@ -352,7 +387,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'develop', input.project);
       return result(await runtime.createCommit(input));
     });
 
@@ -372,7 +407,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'develop', input.project);
       return result(await runtime.createPullRequest(input));
     });
 
@@ -389,7 +424,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'develop', input.project);
       return result(await runtime.commentPullRequest(input));
     });
 
@@ -408,7 +443,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'develop', input.project);
       return result(await runtime.updatePullRequestLabels(input));
     });
 
@@ -427,7 +462,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'develop', input.project);
       return result(await runtime.mergeIntegrationPullRequest(input));
     });
 
@@ -445,7 +480,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'develop', input.project);
       return result(await runtime.reconcilePreviewPullRequest(input));
     });
 
@@ -465,7 +500,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'develop', input.project);
       return result(await runtime.promotePullRequest(input));
     });
   }
@@ -474,7 +509,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
   if (runtime.workItemMutationsEnabled) {
     server.registerTool('work-item.create', {
       title: 'Create a durable work item',
-      description: 'Create one durable work item in the owning project. GitHub Issues are the initial backing store; no scheduling or autonomous assignment occurs. Bodies may start sparse; when known prefer Problem, Desired outcome, Evidence, Constraints, and Acceptance sections.',
+      description: 'Create one durable work item in the owning project. Requires owner-managed route-work scope for this exact repository. GitHub Issues are the initial backing store; no scheduling or autonomous assignment occurs. Bodies may start sparse; when known prefer Problem, Desired outcome, Evidence, Constraints, and Acceptance sections.',
       inputSchema: z.object({
         project: projectSchema,
         title: z.string().min(1).max(256),
@@ -489,7 +524,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'route-work', input.project);
       return result(await runtime.createWorkItem(input));
     });
 
@@ -509,7 +544,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'develop', input.project);
       return result(await runtime.updateWorkItemClassification(input));
     });
 
@@ -526,7 +561,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime): McpServ
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
+      await requireScopedWrite(extra.authInfo, 'develop', input.project);
       return result(await runtime.updateWorkItemStatus(input));
     });
   }
@@ -538,6 +573,13 @@ function requireWriteScope(scopes?: string[]): void {
   if (!scopes?.includes(CONDUCTOR_WRITE_SCOPE)) {
     throw new Error('This operation requires the conductor.write OAuth scope');
   }
+}
+
+function writeAction(operation: string): WorkAction | undefined {
+  if (operation === 'work-item.create') return 'route-work';
+  if (operation === 'pull-request.status' || operation === 'work-item.status' || operation === 'work-item.list') return undefined;
+  if (operation.startsWith('git.') || operation.startsWith('pull-request.') || operation.startsWith('work-item.')) return 'develop';
+  return undefined;
 }
 
 function result(receipt: object) {
