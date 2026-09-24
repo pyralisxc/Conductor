@@ -35,7 +35,7 @@ const runtimeOperationSchema = z.enum([
   'git.branch.create', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
-  'work-item.create', 'work-item.update-status', 'work-item.classification.update',
+  'work-item.create', 'work-item.comment.create', 'work-item.update-status', 'work-item.classification.update',
   'deployment.redeploy', 'deployment.git.create', 'deployment.promote', 'deployment.rollback',
   'deployment.env.upsert', 'deployment.env.update', 'deployment.env.remove',
 ]);
@@ -187,7 +187,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
   const server = new McpServer(
     { name: 'conductor', version: '0.1.0' },
     {
-      instructions: 'Call capabilities first in a fresh conversation. Establish the active repository from the user or workspace, then call work-scope.begin once and reuse its workContext for code and deployment writes; issue routing to another repository does not change the active repository. Use preflight_project for readiness and preflight_operation with workContext before one exact write. Treat unavailable or blocked checks as hard evidence; do not infer hidden access or project meaning.',
+      instructions: 'Call capabilities first in a fresh conversation. Establish the active repository from the user or workspace, then call work-scope.begin once and reuse its workContext for code and deployment writes; issue routing and maintenance in another repository do not change the active repository. Search for an existing issue before creating another; comment there when it owns the new evidence, and link a confirmed duplicate before closing it. Use preflight_project for readiness and preflight_operation with workContext for code/deployment writes or without it for issue routing. Treat unavailable or blocked checks as hard evidence; do not infer hidden access or project meaning.',
     },
   );
 
@@ -595,12 +595,28 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       return result(await runtime.createWorkItem(input));
     });
 
-    server.registerTool('work-item.classification.update', {
-      title: 'Classify a work item',
-      description: 'Update normalized work kind and/or origin. Use unknown to clear a classification; unrelated labels and lifecycle status are preserved.',
+    server.registerTool('work-item.comment.create', {
+      title: 'Add evidence to an existing issue',
+      description: 'Add one idempotent comment to an existing issue in an exact provider-accessible repository. Search for an existing issue before creating another; add new evidence to the canonical issue and link any confirmed duplicate before closing it. Destination ownership, visibility, and routing authorization still apply. This does not grant code-work authority.',
       inputSchema: z.object({
         project: projectSchema,
-        workContext: workContextSchema,
+        issueNumber: z.number().int().positive(),
+        body: z.string().trim().min(1).max(100000),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      await requireScopedWrite(extra.authInfo, 'route-work', input.project);
+      return result(await runtime.commentWorkItem(input));
+    });
+
+    server.registerTool('work-item.classification.update', {
+      title: 'Classify a work item',
+      description: 'Update normalized work kind and/or origin on an exact routed issue. Use unknown to clear a classification; unrelated labels and lifecycle status are preserved. Cross-repository issue maintenance does not grant code-work authority.',
+      inputSchema: z.object({
+        project: projectSchema,
         issueNumber: z.number().int().positive(),
         kind: workItemKindSchema.optional(),
         origin: workItemOriginSchema.optional(),
@@ -612,16 +628,15 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
-      return result(await runtime.updateWorkItemClassification(withoutWorkContext(input)));
+      await requireScopedWrite(extra.authInfo, 'route-work', input.project);
+      return result(await runtime.updateWorkItemClassification(input));
     });
 
     server.registerTool('work-item.update-status', {
       title: 'Update work item status',
-      description: 'Move one durable work item to an explicit normalized status. done closes the backing issue; any active status reopens it.',
+      description: 'Move one exact routed issue to an explicit normalized status. done closes the backing issue; active statuses reopen it. For a duplicate, link the canonical issue in a comment first. Cross-repository issue maintenance does not grant code-work authority.',
       inputSchema: z.object({
         project: projectSchema,
-        workContext: workContextSchema,
         issueNumber: z.number().int().positive(),
         status: workItemWriteStatusSchema,
         idempotencyKey: z.string().min(8).max(200),
@@ -630,8 +645,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
-      return result(await runtime.updateWorkItemStatus(withoutWorkContext(input)));
+      await requireScopedWrite(extra.authInfo, 'route-work', input.project);
+      return result(await runtime.updateWorkItemStatus(input));
     });
   }
 
@@ -645,10 +660,10 @@ function requireWriteScope(scopes?: string[]): void {
 }
 
 function writeAction(operation: string): WorkAction | undefined {
-  if (operation === 'work-item.create') return 'route-work';
-  if (operation === 'pull-request.status' || operation === 'work-item.status' || operation === 'work-item.list') return undefined;
+  if (operation.startsWith('work-item.')) return ['work-item.status', 'work-item.list'].includes(operation) ? undefined : 'route-work';
+  if (operation === 'pull-request.status') return undefined;
   if (operation.startsWith('deployment.') && !['deployment.status','deployment.logs','deployment.audit','deployment.runtime-logs','deployment.env.list'].includes(operation)) return 'develop';
-  if (operation.startsWith('git.') || operation.startsWith('pull-request.') || operation.startsWith('work-item.')) return 'develop';
+  if (operation.startsWith('git.') || operation.startsWith('pull-request.')) return 'develop';
   return undefined;
 }
 

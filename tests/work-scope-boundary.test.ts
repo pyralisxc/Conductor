@@ -11,6 +11,9 @@ process.env.CONDUCTOR_SESSION_SECRET = 'test-work-context-secret-long-enough-for
 
 test('MCP refuses cross-repository branch writes before the provider executes', async () => {
   let providerCalls = 0;
+  let routedComments = 0;
+  let routedStatuses = 0;
+  let routedClassifications = 0;
   const grants = new Map<string, WorkScopeGrant>();
   const store: WorkScopeStore = {
     async get(id) { return grants.get(id) ?? null; },
@@ -18,6 +21,25 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
     async delete(id) { grants.delete(id); },
   };
   const runtime = new ConductorToolRuntime({
+    workItemProvider: {
+      id: 'github-issues',
+      async getCapabilities() { return []; },
+      async getWorkItemStatus() { throw new Error('unused'); },
+      async listWorkItems() { throw new Error('unused'); },
+      async createWorkItem() { throw new Error('unused'); },
+      async commentWorkItem(input) {
+        routedComments++;
+        return { repository: input.project.repository!, issueNumber: input.issueNumber, commentId: '3', url: 'https://github.com/pyralisxc/Other/issues/7#issuecomment-3' };
+      },
+      async updateWorkItemStatus(input) {
+        routedStatuses++;
+        return { ...workItem(input.project.repository!), status: input.status, state: input.status === 'done' ? 'closed' as const : 'open' as const };
+      },
+      async updateWorkItemClassification(input) {
+        routedClassifications++;
+        return { ...workItem(input.project.repository!), kind: input.kind ?? 'unknown', origin: input.origin ?? 'unknown' };
+      },
+    },
     sourceControlMutationProvider: {
       id: 'github',
       async getCapabilities() { return []; },
@@ -56,6 +78,17 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
     assert.equal(blocked.isError, true);
     assert.equal(providerCalls, 0);
 
+    const destination = { id: 'Other', repository: 'pyralisxc/Other' };
+    const commentInput = { project: destination, issueNumber: 7, body: 'Additional evidence for the existing issue.', idempotencyKey: 'route-existing-evidence' };
+    assert.notEqual((await client.callTool({ name: 'work-item.comment.create', arguments: commentInput })).isError, true);
+    assert.notEqual((await client.callTool({ name: 'work-item.comment.create', arguments: commentInput })).isError, true);
+    assert.equal(routedComments, 1);
+    assert.notEqual((await client.callTool({ name: 'work-item.classification.update', arguments: { project: destination, issueNumber: 7, kind: 'bug', idempotencyKey: 'route-classify-existing' } })).isError, true);
+    assert.notEqual((await client.callTool({ name: 'work-item.update-status', arguments: { project: destination, issueNumber: 7, status: 'done', idempotencyKey: 'route-close-duplicate' } })).isError, true);
+    assert.equal(routedClassifications, 1);
+    assert.equal(routedStatuses, 1);
+    assert.equal(providerCalls, 0);
+
     await store.set(clientFingerprint('test-client'), parseWorkScopeGrant({
       primaryRepository: 'pyralisxc/Conductor',
       developRepositories: [], expiresAt: Date.now() + 60_000,
@@ -77,3 +110,14 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
     await once(server, 'close');
   }
 });
+
+function workItem(repository: string) {
+  return {
+    repository, issueNumber: 7, url: `https://github.com/${repository}/issues/7`,
+    title: 'Existing issue', body: 'Original description', state: 'open' as const,
+    status: 'ready' as const, statusSource: 'label' as const,
+    kind: 'unknown' as const, kindSource: 'default' as const,
+    origin: 'unknown' as const, originSource: 'default' as const,
+    labels: [], createdAt: '2026-09-24T00:00:00Z', updatedAt: '2026-09-24T00:00:00Z',
+  };
+}

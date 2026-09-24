@@ -20,6 +20,7 @@ import type {
   WorkItemRecord,
   WorkItemList,
   CreateWorkItemInput,
+  CommentWorkItemInput,
   UpdateWorkItemStatusInput,
   UpdateWorkItemClassificationInput,
   GetDeploymentStatusInput,
@@ -64,6 +65,7 @@ export interface WorkItemCandidateReadProvider extends WorkItemReadProvider {
 
 export interface WorkItemMutationProvider extends WorkItemReadProvider {
   createWorkItem(input: CreateWorkItemInput): Promise<WorkItemRecord>;
+  commentWorkItem(input: CommentWorkItemInput): Promise<{ repository: string; issueNumber: number; commentId: string; url: string }>;
   updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItemRecord>;
   updateWorkItemClassification(input: UpdateWorkItemClassificationInput): Promise<WorkItemRecord>;
 }

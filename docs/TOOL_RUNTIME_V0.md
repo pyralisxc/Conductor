@@ -29,9 +29,10 @@ When explicitly enabled with durable Redis idempotency state, the current source
 - `pull-request.merge.reconcile-preview` merges only an exact repository-default-branch candidate into `preview` or `vercel-preview`, always using a merge commit for exceptional Main-only content changes.
 - `pull-request.merge.promote` merges only an exact `preview`/`vercel-preview` head/base candidate into the repository default branch with a merge commit and requires a non-empty owner approval reference. Normal promotion preserves Preview ancestry without a return PR.
 - `work-item.create` creates durable issue-backed work with optional normalized status, kind, and origin.
-- `work-scope.identity` identifies the connected OAuth client and owner-granted exceptions for the work-scope page. `work-scope.begin` declares a conversation's active exact owner/repository and returns a 12-hour, client-bound `workContext`. Supply it on code and deployment mutations and on their `preflight_operation` checks. Issue creation routes separately without a work context. The declaration is agent supplied; the server does not verify the chat's workspace.
-- `work-item.update-status` changes only lifecycle status; `done` closes the backing issue and active statuses reopen it.
-- `work-item.classification.update` changes kind and/or origin without changing lifecycle status. `unknown` clears that classification.
+- `work-item.comment.create` adds idempotent evidence or a consolidation link to an existing issue. It refuses pull requests.
+- `work-scope.identity` identifies the connected OAuth client and owner-granted exceptions for the work-scope page. `work-scope.begin` declares a conversation's active exact owner/repository and returns a 12-hour, client-bound `workContext`. Supply it on code and deployment mutations and on their `preflight_operation` checks. Issue creation and maintenance route separately without a work context. The declaration is agent supplied; the server does not verify the chat's workspace.
+- `work-item.update-status` changes only lifecycle status; `done` closes the backing issue and active statuses reopen it. Link a confirmed duplicate to its canonical issue before closing it.
+- `work-item.classification.update` changes kind and/or origin without changing lifecycle status. `unknown` clears that classification. Issue maintenance uses `route-work`, including for an exact issue in another repository.
 
 The initial work-item vocabulary is deliberately small:
 
