@@ -19,7 +19,7 @@ function fixture() {
       if (url.pathname === '/v13/deployments/dpl_old') return Response.json({ id: 'dpl_old', projectId: 'prj_app', readyState: 'READY', target: 'production' });
       if (url.pathname === '/v13/deployments/dpl_other') return Response.json({ id: 'dpl_other', projectId: 'prj_other', readyState: 'READY' });
       if (url.pathname === '/v13/deployments/dpl_preview') return Response.json({ id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: 'preview' });
-      if (url.pathname === '/v13/deployments/dpl_prod_old') return Response.json({ id: 'dpl_prod_old', projectId: 'prj_app', readyState: 'READY', target: 'production' });
+      if (url.pathname === '/v13/deployments/dpl_prodold') return Response.json({ id: 'dpl_prodold', projectId: 'prj_app', readyState: 'READY', target: 'production' });
       if (url.pathname === '/v13/deployments/dpl_building') return Response.json({ id: 'dpl_building', projectId: 'prj_app', readyState: 'BUILDING', target: null });
       if (url.pathname === '/v13/deployments' && method === 'POST') {
         if (body?.gitSource && body.target === 'preview') return Response.json({ error: { message: 'Invalid target' } }, { status: 400 });
@@ -75,7 +75,7 @@ test('deployment cleanup protects current production and active builds', async (
     },
   );
   await assert.rejects(
-    provider.deleteDeployment({ project, deploymentId: 'dpl_prod_old', idempotencyKey: 'delete-historical-production' }),
+    provider.deleteDeployment({ project, deploymentId: 'dpl_prodold', idempotencyKey: 'delete-historical-production' }),
     (error: unknown) => {
       assert.match((error as { message?: string }).message ?? JSON.stringify(error), /approval/u);
       return true;
@@ -88,7 +88,7 @@ test('deployment cleanup protects current production and active builds', async (
 
   const historical = await provider.deleteDeployment({
     project,
-    deploymentId: 'dpl_prod_old',
+    deploymentId: 'dpl_prodold',
     approvalReference: 'owner-approved:delete-historical-production',
     idempotencyKey: 'delete-historical-production-approved',
   });
