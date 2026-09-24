@@ -274,7 +274,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
           receipt.result.checks.push({ provider: 'work-scope', status: 'ready', summary: 'Owner-managed repository scope permits this operation', diagnostics: [] });
         } catch {
           receipt.result.status = 'blocked';
-          receipt.result.checks.push({ provider: 'work-scope', status: 'blocked', summary: 'Owner-managed repository scope does not permit this operation', diagnostics: [{ level: 'warning', source: 'work-scope', code: 'PERMISSION_DENIED', message: 'Ask the owner to set the exact work scope.' }] });
+          receipt.result.checks.push({ provider: 'work-scope', status: 'blocked', summary: 'Active repository context or owner exception does not permit this operation', diagnostics: [{ level: 'warning', source: 'work-scope', code: 'PERMISSION_DENIED', message: 'Begin work-scope.begin for the active repository, or ask the owner to grant an exact additional repository.' }] });
         }
       }
       return result(receipt);

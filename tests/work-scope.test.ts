@@ -16,7 +16,7 @@ function fixture() {
   return { grants, store, authorizer, auth };
 }
 
-test('the default client may route issues broadly but work only in its primary repository', async () => {
+test('a declared repository permits its code work while issue routing remains broad', async () => {
   const { authorizer, auth } = fixture();
   const { workContext } = authorizer.begin(auth.clientId, 'pyralisxc/Conductor');
   await authorizer.assertAllowed(auth, 'develop', { id: 'conductor', repository: 'pyralisxc/Conductor' }, workContext);

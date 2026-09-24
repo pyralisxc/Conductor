@@ -43,7 +43,7 @@ function contextRepository(token: string, clientId: string): string {
   let value: WorkContext;
   try { value = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as WorkContext; }
   catch { throw new Error('Invalid work context'); }
-  if (value.v !== 1 || value.clientFingerprint !== clientFingerprint(clientId)
+  if (!value || value.v !== 1 || value.clientFingerprint !== clientFingerprint(clientId)
     || typeof value.id !== 'string' || !Number.isSafeInteger(value.expiresAt)
     || value.expiresAt <= Date.now() || value.expiresAt > Date.now() + WORK_CONTEXT_TTL_MS) {
     throw new Error('Expired or mismatched work context');
