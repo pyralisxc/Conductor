@@ -52,7 +52,7 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
     assert.equal(providerCalls, 0);
 
     await store.set(clientFingerprint('test-client'), parseWorkScopeGrant({
-      primaryRepository: 'pyralisxc/Conductor', routeRepositories: ['pyralisxc/Other'],
+      primaryRepository: 'pyralisxc/Conductor',
       developRepositories: [], expiresAt: Date.now() + 60_000,
     }));
     const routeOnly = await client.callTool({ name: 'git.branch.create', arguments: input });
@@ -60,7 +60,7 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
     assert.equal(providerCalls, 0);
 
     await store.set(clientFingerprint('test-client'), parseWorkScopeGrant({
-      primaryRepository: 'pyralisxc/Conductor', routeRepositories: [],
+      primaryRepository: 'pyralisxc/Conductor',
       developRepositories: ['pyralisxc/Other'], expiresAt: Date.now() + 60_000,
     }));
     const allowed = await client.callTool({ name: 'git.branch.create', arguments: input });

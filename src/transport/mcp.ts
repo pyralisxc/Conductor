@@ -184,7 +184,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
   if (workScope) server.registerTool('work-scope.identity', {
     title: 'Identify this connected client for owner scope management',
-    description: 'Return this OAuth client fingerprint and current repository work scope. Share the fingerprint with the owner to set a temporary wider scope in the Conductor owner page.',
+    description: 'Return this OAuth client fingerprint and current code-work scope. Issue routing also depends on provider access and the active session authorization. Share the fingerprint with the owner to set a temporary wider scope in the Conductor owner page.',
     inputSchema: z.object({}),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: { securitySchemes: oauthSecurity },
@@ -509,7 +509,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
   if (runtime.workItemMutationsEnabled) {
     server.registerTool('work-item.create', {
       title: 'Create a durable work item',
-      description: 'Create one durable work item in the owning project. Requires owner-managed route-work scope for this exact repository. GitHub Issues are the initial backing store; no scheduling or autonomous assignment occurs. Bodies may start sparse; when known prefer Problem, Desired outcome, Evidence, Constraints, and Acceptance sections.',
+      description: 'Create one durable work item in the owning project. Issue routing can reach any provider-accessible repository; this does not grant code-work authority. The agent must verify destination ownership, visibility, and current routing authorization. GitHub Issues are the initial backing store; no scheduling or autonomous assignment occurs. Bodies may start sparse; when known prefer Problem, Desired outcome, Evidence, Constraints, and Acceptance sections.',
       inputSchema: z.object({
         project: projectSchema,
         title: z.string().min(1).max(256),
