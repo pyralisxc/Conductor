@@ -29,7 +29,8 @@ This document tests the **current bounded runtime**. Future automation experimen
 ## Current runtime — bounded development
 
 17. A work branch starts from an exact Preview SHA.
-18. A bounded commit advances only the expected work-branch head.
+18. Automatic Vercel Git builds are ignored for ordinary work/repair/audit branches; GitHub verification remains the work-branch gate, while exact ad-hoc Vercel canaries are explicitly requested.
+19. A bounded commit advances only the expected work-branch head.
 19. A pull request may target the project's explicit integration branch.
 20. PR status reports exact head/base identity plus checks and workflow runs.
 21. Pending checks/workflows summarize as `external-gate-pending` with no agent action required.
