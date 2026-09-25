@@ -77,6 +77,9 @@ Reconstructable and normally **not** stored as another authority:
 - Work status never substitutes for Development OS stage.
 - Creating, classifying, or selecting work does not authorize execution.
 - Provider capability never substitutes for authorization.
+- One durable work item owns the change identity across work branch, Preview integration, Preview proof, and Main promotion. Provider PR numbers are subordinate transport evidence, not new work items.
+- Ordinary `work/*` branches integrate through `preview` or `vercel-preview`; a separate Preview-to-default PR may carry the same canonical issue reference(s) when provider mechanics require it.
+- Green work-branch CI proves the exact head is integration-ready; it is not Preview deployment/proof. `integration-ready` and `promotion-ready` are intentionally distinct orchestration states.
 - `preview` is an integrated candidate, not production acceptance.
 - Normal accepted promotion merges Preview into Main with a merge commit, preserving Preview ancestry without a return PR. Main-only content changes require the bounded exact-SHA reconciliation lane before ordinary Preview work resumes.
 - Main promotion approval is bound to an exact candidate SHA.

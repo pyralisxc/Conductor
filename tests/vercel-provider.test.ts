@@ -7,8 +7,10 @@ import {
   VercelDeploymentProvider,
   createConductorMcpServer,
   mergeVercelBindings,
+  mergeVercelRuntimeLogBindings,
   parseRuntimeBindings,
   parseVercelBindingOverlay,
+  parseVercelRuntimeLogBindingOverlay,
 } from '../src/index.js';
 
 const oldSha = 'a'.repeat(40);
@@ -278,4 +280,16 @@ test('additive Vercel binding preserves existing routing and rejects conflicting
   assert.throws(() => mergeVercelBindings(base, [{ ...overlay[0]!, id: 'other-alias' }]), /already bound/u);
   assert.throws(() => parseVercelBindingOverlay('[{"id":"DI","repository":"pyralisxc/DI","vercelProject":"di","vercelConnectionId":"icfg_A"}]'), /exact project ID/u);
   assert.throws(() => parseVercelBindingOverlay('[{"id":"DI","repository":"pyralisxc/DI","vercelProject":"prj_DI123","vercelConnectionId":"icfg_A","githubWrite":true}]'), /unsupported field/u);
+});
+
+
+test('runtime-log overlay augments one exact Vercel binding without replacing installation auth', () => {
+  const base = parseVercelBindingOverlay('[{"id":"Development-Intelligence","repository":"pyralisxc/Development-Intelligence","vercelProject":"prj_DI123","vercelConnectionId":"icfg_A","vercelTeamId":"team_A"}]');
+  const overlay = parseVercelRuntimeLogBindingOverlay('[{"id":"Development-Intelligence","repository":"pyralisxc/Development-Intelligence","vercelProject":"prj_DI123","vercelTeamId":"team_A"}]');
+  const merged = mergeVercelRuntimeLogBindings(base, overlay);
+  assert.equal(merged[0]?.vercelConnectionId, 'icfg_A');
+  assert.equal(merged[0]?.vercelRuntimeLogsDirect, true);
+  assert.throws(() => mergeVercelRuntimeLogBindings(base, parseVercelRuntimeLogBindingOverlay('[{"id":"other","repository":"pyralisxc/Development-Intelligence","vercelProject":"prj_DI123","vercelTeamId":"team_A"}]')), /existing exact Vercel binding/u);
+  assert.throws(() => mergeVercelRuntimeLogBindings(base, parseVercelRuntimeLogBindingOverlay('[{"id":"Development-Intelligence","repository":"pyralisxc/Development-Intelligence","vercelProject":"prj_OTHER","vercelTeamId":"team_A"}]')), /conflicts/u);
+  assert.throws(() => parseVercelRuntimeLogBindingOverlay('[{"id":"Development-Intelligence","repository":"pyralisxc/Development-Intelligence","vercelProject":"prj_DI123","token":"secret"}]'), /unsupported field/u);
 });

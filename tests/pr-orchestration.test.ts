@@ -22,6 +22,8 @@ function providerFor(input: {
     conclusion: string | null;
   }>;
   mergeable?: boolean | null;
+  headRef?: string;
+  baseRef?: string;
 }) {
   const headSha = input.headSha ?? oldHead;
   return new GitHubRuntimeProvider({
@@ -53,8 +55,8 @@ function providerFor(input: {
           merged: false,
           mergeable: input.mergeable ?? true,
           mergeable_state: 'clean',
-          head: { ref: 'work/di-orchestration', sha: headSha },
-          base: { ref: 'preview', sha: baseSha },
+          head: { ref: input.headRef ?? 'work/di-orchestration', sha: headSha },
+          base: { ref: input.baseRef ?? 'preview', sha: baseSha },
           labels: (input.labels ?? []).map((name) => ({ name })),
         });
       }
@@ -87,7 +89,7 @@ async function status(
     orchestrationState?: 'merged' | 'draft' | 'external-gate-pending'
       | 'pre-seal-checkpoint' | 'sealed-head-verification-required'
       | 'action-required' | 'verification-failed' | 'merge-blocked'
-      | 'promotion-ready';
+      | 'integration-ready' | 'promotion-ready';
   },
 ) {
   return await provider.getPullRequestStatus({
@@ -205,7 +207,7 @@ test('real source verification failure remains actionable even during seal-b', a
   ]);
 });
 
-test('settled sealed head reports technical promotion readiness without inferring approval', async () => {
+test('settled work head reports integration readiness without calling CI Preview proof', async () => {
   const provider = providerFor({
     headSha: newHead,
     labels: ['seal-b'],
@@ -224,11 +226,36 @@ test('settled sealed head reports technical promotion readiness without inferrin
     orchestrationState: 'sealed-head-verification-required',
   });
 
-  assert.equal(result.orchestration.state, 'promotion-ready');
-  assert.equal(result.orchestration.action, 'promotion-gate');
+  assert.equal(result.orchestration.state, 'integration-ready');
+  assert.equal(result.orchestration.action, 'integration-merge');
   assert.equal(result.orchestration.shouldAct, true);
   assert.equal(result.orchestration.transition.headChanged, true);
   assert.equal(result.orchestration.transition.meaningful, true);
   assert.equal(result.orchestration.seal.exactHeadVerificationRequired, false);
-  assert.match(result.orchestration.summary, /authorization gate/);
+  assert.match(result.orchestration.summary, /not Preview deployment\/proof/);
+});
+
+test('unrelated successful provider checks do not manufacture verification readiness', async () => {
+  const provider = providerFor({
+    checks: [{ id: 8, name: 'Vercel Preview Comments', status: 'completed', conclusion: 'success' }],
+  });
+  const result = await status(provider);
+  assert.equal(result.orchestration.state, 'external-gate-pending');
+  assert.equal(result.orchestration.action, 'wait');
+  assert.equal(result.orchestration.shouldAct, false);
+  assert.match(result.orchestration.summary, /No recognized verification result/);
+});
+
+test('verified Preview head is promotion-ready while preserving the owner gate', async () => {
+  const provider = providerFor({
+    headRef: 'preview',
+    baseRef: 'main',
+    checks: [{ id: 1, name: 'verify', status: 'completed', conclusion: 'success' }],
+    workflowRuns: [{ id: 9, name: 'verify', status: 'completed', conclusion: 'success' }],
+  });
+  const result = await status(provider);
+  assert.equal(result.orchestration.state, 'promotion-ready');
+  assert.equal(result.orchestration.action, 'promotion-gate');
+  assert.equal(result.orchestration.shouldAct, true);
+  assert.match(result.orchestration.summary, /Main promotion\/authorization gate/);
 });
