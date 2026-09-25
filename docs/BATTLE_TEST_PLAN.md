@@ -49,7 +49,7 @@ This document tests the **current bounded runtime**. Future automation experimen
 32. `deployment.status` distinguishes currently served production from newer attempts and carries provider deployment identity plus source Git revision/ref where available.
 33. `deployment.logs` returns bounded/redacted build or deployment-event evidence for one exact deployment.
 34. `deployment.audit` returns bounded project/team identity, Git linkage, domains/aliases, custom environments, recent deployments, variable metadata, and only the account posture exposed by supported APIs.
-35. `deployment.runtime-logs` proves endpoint access with one exact deployment. Permission denial remains explicit and operation preflight stays degraded rather than claiming readiness.
+35. `deployment.runtime-logs` treats the Vercel Integration API installation-token boundary as explicit provider truth: connected-installation preflight reports unavailable without probing the runtime-log endpoint. If an explicit direct Vercel access-token binding is configured, preflight remains degraded until one exact deployment read proves endpoint access.
 36. `deployment.redeploy` acts only on one exact bound deployment and idempotent replay does not create a second redeployment.
 37. `deployment.git.create` requires an exact linked repository, ref, and full SHA. Preview creation omits a literal `target: "preview"`; production creation requires exact owner approval.
 38. `deployment.promote` and `deployment.rollback` require one exact READY bound deployment, exact owner approval, and provider read-after-write reconciliation.
