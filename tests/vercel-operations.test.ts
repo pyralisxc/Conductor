@@ -294,7 +294,7 @@ test('VCR create is durably idempotent through the runtime', async () => {
   assert.equal(replay.status, 'succeeded');
   if (first.status === 'succeeded' && replay.status === 'succeeded') {
     assert.equal((first.result as Record<string, unknown>).verified, true);
-    assert.equal(replay.idempotency.replayed, true);
+    assert.equal(replay.idempotency?.replayed, true);
   }
   assert.equal(calls.filter(call => call.path === '/v1/vcr/repository' && call.method === 'POST').length, 1);
 });
