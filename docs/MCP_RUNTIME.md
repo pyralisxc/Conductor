@@ -91,7 +91,7 @@ Deploy behind HTTPS or build the included container. Confirm `/health`, both dis
 ## Deliberate limits
 
 - No anonymous or static shared-secret mode.
-- No arbitrary shell, generic provider dispatch, force-push, or repository-admin tool.
+- No arbitrary shell, generic provider dispatch, force-push, or repository-admin tool. Exact branch cleanup is limited to already-integrated `work/*`, `repair/*`, or `audit/*` heads with an unchanged expected SHA, no open pull request, active repository work scope, and durable idempotency; protected/accepted branches and bulk cleanup are refused.
 - Vercel writes are exact-project, idempotent, and gated; production traffic, production-variable changes, and historical-production deployment deletion require exact owner approval. Deployment cleanup is one exact terminal deployment at a time, never current production and never an active build. There is no bulk cleanup, delete-by-URL, alias mutation, or secret-value read tool.
 - Vercel Integration API installation tokens do not expose the runtime-log endpoint in the published integration scope map. Report that lane as unavailable for connected installations; only an explicit direct Vercel access-token binding may attempt it, and direct-token preflight is not permission proof until an exact read succeeds.
 - Merge is bounded to pull requests with exact head/base SHAs. Integration merge rejects `main`, `master`, and the repository default branch. Preview reconciliation accepts only repository-default-branch → `preview`/`vercel-preview` for Main-only changes. Default-branch promotion accepts only an exact `preview`/`vercel-preview` candidate, requires a caller-supplied owner approval reference, and uses a merge commit; the runtime does not infer approval.

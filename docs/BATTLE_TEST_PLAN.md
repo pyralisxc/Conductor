@@ -42,6 +42,13 @@ This document tests the **current bounded runtime**. Future automation experimen
 28. Integration merge rejects unapproved source branch classes.
 29. Duplicate mutation attempts replay the durable idempotent receipt instead of repeating the side effect.
 
+## Git branch cleanup boundary
+
+- `git.branch.delete` refuses Main/default, Preview, `vercel-preview`, release/accepted, and any branch outside `work/*`, `repair/*`, or `audit/*`.
+- It requires an exact expected head SHA, refuses a moved head and any branch still used by an open pull request, and proves that exact SHA is already contained in Preview or the repository default branch before deletion.
+- Replay with the same idempotency key produces no second provider deletion.
+- Live acceptance removes one already-integrated historical development branch and confirms Preview/Main remain unchanged.
+
 ## Current runtime — Vercel provider boundary
 
 30. A read-only request for an unbound repository may resolve exactly one Git-linked Vercel project through one unambiguous connected installation/team.

@@ -6,6 +6,7 @@ import type {
   ProjectReference,
   RuntimeOperationName,
   CreateBranchInput,
+  DeleteBranchInput,
   CreateCommitInput,
   CreatePullRequestInput,
   CommentPullRequestInput,
@@ -472,6 +473,72 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       body: JSON.stringify({ ref: `refs/heads/${input.branch}`, sha: input.fromSha }),
     }, credential);
     return { repository, branch: input.branch, commitSha: created.object.sha };
+  }
+
+  async deleteBranch(input: DeleteBranchInput): Promise<{ repository: string; branch: string; commitSha: string; deleted: true; containedIn: string }> {
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['git.branch.delete']);
+    assertCleanupBranch(input.branch);
+    assertSha(input.expectedHeadSha, 'expectedHeadSha');
+
+    const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+    const protectedBranches = new Set(
+      ['main', 'master', 'preview', 'vercel-preview', repositoryInfo.default_branch]
+        .filter((value): value is string => typeof value === 'string')
+        .map(value => value.toLowerCase()),
+    );
+    if (protectedBranches.has(input.branch.toLowerCase())) {
+      throw { code: 'PERMISSION_DENIED', message: `Branch cleanup cannot delete protected branch ${input.branch}` };
+    }
+
+    const owner = repository.split('/')[0]!;
+    const openPullRequests = await this.request<GitHubPullRequestResponse[]>(
+      repository,
+      `/pulls?state=open&head=${encodeURIComponent(`${owner}:${input.branch}`)}&per_page=1`,
+      {},
+      credential,
+    );
+    if (openPullRequests.length > 0) {
+      throw { code: 'CONFLICT', message: `Branch ${input.branch} is still the head of an open pull request` };
+    }
+
+    const integrationBases = [...new Set(
+      ['preview', 'vercel-preview', repositoryInfo.default_branch]
+        .filter((value): value is string => typeof value === 'string' && value.toLowerCase() !== input.branch.toLowerCase()),
+    )];
+    let containedIn: string | undefined;
+    for (const base of integrationBases) {
+      const response = await this.fetch(
+        `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(input.expectedHeadSha)}`,
+        { headers: this.headers(credential.token) },
+      );
+      if (response.status === 404) continue;
+      if (!response.ok) throw await githubResponseError(response);
+      const comparison = await response.json() as { status?: string };
+      if (comparison.status === 'behind' || comparison.status === 'identical') {
+        containedIn = base;
+        break;
+      }
+    }
+    if (!containedIn) {
+      throw { code: 'CONFLICT', message: `Branch ${input.branch} head ${input.expectedHeadSha} is not proven contained in Preview or the repository default branch` };
+    }
+
+    const ref = await this.request<{ object: { sha: string } }>(
+      repository,
+      `/git/ref/heads/${encodePath(input.branch)}`,
+      {},
+      credential,
+    );
+    if (ref.object.sha !== input.expectedHeadSha) {
+      throw { code: 'CONFLICT', message: `Branch head changed from expected ${input.expectedHeadSha} to ${ref.object.sha}` };
+    }
+
+    const response = await this.fetch(
+      `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/git/refs/heads/${encodePath(input.branch)}`,
+      { method: 'DELETE', headers: this.headers(credential.token) },
+    );
+    if (!response.ok) throw await githubResponseError(response);
+    return { repository, branch: input.branch, commitSha: input.expectedHeadSha, deleted: true, containedIn };
   }
 
   async createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }> {
@@ -1033,6 +1100,7 @@ type GitHubReadOperation =
 
 type GitHubWriteOperation =
   | 'git.branch.create'
+  | 'git.branch.delete'
   | 'git.commit.create'
   | 'pull-request.create'
   | 'pull-request.comment.create'
@@ -1069,6 +1137,7 @@ const GITHUB_WRITE_OPERATION_PERMISSIONS: Readonly<Record<
   Readonly<Record<string, 'write'>>
 >> = {
   'git.branch.create': { contents: 'write' },
+  'git.branch.delete': { contents: 'write' },
   'git.commit.create': { contents: 'write' },
   'pull-request.create': { pull_requests: 'write' },
   'pull-request.comment.create': { issues: 'write' },
@@ -1491,6 +1560,12 @@ function assertPromotionSourceBranch(branch: string): void {
 function assertWorkBranch(branch: string): void {
   if (!/^work\/[A-Za-z0-9._/-]+$/.test(branch) || branch.includes('..') || branch.endsWith('/')) {
     throw { code: 'PERMISSION_DENIED', message: 'Conductor mutations are limited to valid work/* branches' };
+  }
+}
+
+function assertCleanupBranch(branch: string): void {
+  if (!/^(?:work|repair|audit)\/[A-Za-z0-9._/-]+$/.test(branch) || branch.includes('..') || branch.endsWith('/')) {
+    throw { code: 'PERMISSION_DENIED', message: 'Branch cleanup is limited to valid work/*, repair/*, or audit/* branches' };
   }
 }
 
