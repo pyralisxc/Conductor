@@ -34,6 +34,7 @@ import {
   type GetDevelopmentStatusInput,
   type DevelopmentStatusProjection,
   type DevelopmentStatusWorkCounts,
+  type DevelopmentStatusWorkItem,
   type CreateBranchInput,
   type DeleteBranchInput,
   type CreateCommitInput,
@@ -414,13 +415,30 @@ export class ConductorToolRuntime {
         const active = listed.items.filter((item) =>
           ['ready', 'in-progress', 'blocked', 'review'].includes(item.status)
         );
-        const projected = await Promise.all(active.slice(0, limit).map(async (workItem) => ({
-          workItem,
-          candidates: await provider.listWorkItemPullRequests({
+        const projected = await Promise.all(active.slice(0, limit).map(async (workItem): Promise<DevelopmentStatusWorkItem> => {
+          const candidates = await provider.listWorkItemPullRequests({
             project: resolvedProject,
             issueNumber: workItem.issueNumber,
-          }),
-        })));
+          });
+          const artifacts = candidates.map((pullRequest) => ({
+            role: ['preview', 'vercel-preview'].includes(pullRequest.head.ref.toLowerCase())
+              ? 'main-promotion' as const
+              : ['preview', 'vercel-preview'].includes(pullRequest.base.ref.toLowerCase())
+                ? 'preview-integration' as const
+                : 'other' as const,
+            pullRequest,
+          }));
+          const promotion = artifacts.find((artifact) => artifact.role === 'main-promotion');
+          const previewIntegration = artifacts.find((artifact) => artifact.role === 'preview-integration');
+          const lifecycleStage = promotion
+            ? 'main-promotion' as const
+            : previewIntegration?.pullRequest.merged
+              ? 'preview-integrated' as const
+              : previewIntegration
+                ? 'preview-integration' as const
+                : 'implementation' as const;
+          return { workItem, lifecycleStage, candidates, artifacts };
+        }));
 
         return {
           result: {

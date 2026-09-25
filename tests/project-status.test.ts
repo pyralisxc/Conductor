@@ -128,8 +128,8 @@ test('development status groups active work without ranking it and preserves ins
         checks: { total: 1, pending: 0, successful: 1, failed: 0, neutral: 0, skipped: 0, items: [] },
         workflowRuns: [],
         orchestration: {
-          state: 'promotion-ready' as const,
-          action: 'promotion-gate' as const,
+          state: 'integration-ready' as const,
+          action: 'integration-merge' as const,
           shouldAct: true,
           summary: 'ready',
           resumeWhen: null,
@@ -189,6 +189,9 @@ test('development status groups active work without ranking it and preserves ins
   });
   assert.equal(receipt.result.work.ready[0]?.workItem.issueNumber, 23);
   assert.equal(receipt.result.work.ready[0]?.candidates[0]?.pullRequestNumber, 30);
+  assert.equal(receipt.result.work.ready[0]?.lifecycleStage, 'preview-integration');
+  assert.equal(receipt.result.work.ready[0]?.artifacts[0]?.role, 'preview-integration');
+  assert.equal(receipt.result.work.ready[0]?.artifacts[0]?.pullRequest.pullRequestNumber, 30);
   assert.equal(receipt.result.work.inProgress[0]?.workItem.issueNumber, 31);
   assert.equal(receipt.result.work.blocked[0]?.workItem.issueNumber, 32);
   assert.equal(receipt.result.work.review[0]?.workItem.issueNumber, 33);
