@@ -762,6 +762,98 @@ test('unconfigured Development Intelligence is explicit and read-only', async ()
   assert.equal(checks[0]?.error?.code, 'TOOL_UNAVAILABLE');
 });
 
+test('GitHub exact source artifact read is immutable, bounded, and text-only', async () => {
+  const requested: string[] = [];
+  let mode: 'text' | 'large' | 'binary' = 'text';
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      requested.push(`${url.pathname}${url.search}`);
+      if (url.pathname === '/repos/pyralisxc/Conductor/contents/src/index.ts') {
+        if (mode === 'large') {
+          return Response.json({ type: 'file', path: 'src/index.ts', sha: 'blob-large', size: 4096, encoding: 'base64', content: Buffer.from('x'.repeat(4096)).toString('base64') });
+        }
+        if (mode === 'binary') {
+          return Response.json({ type: 'file', path: 'src/index.ts', sha: 'blob-binary', size: 3, encoding: 'base64', content: Buffer.from([0, 1, 2]).toString('base64') });
+        }
+        return Response.json({ type: 'file', path: 'src/index.ts', sha: 'blob-text', size: 11, encoding: 'base64', content: Buffer.from('export {};\n').toString('base64') });
+      }
+      return Response.json({ message: 'not found' }, { status: 404 });
+    },
+  });
+  const sha = 'a'.repeat(40);
+  const available = await provider.getSourceArtifact({ project: { id: 'pyralisxc/Conductor' }, sha, path: 'src/index.ts', maxBytes: 1024 });
+  assert.equal(available.status, 'available');
+  assert.equal(available.revisionSha, sha);
+  assert.equal(available.blobSha, 'blob-text');
+  assert.equal(available.content, 'export {};\n');
+  assert.match(requested[0] ?? '', new RegExp(`ref=${sha}`));
 
+  mode = 'large';
+  const large = await provider.getSourceArtifact({ project: { id: 'pyralisxc/Conductor' }, sha, path: 'src/index.ts', maxBytes: 1024 });
+  assert.equal(large.status, 'too-large');
+  assert.equal(large.content, null);
 
+  mode = 'binary';
+  const binary = await provider.getSourceArtifact({ project: { id: 'pyralisxc/Conductor' }, sha, path: 'src/index.ts', maxBytes: 1024 });
+  assert.equal(binary.status, 'binary');
+  assert.equal(binary.content, null);
 
+  const before = requested.length;
+  await assert.rejects(
+    provider.getSourceArtifact({ project: { id: 'pyralisxc/Conductor' }, sha: 'preview', path: 'src/index.ts' }),
+    (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+  );
+  assert.equal(requested.length, before);
+});
+
+test('GitHub CI run evidence binds PR head and workflow run and redacts bounded failure logs', async () => {
+  const head = 'b'.repeat(40);
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/repos/pyralisxc/Conductor/pulls/12') {
+        return Response.json({ number: 12, html_url: 'https://github.test/pull/12', state: 'open', head: { ref: 'work/fail', sha: head }, base: { ref: 'preview', sha: 'c'.repeat(40) } });
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/actions/runs/77') {
+        return Response.json({ id: 77, name: 'verify', status: 'completed', conclusion: 'failure', html_url: 'https://github.test/actions/77', head_sha: head, event: 'pull_request' });
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/actions/runs/77/jobs') {
+        return Response.json({ total_count: 1, jobs: [{ id: 88, name: 'test', status: 'completed', conclusion: 'failure', html_url: 'https://github.test/jobs/88', started_at: '2026-09-25T00:00:00Z', completed_at: '2026-09-25T00:01:00Z', steps: [{ number: 1, name: 'npm test', status: 'completed', conclusion: 'failure', started_at: '2026-09-25T00:00:10Z', completed_at: '2026-09-25T00:00:50Z' }] }] });
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/actions/jobs/88/logs') {
+        return new Response(`${'prefix '.repeat(300)}\nAPI_TOKEN=super-secret-value\nAssertionError: expected true\n`);
+      }
+      return Response.json({ message: 'not found' }, { status: 404 });
+    },
+  });
+
+  const evidence = await provider.getCiRunEvidence({
+    project: { id: 'pyralisxc/Conductor' },
+    pullRequestNumber: 12,
+    expectedHeadSha: head,
+    workflowRunId: 77,
+    logTailBytes: 1024,
+  });
+  assert.equal(evidence.headSha, head);
+  assert.equal(evidence.workflowRun.id, 77);
+  assert.equal(evidence.jobs[0]?.steps[0]?.name, 'npm test');
+  assert.equal(evidence.jobs[0]?.log.status, 'available');
+  assert.equal(evidence.jobs[0]?.log.truncated, true);
+  assert.doesNotMatch(evidence.jobs[0]?.log.text ?? '', /super-secret-value/);
+  assert.match(evidence.jobs[0]?.log.text ?? '', /\[redacted\]/);
+
+  await assert.rejects(
+    provider.getCiRunEvidence({
+      project: { id: 'pyralisxc/Conductor' },
+      pullRequestNumber: 12,
+      expectedHeadSha: 'd'.repeat(40),
+      workflowRunId: 77,
+    }),
+    (error: unknown) => (error as { message?: string }).message?.includes('Pull-request head changed') === true,
+  );
+});

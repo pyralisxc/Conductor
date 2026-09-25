@@ -11,6 +11,10 @@ import type {
   CommentPullRequestInput,
   GetPullRequestStatusInput,
   PullRequestStatus,
+  GetSourceArtifactInput,
+  SourceArtifactRead,
+  GetCiRunEvidenceInput,
+  CiRunEvidence,
   UpdatePullRequestLabelsInput,
   MergeIntegrationPullRequestInput,
   ReconcilePreviewPullRequestInput,
@@ -53,6 +57,14 @@ export interface ProjectReferenceResolver {
 
 export interface PullRequestReadProvider extends RuntimeCapabilityProvider {
   getPullRequestStatus(input: GetPullRequestStatusInput): Promise<PullRequestStatus>;
+}
+
+export interface SourceArtifactReadProvider extends RuntimeCapabilityProvider {
+  getSourceArtifact(input: GetSourceArtifactInput): Promise<SourceArtifactRead>;
+}
+
+export interface CiReadProvider extends RuntimeCapabilityProvider {
+  getCiRunEvidence(input: GetCiRunEvidenceInput): Promise<CiRunEvidence>;
 }
 
 export interface WorkItemReadProvider extends RuntimeCapabilityProvider {

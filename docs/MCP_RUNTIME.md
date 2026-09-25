@@ -97,3 +97,11 @@ Deploy behind HTTPS or build the included container. Confirm `/health`, both dis
 - Merge is bounded to pull requests with exact head/base SHAs. Integration merge rejects `main`, `master`, and the repository default branch. Preview reconciliation accepts only repository-default-branch → `preview`/`vercel-preview` for Main-only changes. Default-branch promotion accepts only an exact `preview`/`vercel-preview` candidate, requires a caller-supplied owner approval reference, and uses a merge commit; the runtime does not infer approval.
 - Mutation operations are absent unless explicitly enabled with durable atomic idempotency state.
 - No multi-agent, handoff, scheduler, or session subsystem is added here.
+
+## DI-first source and CI evidence reads
+
+Ordinary technical understanding remains in Development Intelligence. A development client should use DI to orient, search, inspect entities, understand dependencies, and narrow a change before requesting provider-native source bytes.
+
+`source.artifact.read` exists only for the final exact handoff from DI evidence to a bounded edit. The caller supplies one exact immutable Git SHA and one repository-relative path. Conductor returns one complete UTF-8 artifact when it fits the configured bound; binary, non-file, incomplete, and too-large content are explicit results rather than partial source. This is not a repository browser, file search, code index, or architecture surface.
+
+`ci.run.read` is the provider-native drill-down after `pull-request.status` reports an actionable workflow failure. The caller supplies the exact PR, expected head SHA, and workflow run ID. Conductor verifies those identities before returning jobs and steps. It returns bounded redacted tail logs for an exact job when requested, otherwise for at most three failed jobs. Logs are not archived by Conductor and no workflow mutation is exposed through this read.

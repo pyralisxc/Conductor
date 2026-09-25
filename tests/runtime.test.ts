@@ -13,6 +13,8 @@ import type {
   ProjectReference,
   ToolRuntimeProvider,
   SourceControlMutationProvider,
+  SourceArtifactReadProvider,
+  CiReadProvider,
 } from '../src/index.js';
 
 const project: ProjectReference = {
@@ -438,3 +440,39 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   assert.equal(creates, 2);
 });
 
+test('runtime exposes exact source and CI evidence reads without enabling mutations', async () => {
+  const sourceArtifactProvider: SourceArtifactReadProvider = {
+    id: 'github-source',
+    async getCapabilities() { return []; },
+    async getSourceArtifact(input) {
+      return {
+        provider: 'github', repository: input.project.repository!, revisionSha: input.sha, path: input.path,
+        blobSha: 'blob', size: 4, status: 'available', content: 'text', encoding: 'utf-8', reason: null,
+        observedAt: '2026-09-25T00:00:00Z',
+      };
+    },
+  };
+  const ciReadProvider: CiReadProvider = {
+    id: 'github-ci',
+    async getCapabilities() { return []; },
+    async getCiRunEvidence(input) {
+      return {
+        provider: 'github', repository: input.project.repository!, pullRequestNumber: input.pullRequestNumber,
+        headSha: input.expectedHeadSha,
+        workflowRun: { id: input.workflowRunId, name: 'verify', status: 'completed', conclusion: 'failure', url: null, event: 'pull_request', headSha: input.expectedHeadSha },
+        jobs: [], jobsTruncated: false, observedAt: '2026-09-25T00:00:00Z',
+      };
+    },
+  };
+  const runtime = new ConductorToolRuntime({ sourceArtifactProvider, ciReadProvider });
+  const capabilities = await runtime.capabilities();
+  assert.equal(capabilities.status, 'succeeded');
+  if (capabilities.status === 'succeeded') {
+    assert.equal(capabilities.result.operations.some(item => item.name === 'source.artifact.read' && !item.mutates), true);
+    assert.equal(capabilities.result.operations.some(item => item.name === 'ci.run.read' && !item.mutates), true);
+  }
+  const source = await runtime.sourceArtifactRead({ project: { id: 'cardforge', repository: 'pyralisxc/CardForge' }, sha: 'a'.repeat(40), path: 'src/index.ts' });
+  assert.equal(source.status, 'succeeded');
+  const ci = await runtime.ciRunRead({ project: { id: 'cardforge', repository: 'pyralisxc/CardForge' }, pullRequestNumber: 2, expectedHeadSha: 'b'.repeat(40), workflowRunId: 3 });
+  assert.equal(ci.status, 'succeeded');
+});
