@@ -1058,17 +1058,30 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     if (!base || base.startsWith('refs/')) throw { code: 'CONFLICT', message: 'Pull-request base must be a branch name' };
     if (base === input.head) throw { code: 'CONFLICT', message: 'Pull-request head and base must differ' };
 
+    const metadata = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+    const defaultBranch = metadata.default_branch?.trim();
+    if (!defaultBranch) throw { code: 'NOT_FOUND', message: 'Repository default branch is unavailable' };
     const promotionProposal = ['preview', 'vercel-preview'].includes(input.head.toLowerCase());
     if (promotionProposal) {
       assertPromotionSourceBranch(input.head);
-      const metadata = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
-      const defaultBranch = metadata.default_branch?.trim();
-      if (!defaultBranch || base !== defaultBranch) {
+      if (base !== defaultBranch) {
         throw { code: 'PERMISSION_DENIED', message: 'Preview promotion pull requests must target the repository default branch' };
       }
     } else {
       assertWorkBranch(input.head);
+      if (!['preview', 'vercel-preview'].includes(base.toLowerCase())) {
+        throw { code: 'PERMISSION_DENIED', message: 'Ordinary work/* pull requests must integrate through preview or vercel-preview before default-branch promotion' };
+      }
     }
+
+    const workItemNumbers = [...new Set(input.workItemNumbers ?? [])];
+    if (workItemNumbers.some((number) => !Number.isSafeInteger(number) || number < 1)) {
+      throw { code: 'CONFLICT', message: 'workItemNumbers must contain only positive issue numbers' };
+    }
+    const canonicalWork = workItemNumbers.length
+      ? `Canonical Conductor work: ${workItemNumbers.map((number) => `#${number}`).join(', ')}`
+      : '';
+    const body = [input.body?.trim(), canonicalWork].filter(Boolean).join('\n\n');
 
     const created = await this.request<{ number: number; html_url: string }>(repository, '/pulls', {
       method: 'POST',
@@ -1076,7 +1089,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         title: input.title,
         head: input.head,
         base,
-        body: input.body ?? '',
+        body,
         draft: input.draft ?? false,
       }),
     }, credential);
@@ -1572,17 +1585,25 @@ function derivePullRequestOrchestration(input: {
     action = 'inspect-failure';
     shouldAct = true;
     summary = 'Checks are settled but GitHub reports the pull request as not mergeable; inspect the merge blocker.';
-  } else if (input.checks.length === 0 && input.workflowRuns.length === 0) {
+  } else if (
+    verifyChecks.length === 0
+    && !input.workflowRuns.some((run) => normalizedCheckName(run.name) === 'verify')
+  ) {
     state = 'external-gate-pending';
     action = 'wait';
     shouldAct = false;
-    summary = 'No verification result is observed yet for the exact PR head; wait for GitHub to publish gate state.';
-    resumeWhen = 'A check/workflow appears or the pull-request head SHA changes.';
-  } else {
+    summary = 'No recognized verification result is observed yet for the exact PR head; unrelated provider checks do not prove the development gate.';
+    resumeWhen = 'The verify check/workflow appears or the pull-request head SHA changes.';
+  } else if (['preview', 'vercel-preview'].includes(input.pull.head.ref.toLowerCase())) {
     state = 'promotion-ready';
     action = 'promotion-gate';
     shouldAct = true;
-    summary = 'Observed technical gates for the exact PR head are settled without failure; proceed only to the caller-owned promotion/authorization gate.';
+    summary = 'Verified Preview candidate is technically ready for the caller-owned Main promotion/authorization gate.';
+  } else {
+    state = 'integration-ready';
+    action = 'integration-merge';
+    shouldAct = true;
+    summary = 'Exact-head verification is settled for work-to-Preview integration. Ready to integrate into Preview; this is not Preview deployment/proof and does not authorize Main promotion.';
   }
 
   const stateChanged = input.previous?.orchestrationState === undefined
@@ -1613,6 +1634,7 @@ function derivePullRequestOrchestration(input: {
         sealRequested
         && headChanged === true
         && state !== 'promotion-ready'
+        && state !== 'integration-ready'
         && state !== 'merged',
     },
     signals: {

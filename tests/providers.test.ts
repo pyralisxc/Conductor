@@ -377,28 +377,43 @@ test('GitHub provider opens work pull requests against explicit repository-nativ
     },
   });
 
-  for (const base of ['vercel-preview', 'main']) {
-    const created = await provider.createPullRequest({
+  const integration = await provider.createPullRequest({
+    project: { id: 'pyralisxc/CardForge' },
+    head: 'work/cf-cleanup',
+    base: 'vercel-preview',
+    title: 'Cleanup',
+    body: 'One canonical change.',
+    workItemNumbers: [42],
+    idempotencyKey: 'pr:cf:cleanup:vercel-preview',
+  });
+  assert.equal(integration.pullRequestNumber, 12);
+  assert.equal(requests.at(-1)?.body?.base, 'vercel-preview');
+  assert.match(requests.at(-1)?.body?.body ?? '', /Canonical Conductor work: #42/);
+
+  await assert.rejects(
+    provider.createPullRequest({
       project: { id: 'pyralisxc/CardForge' },
       head: 'work/cf-cleanup',
-      base,
-      title: 'Cleanup',
-      idempotencyKey: `pr:cf:cleanup:${base}`,
-    });
-    assert.equal(created.pullRequestNumber, 12);
-    assert.equal(requests.at(-1)?.body?.base, base);
-  }
+      base: 'main',
+      title: 'Direct main',
+      workItemNumbers: [42],
+      idempotencyKey: 'pr:cf:cleanup:main',
+    }),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /integrate through preview/.test(error.message),
+  );
 
   const promotion = await provider.createPullRequest({
     project: { id: 'pyralisxc/CardForge' },
     head: 'vercel-preview',
     base: 'main',
     title: 'Promote preview',
+    workItemNumbers: [42, 43, 42],
     idempotencyKey: 'pr:cf:promote-preview',
   });
   assert.equal(promotion.pullRequestNumber, 12);
   assert.equal(requests.at(-1)?.body?.head, 'vercel-preview');
   assert.equal(requests.at(-1)?.body?.base, 'main');
+  assert.match(requests.at(-1)?.body?.body ?? '', /Canonical Conductor work: #42, #43/);
 
   await assert.rejects(
     provider.createPullRequest({

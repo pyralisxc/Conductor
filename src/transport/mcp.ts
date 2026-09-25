@@ -307,7 +307,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
           orchestrationState: z.enum([
             'merged', 'draft', 'external-gate-pending', 'pre-seal-checkpoint',
             'sealed-head-verification-required', 'action-required',
-            'verification-failed', 'merge-blocked', 'promotion-ready',
+            'verification-failed', 'merge-blocked', 'integration-ready', 'promotion-ready',
           ]).optional(),
         }).optional(),
       }),
@@ -510,7 +510,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
     server.registerTool('pull-request.create', {
       title: 'Open a pull request',
-      description: 'Open a work/* pull request against an explicit branch, or propose exact preview/vercel-preview to the provider-native default branch. Creating a proposal never authorizes merge or production promotion.',
+      description: 'Open ordinary work/* only into preview/vercel-preview, or propose exact preview/vercel-preview to the provider-native default branch. Optional canonical work-item numbers create native GitHub cross-references so transport PRs remain subordinate to one work identity. Creating a proposal never authorizes merge or production promotion.',
       inputSchema: z.object({
         project: projectSchema,
         workContext: workContextSchema,
@@ -519,6 +519,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         title: z.string().min(1).max(256),
         body: z.string().optional(),
         draft: z.boolean().optional(),
+        workItemNumbers: z.array(z.number().int().positive()).max(20).optional().describe('Canonical GitHub issue numbers carried by this transport/promotion PR'),
         idempotencyKey: z.string().min(8).max(200),
       }),
       outputSchema: mutationOutputSchema,

@@ -174,9 +174,19 @@ export interface GetDevelopmentStatusInput {
   limit?: number;
 }
 
+export type WorkTransportRole = 'preview-integration' | 'main-promotion' | 'other';
+export type WorkLifecycleStage = 'implementation' | 'preview-integration' | 'preview-integrated' | 'main-promotion';
+
+export interface DevelopmentStatusTransportArtifact {
+  role: WorkTransportRole;
+  pullRequest: PullRequestStatus;
+}
+
 export interface DevelopmentStatusWorkItem {
   workItem: WorkItemRecord;
+  lifecycleStage: WorkLifecycleStage;
   candidates: PullRequestStatus[];
+  artifacts: DevelopmentStatusTransportArtifact[];
 }
 
 export interface DevelopmentStatusWorkCounts {
@@ -298,6 +308,7 @@ export interface CreatePullRequestInput {
   title: string;
   body?: string;
   draft?: boolean;
+  workItemNumbers?: number[];
   idempotencyKey: string;
 }
 
@@ -319,6 +330,7 @@ export type PullRequestOrchestrationState =
   | 'action-required'
   | 'verification-failed'
   | 'merge-blocked'
+  | 'integration-ready'
   | 'promotion-ready';
 
 export type PullRequestOrchestrationAction =
@@ -327,6 +339,7 @@ export type PullRequestOrchestrationAction =
   | 'rerun-exact-head'
   | 'resume-external-gate'
   | 'inspect-failure'
+  | 'integration-merge'
   | 'promotion-gate';
 
 export interface PullRequestPriorObservation {
