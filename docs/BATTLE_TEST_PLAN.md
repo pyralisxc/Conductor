@@ -104,3 +104,12 @@ When one of these becomes justified, create a real work item with current eviden
 ## Acceptance
 
 The current canary succeeds when a human-directed development flow can be reconstructed and executed from durable provider truth across repository work, Preview verification, deployment diagnosis, bounded mutation, and explicit production gates without weakening authorization, idempotency, secret handling, or the Main human gate.
+
+## DI-first provider evidence loop
+
+- Development Intelligence narrows an unfamiliar change to an exact source path and immutable revision without Conductor duplicating repository search or architecture inference.
+- `source.artifact.read` returns the complete exact UTF-8 artifact for that SHA/path when within the bound and explicitly reports binary, too-large, or unsupported content instead of returning a partial edit surface.
+- A stale or non-immutable source selector fails closed.
+- `pull-request.status` remains the first CI read. An actionable failing run is then drilled down with `ci.run.read`, which verifies the exact PR head and workflow-run SHA before returning jobs/steps.
+- CI log output is tail-bounded, explicitly marked truncated when applicable, and redacts secret-like material before it leaves the GitHub adapter.
+- A fresh client can execute the normal DI → exact source artifact → bounded Conductor mutation → GitHub CI evidence → DI transition verification loop without requiring a generic GitHub file/search/log proxy.

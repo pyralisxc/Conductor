@@ -31,7 +31,7 @@ const errorSchema = z.object({
 
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation',
-  'development.status', 'pull-request.status', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'work-item.status', 'work-item.list',
+  'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'work-item.status', 'work-item.list',
   'git.branch.create', 'git.branch.delete', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
@@ -318,6 +318,41 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthSecurity },
     }, async (input) => result(await runtime.pullRequestStatus(input)));
+  }
+
+
+  if (runtime.sourceArtifactReadEnabled) {
+    server.registerTool('source.artifact.read', {
+      title: 'Read exact source artifact',
+      description: 'Use after Development Intelligence has narrowed the source area. Read one complete bounded UTF-8 file at an exact 40-character Git SHA and repository-relative path. This tool does no browsing, repository-wide search, architecture inference, or semantic interpretation.',
+      inputSchema: z.object({
+        project: projectSchema,
+        sha: z.string().regex(/^[0-9a-f]{40}$/i),
+        path: z.string().min(1).max(1024),
+        maxBytes: z.number().int().min(1).max(1024 * 1024).default(256 * 1024),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.sourceArtifactRead(input)));
+  }
+
+  if (runtime.ciReadEnabled) {
+    server.registerTool('ci.run.read', {
+      title: 'Read exact CI run evidence',
+      description: 'Use after pull-request.status identifies an actionable workflow failure. Verify the exact PR head and workflow run, then return bounded jobs/steps plus redacted tail logs for the requested job or up to three failed jobs. This tool never reruns, cancels, approves, or mutates CI.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        workflowRunId: z.number().int().positive(),
+        jobId: z.number().int().positive().optional(),
+        logTailBytes: z.number().int().min(1024).max(50_000).default(12_000),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.ciRunRead(input)));
   }
 
 

@@ -6,6 +6,8 @@ import {
   type SourceControlMutationProvider,
   type ProjectReferenceResolver,
   type PullRequestReadProvider,
+  type SourceArtifactReadProvider,
+  type CiReadProvider,
   type WorkItemCandidateReadProvider,
   type WorkItemMutationProvider,
   type DeploymentReadProvider,
@@ -39,6 +41,10 @@ import {
   type CommentPullRequestInput,
   type GetPullRequestStatusInput,
   type PullRequestStatus,
+  type GetSourceArtifactInput,
+  type SourceArtifactRead,
+  type GetCiRunEvidenceInput,
+  type CiRunEvidence,
   type UpdatePullRequestLabelsInput,
   type MergeIntegrationPullRequestInput,
   type ReconcilePreviewPullRequestInput,
@@ -89,6 +95,19 @@ const PULL_REQUEST_READ_DEFINITION: ToolDefinition = {
   description: 'Read one pull request with exact head/base identity plus observed check and workflow state.',
   mutates: false,
 };
+
+const EXECUTION_EVIDENCE_READ_DEFINITIONS: readonly ToolDefinition[] = [
+  {
+    name: 'source.artifact.read',
+    description: 'Read one complete bounded UTF-8 source artifact at an exact immutable Git SHA and path; no search or semantic inference.',
+    mutates: false,
+  },
+  {
+    name: 'ci.run.read',
+    description: 'Read exact workflow-run jobs, steps, and bounded redacted failure-log tails for one exact pull-request head.',
+    mutates: false,
+  },
+];
 
 const DEPLOYMENT_READ_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.status', description: 'Read Vercel deployment/production state for one configured execution referent.', mutates: false },
@@ -158,6 +177,8 @@ export interface ConductorToolRuntimeOptions {
   mutationExecutor?: IdempotentMutationExecutor;
   projectResolver?: ProjectReferenceResolver;
   pullRequestProvider?: PullRequestReadProvider;
+  sourceArtifactProvider?: SourceArtifactReadProvider;
+  ciReadProvider?: CiReadProvider;
   workItemProvider?: WorkItemMutationProvider;
   workItemCandidateProvider?: WorkItemCandidateReadProvider;
   deploymentProvider?: VercelOperationsProvider;
@@ -174,6 +195,8 @@ export class ConductorToolRuntime {
   private readonly mutationExecutor?: IdempotentMutationExecutor;
   private readonly projectResolver?: ProjectReferenceResolver;
   private readonly pullRequestProvider?: PullRequestReadProvider;
+  private readonly sourceArtifactProvider?: SourceArtifactReadProvider;
+  private readonly ciReadProvider?: CiReadProvider;
   private readonly workItemProvider?: WorkItemMutationProvider;
   private readonly workItemCandidateProvider?: WorkItemCandidateReadProvider;
   private readonly deploymentProvider?: VercelOperationsProvider;
@@ -187,6 +210,8 @@ export class ConductorToolRuntime {
     this.mutationExecutor = options.mutationExecutor;
     this.projectResolver = options.projectResolver;
     this.pullRequestProvider = options.pullRequestProvider;
+    this.sourceArtifactProvider = options.sourceArtifactProvider;
+    this.ciReadProvider = options.ciReadProvider;
     this.workItemProvider = options.workItemProvider;
     this.workItemCandidateProvider = options.workItemCandidateProvider;
     this.deploymentProvider = options.deploymentProvider;
@@ -206,6 +231,14 @@ export class ConductorToolRuntime {
 
   get pullRequestReadEnabled(): boolean {
     return Boolean(this.pullRequestProvider);
+  }
+
+  get sourceArtifactReadEnabled(): boolean {
+    return Boolean(this.sourceArtifactProvider);
+  }
+
+  get ciReadEnabled(): boolean {
+    return Boolean(this.ciReadProvider);
   }
 
   get deploymentReadEnabled(): boolean {
@@ -419,6 +452,33 @@ export class ConductorToolRuntime {
   }
 
 
+  async sourceArtifactRead(input: GetSourceArtifactInput): Promise<ExecutionReceipt<SourceArtifactRead>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'source.artifact.read',
+      { kind: 'repository', id: resolvedProject.repository ?? resolvedProject.id, ref: input.sha },
+      async () => {
+        if (!this.sourceArtifactProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'Source-artifact read provider is not configured' };
+        return { result: await this.sourceArtifactProvider.getSourceArtifact({ ...input, project: resolvedProject }) };
+      },
+    );
+  }
+
+  async ciRunRead(input: GetCiRunEvidenceInput): Promise<ExecutionReceipt<CiRunEvidence>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'ci.run.read',
+      { kind: 'repository', id: resolvedProject.repository ?? resolvedProject.id, ref: input.expectedHeadSha },
+      async () => {
+        if (!this.ciReadProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'CI read provider is not configured' };
+        return {
+          result: await this.ciReadProvider.getCiRunEvidence({ ...input, project: resolvedProject }),
+          diagnostics: [{ level: 'info', source: 'github', message: 'CI log excerpts are bounded and redacted before leaving the provider adapter.' }],
+        };
+      },
+    );
+  }
+
   async deploymentStatus(input: GetDeploymentStatusInput): Promise<ExecutionReceipt<DeploymentProjectStatus>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
     return await this.executeRead(
@@ -606,6 +666,8 @@ export class ConductorToolRuntime {
       ...(this.operationPreflightEnabled ? [OPERATION_PREFLIGHT_DEFINITION] : []),
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
+      ...(this.sourceArtifactReadEnabled ? [EXECUTION_EVIDENCE_READ_DEFINITIONS[0]!] : []),
+      ...(this.ciReadEnabled ? [EXECUTION_EVIDENCE_READ_DEFINITIONS[1]!] : []),
       ...(this.deploymentReadEnabled ? [...DEPLOYMENT_READ_DEFINITIONS, ...VERCEL_AUDIT_DEFINITIONS] : []),
       ...(this.vercelMutationEnabled ? VERCEL_MUTATION_DEFINITIONS : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
