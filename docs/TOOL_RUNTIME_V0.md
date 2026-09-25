@@ -20,6 +20,8 @@ v0 always exposes the core non-mutating runtime tools:
 - `deployment.audit(project)` reads bounded project/team posture, Git linkage, domains/aliases, custom environments, recent deployments, environment-variable metadata, and supported account posture without copying provider state into Conductor.
 - `deployment.runtime-logs(project, deploymentId, limit?)` reads bounded/redacted runtime output only through an explicitly configured direct Vercel access-token binding. Vercel's published Integration API scope mapping does not grant installation tokens access to the runtime-log endpoint, so connected-installation preflight reports this operation as unavailable instead of repeatedly probing a known provider boundary. Direct-token preflight stays degraded until one exact deployment read proves access.
 - `deployment.env.list(project)` lists environment-variable metadata for one exact project and never returns values.
+- `deployment.vcr.get(project, name)` reads one exact project-scoped Vercel Container Registry repository by validated name and returns only bounded repository metadata.
+- `deployment.vcr.create(project, name, idempotencyKey)` creates one exact project-scoped VCR repository when absent, then reads the same name back from Vercel before reporting verified success. Existing exact repositories are returned without a duplicate create effect.
 - `work-item.status(project, issueNumber)` reads one durable work item with normalized lifecycle status, kind, and origin.
 - `work-item.list(project, ...)` lists issue-backed work and can filter by normalized status, kind, and origin. Pull requests are excluded.
 
@@ -28,7 +30,7 @@ When explicitly enabled with durable Redis idempotency state, the current source
 - `git.branch.create` creates only `work/*` branches from an exact SHA.
 - `git.branch.delete` removes one exact integrated `work/*`, `repair/*`, or `audit/*` branch only after refetching the expected head, refusing open-PR/protected branches, and proving the exact head is already contained in Preview or the repository default branch. It is destructive but idempotent; no bulk or age-based cleanup exists.
 - `git.commit.create` creates a bounded file commit, supports tracked-path deletion with null content, and advances a `work/*` branch only from an expected head SHA.
-- `pull-request.create` opens `work/*` pull requests against an explicit target branch. Opening a proposal does not authorize or perform merge/promotion; consequential acceptance remains a separate operation and gate.
+- `pull-request.create` opens `work/*` pull requests against an explicit target branch and may also open the single bounded promotion-proposal lane from `preview`/`vercel-preview` to the provider-native repository default branch. The default branch is re-read from GitHub before that proposal is created. Opening a proposal does not authorize or perform merge/promotion; consequential acceptance remains a separate operation and gate.
 - `pull-request.comment.create` adds an idempotent pull-request comment.
 - `pull-request.labels.update` adds/removes labels while preserving unrelated labels.
 - `pull-request.merge.integration` merges only an exact head/base candidate from a bounded work/repair/audit/release source into a non-accepted integration branch.

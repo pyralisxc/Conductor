@@ -5,6 +5,7 @@ import { ConductorToolRuntime, IdempotentMutationExecutor, InMemoryIdempotencySt
 function fixture() {
   const calls: { path: string; method: string; body?: unknown }[] = [];
   let envs: Record<string, unknown>[] = [];
+  let vcrRepositories: Record<string, unknown>[] = [];
   let production = 'dpl_old';
   const provider = new VercelDeploymentProvider({
     token: 'test-token',
@@ -15,6 +16,17 @@ function fixture() {
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined;
       calls.push({ path: url.pathname, method, body });
       if (url.pathname === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app', link: { org: 'owner', repo: 'app', productionBranch: 'main' }, targets: { production: { id: production } } });
+      if (url.pathname.startsWith('/v1/vcr/repository/') && method === 'GET') {
+        const name = decodeURIComponent(url.pathname.split('/').at(-1)!);
+        const found = vcrRepositories.find(item => item.name === name);
+        return found ? Response.json(found) : Response.json({ error: { message: 'not found' } }, { status: 404 });
+      }
+      if (url.pathname === '/v1/vcr/repository' && method === 'POST') {
+        if (body?.projectId !== 'prj_app' || typeof body?.name !== 'string') return Response.json({ error: { message: 'invalid VCR create' } }, { status: 400 });
+        const created = { id: `vcr_${body.name}`, name: body.name, projectId: body.projectId, createdAt: 1, updatedAt: 1 };
+        vcrRepositories = [created];
+        return Response.json(created, { status: 201 });
+      }
       if (url.pathname.startsWith('/v13/deployments/dpl_') && method === 'DELETE') return Response.json({ uid: url.pathname.split('/').at(-1), state: 'DELETED' });
       if (url.pathname === '/v13/deployments/dpl_old') return Response.json({ id: 'dpl_old', projectId: 'prj_app', readyState: 'READY', target: 'production' });
       if (url.pathname === '/v13/deployments/dpl_other') return Response.json({ id: 'dpl_other', projectId: 'prj_other', readyState: 'READY' });
@@ -235,4 +247,54 @@ test('environment preflight checks environment permission independently of proje
     assert.equal(result?.error?.code, 'NOT_FOUND');
   }
   assert.equal(calls.filter(path => path === '/v10/projects/prj_app/env').length, 4);
+});
+
+
+test('VCR repository read and create stay exact-project scoped and verify provider state', async () => {
+  const { provider, calls, project } = fixture();
+
+  await assert.rejects(
+    provider.getVcrRepository({ project, name: 'dockerfile' }),
+    (error: unknown) => (error as { status?: number }).status === 404,
+  );
+
+  const created = await provider.createVcrRepository({ project, name: 'dockerfile', idempotencyKey: 'vcr-create-dockerfile' });
+  assert.equal(created.projectId, 'prj_app');
+  assert.equal(created.name, 'dockerfile');
+  assert.equal(created.created, true);
+  assert.equal(created.verified, true);
+
+  const read = await provider.getVcrRepository({ project, name: 'dockerfile' });
+  assert.equal(read.repositoryId, 'vcr_dockerfile');
+  assert.equal(read.projectId, 'prj_app');
+
+  const second = await provider.createVcrRepository({ project, name: 'dockerfile', idempotencyKey: 'vcr-create-dockerfile-again' });
+  assert.equal(second.created, false);
+  assert.equal(second.verified, true);
+  assert.equal(calls.filter(call => call.path === '/v1/vcr/repository' && call.method === 'POST').length, 1);
+  assert.deepEqual(calls.find(call => call.path === '/v1/vcr/repository' && call.method === 'POST')?.body, { projectId: 'prj_app', name: 'dockerfile' });
+
+  await assert.rejects(
+    provider.createVcrRepository({ project, name: '../bad', idempotencyKey: 'vcr-invalid-name' }),
+    (error: unknown) => (error as { message?: string }).message?.includes('repository name') === true,
+  );
+});
+
+test('VCR create is durably idempotent through the runtime', async () => {
+  const { provider, calls, project } = fixture();
+  const runtime = new ConductorToolRuntime({
+    providers: [provider],
+    deploymentProvider: provider,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const input = { project, name: 'dockerfile', idempotencyKey: 'runtime-vcr-create' };
+  const first = await runtime.vercelVcrCreate(input);
+  const replay = await runtime.vercelVcrCreate(input);
+  assert.equal(first.status, 'succeeded');
+  assert.equal(replay.status, 'succeeded');
+  if (first.status === 'succeeded' && replay.status === 'succeeded') {
+    assert.equal((first.result as Record<string, unknown>).verified, true);
+    assert.equal(replay.idempotency?.replayed, true);
+  }
+  assert.equal(calls.filter(call => call.path === '/v1/vcr/repository' && call.method === 'POST').length, 1);
 });

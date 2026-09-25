@@ -61,7 +61,7 @@ import {
   type GetDeploymentLogsInput,
   type DeploymentProjectStatus,
   type DeploymentLogs,
-  type VercelProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput,
+  type VercelProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput, type VercelVcrRepositoryInput, type VercelVcrCreateInput,
 } from './types.js';
 import { IdempotentMutationExecutor } from './idempotency.js';
 
@@ -118,6 +118,7 @@ const VERCEL_AUDIT_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.audit', description: 'Read bounded project, environment, deployment, and supported account posture.', mutates: false },
   { name: 'deployment.runtime-logs', description: 'Read bounded redacted runtime logs for one exact deployment.', mutates: false },
   { name: 'deployment.env.list', description: 'List project variable metadata without secret values.', mutates: false },
+  { name: 'deployment.vcr.get', description: 'Read one exact Vercel Container Registry repository in the bound project.', mutates: false },
 ];
 const VERCEL_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.redeploy', description: 'Redeploy one exact bound deployment.', mutates: true },
@@ -128,6 +129,7 @@ const VERCEL_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.env.upsert', description: 'Upsert one project environment variable.', mutates: true },
   { name: 'deployment.env.update', description: 'Update one exact project environment variable.', mutates: true },
   { name: 'deployment.env.remove', description: 'Remove one exact project environment variable.', mutates: true },
+  { name: 'deployment.vcr.create', description: 'Create one exact Vercel Container Registry repository in the bound project.', mutates: true },
 ];
 
 const WORK_ITEM_READ_DEFINITIONS: readonly ToolDefinition[] = [
@@ -146,7 +148,7 @@ const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'git.branch.create', description: 'Create a work/* branch from an exact Git SHA.', mutates: true },
   { name: 'git.branch.delete', description: 'Delete one exact integrated development branch after proving its head is already contained in Preview or Main.', mutates: true },
   { name: 'git.commit.create', description: 'Create files in one commit and advance an existing work/* branch from an expected head SHA.', mutates: true },
-  { name: 'pull-request.create', description: 'Open a work/* pull request against an explicit target branch.', mutates: true },
+  { name: 'pull-request.create', description: 'Open a work/* pull request or the bounded Preview-to-default promotion proposal lane.', mutates: true },
   { name: 'pull-request.comment.create', description: 'Add a comment to a pull request.', mutates: true },
   { name: 'pull-request.labels.update', description: 'Add/remove pull-request labels while preserving unrelated labels.', mutates: true },
   { name: 'pull-request.merge.integration', description: 'Merge an exact PR candidate into a non-accepted integration branch.', mutates: true },
@@ -518,6 +520,7 @@ export class ConductorToolRuntime {
   async deploymentAudit(input: VercelProjectInput) { return this.vercelRead('deployment.audit', input, (provider, project) => provider.getAudit({ project })); }
   async deploymentRuntimeLogs(input: VercelRuntimeLogsInput) { return this.vercelRead('deployment.runtime-logs', input, (provider, project) => provider.getRuntimeLogs({ ...input, project })); }
   async deploymentEnvironmentList(input: VercelProjectInput) { return this.vercelRead('deployment.env.list', input, (provider, project) => provider.listEnvironment({ project })); }
+  async deploymentVcrGet(input: VercelVcrRepositoryInput) { return this.vercelRead('deployment.vcr.get', input, (provider, project) => provider.getVcrRepository({ ...input, project })); }
 
   private async vercelMutation<Result>(operation: import('./types.js').MutationOperationName, input: VercelProjectInput & { idempotencyKey: string }, mutate: (provider: VercelOperationsProvider, project: ProjectReference) => Promise<Result>): Promise<ExecutionReceipt<Result>> {
     const project = this.resolveProjectReference(input.project);
@@ -539,6 +542,7 @@ export class ConductorToolRuntime {
   async vercelEnvUpsert(input: VercelEnvInput) { return this.vercelMutation('deployment.env.upsert', input, (provider, project) => provider.upsertEnvironment({ ...input, project })); }
   async vercelEnvUpdate(input: VercelEnvEditInput) { return this.vercelMutation('deployment.env.update', input, (provider, project) => provider.updateEnvironment({ ...input, project })); }
   async vercelEnvRemove(input: VercelEnvRemoveInput) { return this.vercelMutation('deployment.env.remove', input, (provider, project) => provider.removeEnvironment({ ...input, project })); }
+  async vercelVcrCreate(input: VercelVcrCreateInput) { return this.vercelMutation('deployment.vcr.create', input, (provider, project) => provider.createVcrRepository({ ...input, project })); }
 
   async workItemStatus(input: GetWorkItemStatusInput): Promise<ExecutionReceipt<WorkItemRecord>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;

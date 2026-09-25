@@ -371,6 +371,7 @@ test('GitHub provider opens work pull requests against explicit repository-nativ
       const method = init?.method ?? 'GET';
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       requests.push({ url, method, body });
+      if (/\/repos\/pyralisxc\/CardForge$/u.test(url) && method === 'GET') return Response.json({ full_name: 'pyralisxc/CardForge', default_branch: 'main' });
       if (url.endsWith('/pulls') && method === 'POST') return Response.json({ number: 12, html_url: 'https://github.com/pyralisxc/CardForge/pull/12' });
       throw new Error(`Unexpected request ${method} ${url}`);
     },
@@ -387,6 +388,39 @@ test('GitHub provider opens work pull requests against explicit repository-nativ
     assert.equal(created.pullRequestNumber, 12);
     assert.equal(requests.at(-1)?.body?.base, base);
   }
+
+  const promotion = await provider.createPullRequest({
+    project: { id: 'pyralisxc/CardForge' },
+    head: 'vercel-preview',
+    base: 'main',
+    title: 'Promote preview',
+    idempotencyKey: 'pr:cf:promote-preview',
+  });
+  assert.equal(promotion.pullRequestNumber, 12);
+  assert.equal(requests.at(-1)?.body?.head, 'vercel-preview');
+  assert.equal(requests.at(-1)?.body?.base, 'main');
+
+  await assert.rejects(
+    provider.createPullRequest({
+      project: { id: 'pyralisxc/CardForge' },
+      head: 'vercel-preview',
+      base: 'preview',
+      title: 'Invalid promotion target',
+      idempotencyKey: 'pr:cf:bad-promotion-target',
+    }),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /default branch/.test(error.message),
+  );
+
+  await assert.rejects(
+    provider.createPullRequest({
+      project: { id: 'pyralisxc/CardForge' },
+      head: 'main',
+      base: 'vercel-preview',
+      title: 'Invalid reverse promotion',
+      idempotencyKey: 'pr:cf:reverse-promotion',
+    }),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /work\/\*/.test(error.message),
+  );
 
   await assert.rejects(
     provider.createPullRequest({
