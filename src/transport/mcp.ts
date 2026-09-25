@@ -32,7 +32,7 @@ const errorSchema = z.object({
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation',
   'development.status', 'pull-request.status', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'work-item.status', 'work-item.list',
-  'git.branch.create', 'git.commit.create', 'git.push',
+  'git.branch.create', 'git.branch.delete', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
   'work-item.create', 'work-item.comment.create', 'work-item.update-status', 'work-item.classification.update',
@@ -431,6 +431,24 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     }, async (input, extra) => {
       await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.createBranch(withoutWorkContext(input)));
+    });
+
+    server.registerTool('git.branch.delete', {
+      title: 'Delete an integrated development branch',
+      description: 'Delete one exact work/*, repair/*, or audit/* branch only when its expected head is unchanged, no open pull request uses it, and GitHub proves that exact head is already contained in Preview or the repository default branch.',
+      inputSchema: z.object({
+        project: projectSchema,
+        workContext: workContextSchema,
+        branch: z.string().min(6),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.deleteBranch(withoutWorkContext(input)));
     });
 
     server.registerTool('git.commit.create', {

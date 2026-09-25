@@ -90,6 +90,7 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
     id: 'github',
     async getCapabilities() { return []; },
     async createBranch(input) { return { repository: input.project.repository!, branch: input.branch, commitSha: input.fromSha }; },
+    async deleteBranch(input) { return { repository: input.project.repository!, branch: input.branch, commitSha: input.expectedHeadSha, deleted: true as const, containedIn: 'preview' }; },
     async createCommit() { throw new Error('unused'); },
     async createPullRequest() { throw new Error('unused'); },
     async commentPullRequest() { throw new Error('unused'); },
@@ -109,7 +110,7 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
   await client.connect(clientTransport);
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name), [
-    'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
+    'capabilities', 'preflight_project', 'git.branch.create', 'git.branch.delete', 'git.commit.create',
     'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
     'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
   ]);

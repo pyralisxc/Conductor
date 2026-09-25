@@ -281,6 +281,75 @@ test('GitHub provider can delete a tracked path in a bounded commit', async () =
   assert.equal(requests.some(request => request.url.endsWith('/git/blobs')), false);
 });
 
+test('GitHub provider deletes only exact integrated development branches', async () => {
+  const expected = 'a'.repeat(40);
+  let refSha = expected;
+  let openPullRequest = false;
+  let comparisonStatus = 'behind';
+  let deleteCalls = 0;
+  const requests: string[] = [];
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      requests.push(`${method} ${url.pathname}${url.search}`);
+      if (method === 'GET' && url.pathname === '/repos/pyralisxc/Conductor') {
+        return Response.json({ full_name: 'pyralisxc/Conductor', default_branch: 'main', permissions: { push: true } });
+      }
+      if (method === 'GET' && url.pathname === '/repos/pyralisxc/Conductor/pulls') {
+        return Response.json(openPullRequest ? [{ number: 12, html_url: 'https://example.test/12', state: 'open', head: { ref: 'work/old', sha: expected }, base: { ref: 'preview', sha: 'b'.repeat(40) } }] : []);
+      }
+      if (method === 'GET' && url.pathname.startsWith('/repos/pyralisxc/Conductor/compare/')) {
+        return Response.json({ status: comparisonStatus });
+      }
+      if (method === 'GET' && url.pathname === '/repos/pyralisxc/Conductor/git/ref/heads/work/old') {
+        return Response.json({ object: { sha: refSha } });
+      }
+      if (method === 'DELETE' && url.pathname === '/repos/pyralisxc/Conductor/git/refs/heads/work/old') {
+        deleteCalls += 1;
+        return new Response(null, { status: 204 });
+      }
+      return Response.json({ message: 'not found' }, { status: 404 });
+    },
+  });
+  const project = { id: 'pyralisxc/Conductor' };
+
+  const deleted = await provider.deleteBranch({ project, branch: 'work/old', expectedHeadSha: expected, idempotencyKey: 'delete-integrated-work' });
+  assert.equal(deleted.deleted, true);
+  assert.equal(deleted.containedIn, 'preview');
+  assert.equal(deleteCalls, 1);
+
+  const beforeProtected = requests.length;
+  await assert.rejects(
+    provider.deleteBranch({ project, branch: 'preview', expectedHeadSha: expected, idempotencyKey: 'delete-protected-preview' }),
+    (error: unknown) => (error as { code?: string }).code === 'PERMISSION_DENIED',
+  );
+  assert.equal(requests.length, beforeProtected);
+
+  refSha = 'b'.repeat(40);
+  await assert.rejects(
+    provider.deleteBranch({ project, branch: 'work/old', expectedHeadSha: expected, idempotencyKey: 'delete-stale-head' }),
+    (error: unknown) => (error as { message?: string }).message?.includes('Branch head changed') === true,
+  );
+  refSha = expected;
+
+  openPullRequest = true;
+  await assert.rejects(
+    provider.deleteBranch({ project, branch: 'work/old', expectedHeadSha: expected, idempotencyKey: 'delete-open-pr-head' }),
+    (error: unknown) => (error as { message?: string }).message?.includes('open pull request') === true,
+  );
+  openPullRequest = false;
+
+  comparisonStatus = 'ahead';
+  await assert.rejects(
+    provider.deleteBranch({ project, branch: 'work/old', expectedHeadSha: expected, idempotencyKey: 'delete-unique-head' }),
+    (error: unknown) => (error as { message?: string }).message?.includes('not proven contained') === true,
+  );
+  assert.equal(deleteCalls, 1);
+});
+
 test('GitHub provider opens work pull requests against explicit repository-native targets', async () => {
   const requests: Array<{ url: string; method: string; body?: any }> = [];
   const provider = new GitHubRuntimeProvider({

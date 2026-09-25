@@ -18,6 +18,7 @@ export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
 export type MutationOperationName =
   | 'git.branch.create'
+  | 'git.branch.delete'
   | 'git.commit.create'
   | 'git.push'
   | 'pull-request.create'
@@ -260,6 +261,13 @@ export interface CreateBranchInput {
   project: ProjectReference;
   branch: string;
   fromSha: string;
+  idempotencyKey: string;
+}
+
+export interface DeleteBranchInput {
+  project: ProjectReference;
+  branch: string;
+  expectedHeadSha: string;
   idempotencyKey: string;
 }
 

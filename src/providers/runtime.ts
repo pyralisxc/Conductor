@@ -5,6 +5,7 @@ import type {
   ProjectReference,
   RuntimeOperationName,
   CreateBranchInput,
+  DeleteBranchInput,
   CreateCommitInput,
   CreatePullRequestInput,
   CommentPullRequestInput,
@@ -91,6 +92,7 @@ export interface VercelOperationsProvider extends DeploymentReadProvider {
 
 export interface SourceControlMutationProvider extends RuntimeCapabilityProvider {
   createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }>;
+  deleteBranch(input: DeleteBranchInput): Promise<{ repository: string; branch: string; commitSha: string; deleted: true; containedIn: string }>;
   createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }>;
   createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }>;
   commentPullRequest(input: CommentPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; commentId: string; url: string }>;

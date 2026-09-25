@@ -389,6 +389,10 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
       creates += 1;
       return { repository: input.project.repository!, branch: input.branch, commitSha: input.fromSha };
     },
+    async deleteBranch(input) {
+      creates += 1;
+      return { repository: input.project.repository!, branch: input.branch, commitSha: input.expectedHeadSha, deleted: true as const, containedIn: 'preview' };
+    },
     async createCommit() { throw new Error('unused'); },
     async createPullRequest() { throw new Error('unused'); },
     async commentPullRequest() { throw new Error('unused'); },
@@ -405,7 +409,7 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   assert.equal(capabilities.status, 'succeeded');
   if (capabilities.status === 'succeeded') {
     assert.deepEqual(capabilities.result.operations.filter((item) => item.mutates).map((item) => item.name), [
-      'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
+      'git.branch.create', 'git.branch.delete', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
       'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
     ]);
   }
@@ -420,5 +424,17 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   assert.equal(first.status, 'succeeded');
   assert.equal(replay.idempotency?.replayed, true);
   assert.equal(creates, 1);
+
+  const deleteInput = {
+    project: { id: 'cardforge', repository: 'pyralisxc/CardForge' },
+    branch: 'work/cf-42',
+    expectedHeadSha: 'a'.repeat(40),
+    idempotencyKey: 'branch-delete:cardforge:cf-42',
+  };
+  const deleted = await runtime.deleteBranch(deleteInput);
+  const deleteReplay = await runtime.deleteBranch(deleteInput);
+  assert.equal(deleted.status, 'succeeded');
+  assert.equal(deleteReplay.idempotency?.replayed, true);
+  assert.equal(creates, 2);
 });
 

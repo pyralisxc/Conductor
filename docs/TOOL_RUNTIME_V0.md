@@ -24,6 +24,7 @@ v0 always exposes the core non-mutating runtime tools:
 When explicitly enabled with durable Redis idempotency state, the current source-control mutation family exposes bounded GitHub mutations:
 
 - `git.branch.create` creates only `work/*` branches from an exact SHA.
+- `git.branch.delete` removes one exact integrated `work/*`, `repair/*`, or `audit/*` branch only after refetching the expected head, refusing open-PR/protected branches, and proving the exact head is already contained in Preview or the repository default branch. It is destructive but idempotent; no bulk or age-based cleanup exists.
 - `git.commit.create` creates a bounded file commit, supports tracked-path deletion with null content, and advances a `work/*` branch only from an expected head SHA.
 - `pull-request.create` opens `work/*` pull requests against an explicit target branch. Opening a proposal does not authorize or perform merge/promotion; consequential acceptance remains a separate operation and gate.
 - `pull-request.comment.create` adds an idempotent pull-request comment.
