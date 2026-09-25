@@ -161,11 +161,41 @@ test('variable values stay out of audit, receipts and durable idempotency state'
   assert.equal(removed.verifiedRemoved, true);
 });
 
-test('runtime log preflight does not claim endpoint permission from project read', async () => {
+test('runtime log preflight does not claim endpoint permission from a direct token project read', async () => {
   const { provider, project } = fixture();
   const preflight = (await provider.preflightOperation(project, 'deployment.runtime-logs'))?.[0];
   assert.equal(preflight?.status, 'degraded');
   assert.match(preflight?.diagnostics[0]?.message ?? '', /runtime-log endpoint access is unverified/u);
+});
+
+test('connected Vercel integration reports the documented runtime-log scope boundary without calling the endpoint', async () => {
+  const calls: string[] = [];
+  const provider = new VercelDeploymentProvider({
+    bindings: [{ id: 'app', project: 'app', teamId: 'team_1', connectionId: 'icfg_1' }],
+    tokenResolver: async () => 'installation-token',
+    fetch: async input => {
+      const path = new URL(String(input)).pathname;
+      calls.push(path);
+      if (path === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app' });
+      if (path === '/v13/deployments/dpl_preview') return Response.json({ id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: 'preview' });
+      if (path.includes('/runtime-logs')) throw new Error('runtime-log endpoint must not be called with an integration installation token');
+      return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
+    },
+  });
+  const project = { id: 'app' };
+  const preflight = (await provider.preflightOperation(project, 'deployment.runtime-logs'))?.[0];
+  assert.equal(preflight?.status, 'unavailable');
+  assert.match(preflight?.diagnostics[0]?.message ?? '', /installation tokens do not authorize/u);
+
+  await assert.rejects(
+    provider.getRuntimeLogs({ project, deploymentId: 'dpl_preview', limit: 10 }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'TOOL_UNAVAILABLE');
+      assert.match((error as { message?: string }).message ?? '', /Integration API installation tokens/u);
+      return true;
+    },
+  );
+  assert.equal(calls.some(path => path.includes('/runtime-logs')), false);
 });
 
 test('runtime logs stay bound and redact secrets', async () => {
