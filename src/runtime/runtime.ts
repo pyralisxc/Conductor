@@ -838,7 +838,7 @@ export class ConductorToolRuntime {
 
   private async executeRead<Result>(
     operation: ToolOperationName,
-    target: { kind: 'runtime' | 'project'; id: string; ref?: string },
+    target: { kind: 'runtime' | 'project' | 'repository'; id: string; ref?: string },
     read: () => Promise<{
       result: Result;
       diagnostics?: ToolDiagnostic[];
