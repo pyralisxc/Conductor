@@ -34,6 +34,7 @@ export type MutationOperationName =
   | 'deployment.git.create'
   | 'deployment.promote'
   | 'deployment.rollback'
+  | 'deployment.delete'
   | 'deployment.env.upsert'
   | 'deployment.env.update'
   | 'deployment.env.remove';

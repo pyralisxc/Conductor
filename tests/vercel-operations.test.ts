@@ -15,9 +15,12 @@ function fixture() {
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined;
       calls.push({ path: url.pathname, method, body });
       if (url.pathname === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app', link: { org: 'owner', repo: 'app', productionBranch: 'main' }, targets: { production: { id: production } } });
+      if (url.pathname.startsWith('/v13/deployments/dpl_') && method === 'DELETE') return Response.json({ uid: url.pathname.split('/').at(-1), state: 'DELETED' });
       if (url.pathname === '/v13/deployments/dpl_old') return Response.json({ id: 'dpl_old', projectId: 'prj_app', readyState: 'READY', target: 'production' });
       if (url.pathname === '/v13/deployments/dpl_other') return Response.json({ id: 'dpl_other', projectId: 'prj_other', readyState: 'READY' });
       if (url.pathname === '/v13/deployments/dpl_preview') return Response.json({ id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: 'preview' });
+      if (url.pathname === '/v13/deployments/dpl_prodold') return Response.json({ id: 'dpl_prodold', projectId: 'prj_app', readyState: 'READY', target: 'production' });
+      if (url.pathname === '/v13/deployments/dpl_building') return Response.json({ id: 'dpl_building', projectId: 'prj_app', readyState: 'BUILDING', target: null });
       if (url.pathname === '/v13/deployments' && method === 'POST') {
         if (body?.gitSource && body.target === 'preview') return Response.json({ error: { message: 'Invalid target' } }, { status: 400 });
         return Response.json({ id: 'dpl_new', readyState: 'BUILDING' });
@@ -52,6 +55,62 @@ test('Vercel operations scope exact deployments and require production approval'
   assert.equal(promoted.verified, true);
   const rolled = await provider.rollback({ project, deploymentId: 'dpl_old', approvalReference: 'owner-approved:exact-old-commit', idempotencyKey: 'rollback-old' });
   assert.equal(rolled.verified, true);
+});
+
+
+test('deployment cleanup protects current production and active builds', async () => {
+  const { provider, calls, project } = fixture();
+  await assert.rejects(
+    provider.deleteDeployment({ project, deploymentId: 'dpl_old', idempotencyKey: 'delete-current-production' }),
+    (error: unknown) => {
+      assert.match((error as { message?: string }).message ?? JSON.stringify(error), /currently serving production/u);
+      return true;
+    },
+  );
+  await assert.rejects(
+    provider.deleteDeployment({ project, deploymentId: 'dpl_building', idempotencyKey: 'delete-active-build' }),
+    (error: unknown) => {
+      assert.match((error as { message?: string }).message ?? JSON.stringify(error), /terminal/u);
+      return true;
+    },
+  );
+  await assert.rejects(
+    provider.deleteDeployment({ project, deploymentId: 'dpl_prodold', idempotencyKey: 'delete-historical-production' }),
+    (error: unknown) => {
+      assert.match((error as { message?: string }).message ?? JSON.stringify(error), /approval/u);
+      return true;
+    },
+  );
+
+  const preview = await provider.deleteDeployment({ project, deploymentId: 'dpl_preview', idempotencyKey: 'delete-preview' });
+  assert.equal(preview.verified, true);
+  assert.equal(preview.state, 'DELETED');
+
+  const historical = await provider.deleteDeployment({
+    project,
+    deploymentId: 'dpl_prodold',
+    approvalReference: 'owner-approved:delete-historical-production',
+    idempotencyKey: 'delete-historical-production-approved',
+  });
+  assert.equal(historical.verified, true);
+  assert.equal(historical.priorTarget, 'production');
+  assert.equal(calls.filter(call => call.method === 'DELETE').length, 2);
+});
+
+test('deployment cleanup replays durable idempotency instead of deleting twice', async () => {
+  const { provider, calls, project } = fixture();
+  const runtime = new ConductorToolRuntime({
+    providers: [provider],
+    deploymentProvider: provider,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const input = { project, deploymentId: 'dpl_preview', idempotencyKey: 'deployment-delete-replay' };
+  const first = await runtime.vercelDeleteDeployment(input);
+  assert.equal(first.status, 'succeeded');
+  const replay = await runtime.vercelDeleteDeployment(input);
+  assert.equal(replay.status, 'succeeded');
+  assert.equal(replay.idempotency?.replayed, true);
+  assert.equal(calls.filter(call => call.method === 'DELETE').length, 1);
 });
 
 test('exact Git source must match the linked project and full SHA', async () => {

@@ -34,6 +34,7 @@ When explicitly enabled with durable Redis idempotency state, the current source
 - `deployment.redeploy` redeploys one exact bound deployment; production-source redeploys require exact owner approval.
 - `deployment.git.create` creates a deployment from an exact linked Git repository/ref/full SHA. Preview lets Vercel infer the Preview target; production requires exact owner approval.
 - `deployment.promote` and `deployment.rollback` move production traffic only to one exact READY bound deployment with explicit owner approval and read-after-write reconciliation.
+- `deployment.delete` removes one exact terminal bound deployment. It refuses current production and active builds; deleting a historical production rollback artifact requires explicit owner approval.
 - `deployment.env.upsert`, `deployment.env.update`, and `deployment.env.remove` mutate one exact bound project's variable configuration. Values are write-only, and production-scoped changes require explicit owner approval.
 - `work-item.create` creates durable issue-backed work with optional normalized status, kind, and origin.
 - `work-item.comment.create` adds idempotent evidence or a consolidation link to an existing issue. It refuses pull requests.
@@ -98,7 +99,7 @@ The included in-memory idempotency store is suitable for tests and one-process d
 - multi-agent workers or handoffs
 - scheduling and durable waits
 - session management
-- arbitrary deployment deletion, bulk provider cleanup, alias/domain mutation, or secret-value reads; supported Vercel mutations remain exact-project, exact-target, idempotent, and gated
+- project-wide/bulk deployment cleanup, delete-by-URL, active-build cancellation through cleanup, alias/domain mutation, or secret-value reads; exact deployment deletion remains one-target, idempotent, and gated
 - a provider-specific orchestration transport beyond the thin authenticated MCP adapter
 - a second source of project intelligence
 

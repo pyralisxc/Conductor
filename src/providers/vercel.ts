@@ -338,6 +338,49 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   async promote(input: VercelDeploymentInput) { return this.changeTraffic(input, 'promote'); }
   async rollback(input: VercelDeploymentInput) { return this.changeTraffic(input, 'rollback'); }
 
+  async deleteDeployment(input: VercelDeploymentInput): Promise<Record<string, unknown>> {
+    const bound = await this.exactDeployment(input.project, input.deploymentId);
+    const deployment = normalizeDeployment(bound.detail);
+    if (!deployment) throw { code: 'NOT_FOUND', source: 'vercel', message: 'Exact deployment could not be normalized before deletion' };
+
+    const productionTarget = recordField(recordField(bound.data, 'targets') ?? {}, 'production');
+    const currentProductionId = productionTarget
+      ? (stringField(productionTarget, 'id') ?? stringField(productionTarget, 'uid'))
+      : null;
+    if (currentProductionId === input.deploymentId) {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'The deployment currently serving production cannot be deleted' };
+    }
+
+    const state = deployment.state?.toUpperCase() ?? null;
+    if (!state || !['READY', 'ERROR', 'CANCELED'].includes(state)) {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'Deployment cleanup only deletes terminal READY, ERROR, or CANCELED deployments; active builds must not be canceled through cleanup' };
+    }
+    if (deployment.target === 'production') this.requireProductionApproval(input.approvalReference);
+
+    const response = await this.request(
+      `/v13/deployments/${encodeURIComponent(input.deploymentId)}`,
+      scopeQuery(bound.binding),
+      bound.binding,
+      { method: 'DELETE' },
+    );
+    const payload = await response.json().catch(() => null) as JsonRecord | null;
+    const removedId = payload ? (stringField(payload, 'uid') ?? stringField(payload, 'id')) : null;
+    const removedState = payload ? stringField(payload, 'state') : null;
+    if (removedId !== input.deploymentId || removedState !== 'DELETED') {
+      throw { code: 'COMMAND_FAILED', source: 'vercel', message: 'Vercel did not confirm exact deployment deletion; reconcile provider state before retrying' };
+    }
+    return {
+      provider: 'vercel',
+      projectId: bound.id,
+      deploymentId: input.deploymentId,
+      priorState: deployment.state,
+      priorTarget: deployment.target,
+      state: removedState,
+      verified: true,
+      observedAt: this.now().toISOString(),
+    };
+  }
+
   async listEnvironment(input: VercelProjectInput): Promise<Record<string, unknown>> {
     const bound = await this.readProject(input.project);
     const payload = await this.getJson(`/v10/projects/${encodeURIComponent(bound.id)}/env`, { ...scopeQuery(bound.binding), decrypt: 'false' }, bound.binding);

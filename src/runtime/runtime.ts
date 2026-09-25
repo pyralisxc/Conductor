@@ -104,6 +104,7 @@ const VERCEL_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.git.create', description: 'Create a deployment from exact linked Git source.', mutates: true },
   { name: 'deployment.promote', description: 'Promote one exact READY deployment to production.', mutates: true },
   { name: 'deployment.rollback', description: 'Rollback to one exact prior READY deployment.', mutates: true },
+  { name: 'deployment.delete', description: 'Delete one exact terminal deployment while protecting current production.', mutates: true },
   { name: 'deployment.env.upsert', description: 'Upsert one project environment variable.', mutates: true },
   { name: 'deployment.env.update', description: 'Update one exact project environment variable.', mutates: true },
   { name: 'deployment.env.remove', description: 'Remove one exact project environment variable.', mutates: true },
@@ -472,6 +473,7 @@ export class ConductorToolRuntime {
   async vercelCreateGitDeployment(input: VercelGitDeploymentInput) { return this.vercelMutation('deployment.git.create', input, (provider, project) => provider.createGitDeployment({ ...input, project })); }
   async vercelPromote(input: VercelDeploymentInput) { return this.vercelMutation('deployment.promote', input, (provider, project) => provider.promote({ ...input, project })); }
   async vercelRollback(input: VercelDeploymentInput) { return this.vercelMutation('deployment.rollback', input, (provider, project) => provider.rollback({ ...input, project })); }
+  async vercelDeleteDeployment(input: VercelDeploymentInput) { return this.vercelMutation('deployment.delete', input, (provider, project) => provider.deleteDeployment({ ...input, project })); }
   async vercelEnvUpsert(input: VercelEnvInput) { return this.vercelMutation('deployment.env.upsert', input, (provider, project) => provider.upsertEnvironment({ ...input, project })); }
   async vercelEnvUpdate(input: VercelEnvEditInput) { return this.vercelMutation('deployment.env.update', input, (provider, project) => provider.updateEnvironment({ ...input, project })); }
   async vercelEnvRemove(input: VercelEnvRemoveInput) { return this.vercelMutation('deployment.env.remove', input, (provider, project) => provider.removeEnvironment({ ...input, project })); }

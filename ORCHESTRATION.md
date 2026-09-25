@@ -33,8 +33,9 @@ It does not own product direction, current work, Development OS stage or authori
 ## Repository flow
 
 - Ordinary development branches start from current `preview` and propose changes back to `preview`.
-- `preview` is the integrated, deployable next-product candidate and is hosted on Vercel.
-- `main` is accepted truth. Promotion requires explicit owner approval bound to the exact candidate.
+- Work/repair/audit branches use GitHub verification by default; automatic Vercel Git builds are skipped for those branches to avoid duplicate provider churn. Exact ad-hoc provider canaries remain explicit operations.
+- `preview` is the integrated, deployable next-product candidate and is automatically hosted on Vercel.
+- `main` is accepted truth and is automatically hosted as production. Promotion requires explicit owner approval bound to the exact candidate.
 - Promote the exact approved `preview` head to `main` with a merge commit, preserving Preview ancestry. Routine promotion needs no Main-to-Preview PR.
 - Reconcile Main-only content changes into `preview` through `pull-request.merge.reconcile-preview` before continuing ordinary work. Reconciliation uses exact head/base identity and a merge commit. Do not force-update Preview.
 - Current candidates, checks, deployments, and work status are queried from provider-native state rather than recorded here.

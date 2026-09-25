@@ -10,5 +10,6 @@
     "api/index.ts": {
       "maxDuration": 30
     }
-  }
+  },
+  "ignoreCommand": "case \"$VERCEL_GIT_COMMIT_REF\" in main|preview) exit 1 ;; *) exit 0 ;; esac"
 }

@@ -29,53 +29,55 @@ This document tests the **current bounded runtime**. Future automation experimen
 ## Current runtime — bounded development
 
 17. A work branch starts from an exact Preview SHA.
-18. A bounded commit advances only the expected work-branch head.
-19. A pull request may target the project's explicit integration branch.
-20. PR status reports exact head/base identity plus checks and workflow runs.
-21. Pending checks/workflows summarize as `external-gate-pending` with no agent action required.
-22. Repeating the same head/state observation reports no meaningful transition.
-23. A `seal-b` candidate can distinguish expected pre-seal `action-smoke` failure from source `verify` failure.
-24. A bot-pushed sealed head with `action_required` reports exact-head verification required.
-25. Settled technical gates report `promotion-ready` without inferring Main approval.
-26. Integration merge rejects the repository default branch as target.
-27. Integration merge rejects unapproved source branch classes.
-28. Duplicate mutation attempts replay the durable idempotent receipt instead of repeating the side effect.
+18. Automatic Vercel Git builds are ignored for ordinary work/repair/audit branches; GitHub verification remains the work-branch gate, while exact ad-hoc Vercel canaries are explicitly requested.
+19. A bounded commit advances only the expected work-branch head.
+20. A pull request may target the project's explicit integration branch.
+21. PR status reports exact head/base identity plus checks and workflow runs.
+22. Pending checks/workflows summarize as `external-gate-pending` with no agent action required.
+23. Repeating the same head/state observation reports no meaningful transition.
+24. A `seal-b` candidate can distinguish expected pre-seal `action-smoke` failure from source `verify` failure.
+25. A bot-pushed sealed head with `action_required` reports exact-head verification required.
+26. Settled technical gates report `promotion-ready` without inferring Main approval.
+27. Integration merge rejects the repository default branch as target.
+28. Integration merge rejects unapproved source branch classes.
+29. Duplicate mutation attempts replay the durable idempotent receipt instead of repeating the side effect.
 
 ## Current runtime — Vercel provider boundary
 
-29. A read-only request for an unbound repository may resolve exactly one Git-linked Vercel project through one unambiguous connected installation/team.
-30. Ambiguous installation, project, team, pagination, or Git-link evidence fails closed rather than selecting a project heuristically.
-31. `deployment.status` distinguishes currently served production from newer attempts and carries provider deployment identity plus source Git revision/ref where available.
-32. `deployment.logs` returns bounded/redacted build or deployment-event evidence for one exact deployment.
-33. `deployment.audit` returns bounded project/team identity, Git linkage, domains/aliases, custom environments, recent deployments, variable metadata, and only the account posture exposed by supported APIs.
-34. `deployment.runtime-logs` proves endpoint access with one exact deployment. Permission denial remains explicit and operation preflight stays degraded rather than claiming readiness.
-35. `deployment.redeploy` acts only on one exact bound deployment and idempotent replay does not create a second redeployment.
-36. `deployment.git.create` requires an exact linked repository, ref, and full SHA. Preview creation omits a literal `target: "preview"`; production creation requires exact owner approval.
-37. `deployment.promote` and `deployment.rollback` require one exact READY bound deployment, exact owner approval, and provider read-after-write reconciliation.
-38. `deployment.env.list` returns variable metadata without values.
-39. Environment upsert/update/remove operates on one exact bound project and exact key/ID/target; production-scoped changes require exact owner approval.
-40. Environment values remain write-only: secret material never appears in receipts, diagnostics, audit output, or recoverable idempotency state.
-41. Cross-project Vercel writes require an explicit exact repository/project/installation binding plus the active repository work scope; installation-wide provider reach alone never authorizes mutation.
+30. A read-only request for an unbound repository may resolve exactly one Git-linked Vercel project through one unambiguous connected installation/team.
+31. Ambiguous installation, project, team, pagination, or Git-link evidence fails closed rather than selecting a project heuristically.
+32. `deployment.status` distinguishes currently served production from newer attempts and carries provider deployment identity plus source Git revision/ref where available.
+33. `deployment.logs` returns bounded/redacted build or deployment-event evidence for one exact deployment.
+34. `deployment.audit` returns bounded project/team identity, Git linkage, domains/aliases, custom environments, recent deployments, variable metadata, and only the account posture exposed by supported APIs.
+35. `deployment.runtime-logs` proves endpoint access with one exact deployment. Permission denial remains explicit and operation preflight stays degraded rather than claiming readiness.
+36. `deployment.redeploy` acts only on one exact bound deployment and idempotent replay does not create a second redeployment.
+37. `deployment.git.create` requires an exact linked repository, ref, and full SHA. Preview creation omits a literal `target: "preview"`; production creation requires exact owner approval.
+38. `deployment.promote` and `deployment.rollback` require one exact READY bound deployment, exact owner approval, and provider read-after-write reconciliation.
+39. `deployment.env.list` returns variable metadata without values.
+40. Environment upsert/update/remove operates on one exact bound project and exact key/ID/target; production-scoped changes require exact owner approval.
+41. Environment values remain write-only: secret material never appears in receipts, diagnostics, audit output, or recoverable idempotency state.
+42. Cross-project Vercel writes require an explicit exact repository/project/installation binding plus the active repository work scope; installation-wide provider reach alone never authorizes mutation.
+43. `deployment.delete` removes only one exact terminal bound deployment: current production and active builds are refused, historical production artifacts require exact owner approval, and idempotent replay does not repeat deletion.
 
 ## Current runtime — release and reconciliation
 
-42. Main promotion requires an exact head SHA, exact base SHA, repository-default target, and explicit owner approval reference.
-43. Stale promotion identity fails closed.
-44. Conductor cannot infer or bypass Main approval.
-45. Normal promotion uses a merge commit, so the exact approved Preview head becomes Main ancestry without a return PR; squash/rebase promotion fails closed.
-46. Preview reconciliation rejects non-default sources and non-Preview targets.
-47. Preview reconciliation always uses a merge commit so accepted ancestry is preserved.
-48. A subsequent work branch starts from Preview directly after normal promotion. Main-only changes use the exact reconciliation lane before ordinary Preview work resumes.
+44. Main promotion requires an exact head SHA, exact base SHA, repository-default target, and explicit owner approval reference.
+45. Stale promotion identity fails closed.
+46. Conductor cannot infer or bypass Main approval.
+47. Normal promotion uses a merge commit, so the exact approved Preview head becomes Main ancestry without a return PR; squash/rebase promotion fails closed.
+48. Preview reconciliation rejects non-default sources and non-Preview targets.
+49. Preview reconciliation always uses a merge commit so accepted ancestry is preserved.
+50. A subsequent work branch starts from Preview directly after normal promotion. Main-only changes use the exact reconciliation lane before ordinary Preview work resumes.
 
 ## Current runtime — reliability and security
 
-49. Restarting the hosted runtime does not lose durable mutation idempotency when Redis is configured.
-50. Expired GitHub App installation credentials are reminted through the credential provider.
-51. GitHub/Vercel/provider failure leaves provider-native state authoritative.
-52. Production-only secrets are not required by ordinary Preview development.
-53. A self-hosted/local runner does not execute untrusted public code by default.
-54. Every consequential merge or provider-mutation receipt retains the exact resulting provider identity plus relevant approval/reconciliation evidence.
-55. Public `/health` exposes only runtime readiness/contract information and can be reconciled to the expected deployed Git revision through provider evidence.
+51. Restarting the hosted runtime does not lose durable mutation idempotency when Redis is configured.
+52. Expired GitHub App installation credentials are reminted through the credential provider.
+53. GitHub/Vercel/provider failure leaves provider-native state authoritative.
+54. Production-only secrets are not required by ordinary Preview development.
+55. A self-hosted/local runner does not execute untrusted public code by default.
+56. Every consequential merge or provider-mutation receipt retains the exact resulting provider identity plus relevant approval/reconciliation evidence.
+57. Public `/health` exposes only runtime readiness/contract information and can be reconciled to the expected deployed Git revision through provider evidence.
 
 ## Deferred experiments — not current product commitments
 
