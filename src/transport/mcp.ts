@@ -510,7 +510,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
     server.registerTool('pull-request.create', {
       title: 'Open a pull request',
-      description: 'Open a work/* pull request against an explicit branch. Creating a proposal is allowed; merging or promoting accepted branches is a separate consequential operation.',
+      description: 'Open a work/* pull request against an explicit branch, or propose exact preview/vercel-preview to the provider-native default branch. Creating a proposal never authorizes merge or production promotion.',
       inputSchema: z.object({
         project: projectSchema,
         workContext: workContextSchema,

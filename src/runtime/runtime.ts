@@ -148,7 +148,7 @@ const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'git.branch.create', description: 'Create a work/* branch from an exact Git SHA.', mutates: true },
   { name: 'git.branch.delete', description: 'Delete one exact integrated development branch after proving its head is already contained in Preview or Main.', mutates: true },
   { name: 'git.commit.create', description: 'Create files in one commit and advance an existing work/* branch from an expected head SHA.', mutates: true },
-  { name: 'pull-request.create', description: 'Open a work/* pull request against an explicit target branch.', mutates: true },
+  { name: 'pull-request.create', description: 'Open a work/* pull request or the bounded Preview-to-default promotion proposal lane.', mutates: true },
   { name: 'pull-request.comment.create', description: 'Add a comment to a pull request.', mutates: true },
   { name: 'pull-request.labels.update', description: 'Add/remove pull-request labels while preserving unrelated labels.', mutates: true },
   { name: 'pull-request.merge.integration', description: 'Merge an exact PR candidate into a non-accepted integration branch.', mutates: true },
