@@ -17,11 +17,13 @@ export interface RuntimeBinding {
   vercelProject?: string;
   vercelTeamId?: string;
   vercelConnectionId?: string;
+  vercelRuntimeLogsDirect?: boolean;
 }
 
 export interface RuntimeEnvironment extends Record<string, string | undefined> {
   CONDUCTOR_PROJECTS_JSON?: string;
   CONDUCTOR_VERCEL_BINDINGS_JSON?: string;
+  CONDUCTOR_VERCEL_RUNTIME_LOG_BINDINGS_JSON?: string;
   GITHUB_TOKEN?: string;
   CONDUCTOR_GITHUB_APP_ID?: string;
   CONDUCTOR_GITHUB_APP_PRIVATE_KEY?: string;
@@ -40,9 +42,12 @@ export interface RuntimeEnvironment extends Record<string, string | undefined> {
 export function createRuntimeFromEnvironment(
   environment: RuntimeEnvironment = process.env,
 ): ConductorToolRuntime {
-  const bindings = mergeVercelBindings(
-    parseRuntimeBindings(environment.CONDUCTOR_PROJECTS_JSON),
-    parseVercelBindingOverlay(environment.CONDUCTOR_VERCEL_BINDINGS_JSON),
+  const bindings = mergeVercelRuntimeLogBindings(
+    mergeVercelBindings(
+      parseRuntimeBindings(environment.CONDUCTOR_PROJECTS_JSON),
+      parseVercelBindingOverlay(environment.CONDUCTOR_VERCEL_BINDINGS_JSON),
+    ),
+    parseVercelRuntimeLogBindingOverlay(environment.CONDUCTOR_VERCEL_RUNTIME_LOG_BINDINGS_JSON),
   );
   const providers: ToolRuntimeProvider[] = [environment.DEVINT_MCP_URL
     ? new DevelopmentIntelligenceProvider({
@@ -74,7 +79,7 @@ export function createRuntimeFromEnvironment(
   }
 
   const vercelBindings = bindings.flatMap((binding) => binding.vercelProject
-    ? [{ id: binding.id, project: binding.vercelProject, repository: binding.repository, teamId: binding.vercelTeamId, connectionId: binding.vercelConnectionId }]
+    ? [{ id: binding.id, project: binding.vercelProject, repository: binding.repository, teamId: binding.vercelTeamId, connectionId: binding.vercelConnectionId, runtimeLogsDirect: binding.vercelRuntimeLogsDirect }]
     : []);
   let vercelProvider: VercelDeploymentProvider | undefined;
   if (vercelBindings.length > 0) {
@@ -170,6 +175,9 @@ export function parseRuntimeBindings(value?: string): RuntimeBinding[] {
     if (project.vercelConnectionId !== undefined && (typeof project.vercelConnectionId !== 'string' || !/^icfg_[\w-]+$/u.test(project.vercelConnectionId))) {
       throw new Error(`Runtime binding ${project.id} vercelConnectionId must be a Vercel installation ID`);
     }
+    if (project.vercelRuntimeLogsDirect !== undefined && typeof project.vercelRuntimeLogsDirect !== 'boolean') {
+      throw new Error(`Runtime binding ${project.id} vercelRuntimeLogsDirect must be a boolean`);
+    }
     return {
       id: project.id,
       repository: project.repository,
@@ -178,6 +186,7 @@ export function parseRuntimeBindings(value?: string): RuntimeBinding[] {
       ...(typeof project.vercelProject === 'string' ? { vercelProject: project.vercelProject } : {}),
       ...(typeof project.vercelTeamId === 'string' ? { vercelTeamId: project.vercelTeamId } : {}),
       ...(typeof project.vercelConnectionId === 'string' ? { vercelConnectionId: project.vercelConnectionId } : {}),
+      ...(typeof project.vercelRuntimeLogsDirect === 'boolean' ? { vercelRuntimeLogsDirect: project.vercelRuntimeLogsDirect } : {}),
     } as RuntimeBinding;
   });
 }
@@ -198,6 +207,45 @@ export function parseVercelBindingOverlay(value?: string): RuntimeBinding[] {
     if (fields.vercelTeamId !== undefined && (typeof fields.vercelTeamId !== 'string' || !/^team_[A-Za-z0-9]+$/u.test(fields.vercelTeamId))) throw new Error(`Vercel binding at index ${index} has an invalid team ID`);
   }
   return parseRuntimeBindings(value);
+}
+
+/** Exact opt-in for routing only runtime-log reads through the server-side direct token. */
+export function parseVercelRuntimeLogBindingOverlay(value?: string): RuntimeBinding[] {
+  if (!value) return [];
+  const raw: unknown = JSON.parse(value);
+  if (!Array.isArray(raw)) throw new Error('CONDUCTOR_VERCEL_RUNTIME_LOG_BINDINGS_JSON must be a JSON array');
+  const permitted = new Set(['id', 'repository', 'vercelProject', 'vercelTeamId']);
+  return raw.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`Vercel runtime-log binding at index ${index} must be an object`);
+    const fields = entry as Record<string, unknown>;
+    if (Object.keys(fields).some(key => !permitted.has(key))) throw new Error(`Vercel runtime-log binding at index ${index} contains an unsupported field`);
+    if (typeof fields.id !== 'string' || fields.id.trim() === '') throw new Error(`Vercel runtime-log binding at index ${index} requires an exact runtime id`);
+    if (typeof fields.repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(fields.repository)) throw new Error(`Vercel runtime-log binding at index ${index} requires an exact repository`);
+    if (typeof fields.vercelProject !== 'string' || !/^prj_[A-Za-z0-9]+$/u.test(fields.vercelProject)) throw new Error(`Vercel runtime-log binding at index ${index} requires an exact project ID`);
+    if (fields.vercelTeamId !== undefined && (typeof fields.vercelTeamId !== 'string' || !/^team_[A-Za-z0-9]+$/u.test(fields.vercelTeamId))) throw new Error(`Vercel runtime-log binding at index ${index} has an invalid team ID`);
+    return {
+      id: fields.id,
+      repository: fields.repository,
+      vercelProject: fields.vercelProject,
+      ...(typeof fields.vercelTeamId === 'string' ? { vercelTeamId: fields.vercelTeamId } : {}),
+      vercelRuntimeLogsDirect: true,
+    } as RuntimeBinding;
+  });
+}
+
+export function mergeVercelRuntimeLogBindings(base: RuntimeBinding[], overlay: RuntimeBinding[]): RuntimeBinding[] {
+  const result = base.map(binding => ({ ...binding }));
+  for (const extra of overlay) {
+    const index = result.findIndex(binding => binding.id.toLowerCase() === extra.id.toLowerCase());
+    if (index < 0) throw new Error(`Vercel runtime-log binding requires an existing exact Vercel binding: ${extra.id}`);
+    const existing = result[index]!;
+    const sameRepository = existing.repository?.toLowerCase() === extra.repository?.toLowerCase();
+    const sameProject = existing.vercelProject === extra.vercelProject;
+    const sameTeam = (existing.vercelTeamId ?? undefined) === (extra.vercelTeamId ?? undefined);
+    if (!sameRepository || !sameProject || !sameTeam) throw new Error(`Vercel runtime-log binding conflicts with existing binding ${extra.id}`);
+    result[index] = { ...existing, vercelRuntimeLogsDirect: true };
+  }
+  return result;
 }
 
 export function mergeVercelBindings(base: RuntimeBinding[], overlay: RuntimeBinding[]): RuntimeBinding[] {

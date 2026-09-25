@@ -298,3 +298,31 @@ test('VCR create is durably idempotent through the runtime', async () => {
   }
   assert.equal(calls.filter(call => call.path === '/v1/vcr/repository' && call.method === 'POST').length, 1);
 });
+
+
+test('runtime-log direct opt-in preserves installation identity checks and uses the direct token only for runtime output', async () => {
+  const authorization = new Map<string, string>();
+  const provider = new VercelDeploymentProvider({
+    token: 'direct-token',
+    bindings: [{ id: 'app', project: 'app', teamId: 'team_1', connectionId: 'icfg_1', runtimeLogsDirect: true }],
+    tokenResolver: async () => 'installation-token',
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      authorization.set(url.pathname, (init?.headers as Record<string, string> | undefined)?.Authorization ?? '');
+      if (url.pathname === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app' });
+      if (url.pathname === '/v13/deployments/dpl_preview') return Response.json({ id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: 'preview' });
+      if (url.pathname === '/v1/projects/prj_app/deployments/dpl_preview/runtime-logs') return Response.json({ logs: [{ message: 'TOKEN=hidden', created: 1 }] });
+      return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
+    },
+  });
+  const project = { id: 'app' };
+  const preflight = (await provider.preflightOperation(project, 'deployment.runtime-logs'))?.[0];
+  assert.equal(preflight?.status, 'degraded');
+  assert.match(preflight?.diagnostics[0]?.message ?? '', /direct token/u);
+  const logs = await provider.getRuntimeLogs({ project, deploymentId: 'dpl_preview', limit: 10 });
+  assert.equal(authorization.get('/v9/projects/app'), 'Bearer installation-token');
+  assert.equal(authorization.get('/v13/deployments/dpl_preview'), 'Bearer installation-token');
+  assert.equal(authorization.get('/v1/projects/prj_app/deployments/dpl_preview/runtime-logs'), 'Bearer direct-token');
+  assert.doesNotMatch(JSON.stringify(logs), /TOKEN=hidden/);
+  assert.match(JSON.stringify(logs), /redacted/);
+});
