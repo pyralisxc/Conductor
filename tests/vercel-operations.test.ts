@@ -15,9 +15,12 @@ function fixture() {
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined;
       calls.push({ path: url.pathname, method, body });
       if (url.pathname === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app', link: { org: 'owner', repo: 'app', productionBranch: 'main' }, targets: { production: { id: production } } });
+      if (url.pathname.startsWith('/v13/deployments/dpl_') && method === 'DELETE') return Response.json({ uid: url.pathname.split('/').at(-1), state: 'DELETED' });
       if (url.pathname === '/v13/deployments/dpl_old') return Response.json({ id: 'dpl_old', projectId: 'prj_app', readyState: 'READY', target: 'production' });
       if (url.pathname === '/v13/deployments/dpl_other') return Response.json({ id: 'dpl_other', projectId: 'prj_other', readyState: 'READY' });
       if (url.pathname === '/v13/deployments/dpl_preview') return Response.json({ id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: 'preview' });
+      if (url.pathname === '/v13/deployments/dpl_prodold') return Response.json({ id: 'dpl_prodold', projectId: 'prj_app', readyState: 'READY', target: 'production' });
+      if (url.pathname === '/v13/deployments/dpl_building') return Response.json({ id: 'dpl_building', projectId: 'prj_app', readyState: 'BUILDING', target: null });
       if (url.pathname === '/v13/deployments' && method === 'POST') {
         if (body?.gitSource && body.target === 'preview') return Response.json({ error: { message: 'Invalid target' } }, { status: 400 });
         return Response.json({ id: 'dpl_new', readyState: 'BUILDING' });
@@ -52,6 +55,62 @@ test('Vercel operations scope exact deployments and require production approval'
   assert.equal(promoted.verified, true);
   const rolled = await provider.rollback({ project, deploymentId: 'dpl_old', approvalReference: 'owner-approved:exact-old-commit', idempotencyKey: 'rollback-old' });
   assert.equal(rolled.verified, true);
+});
+
+
+test('deployment cleanup protects current production and active builds', async () => {
+  const { provider, calls, project } = fixture();
+  await assert.rejects(
+    provider.deleteDeployment({ project, deploymentId: 'dpl_old', idempotencyKey: 'delete-current-production' }),
+    (error: unknown) => {
+      assert.match((error as { message?: string }).message ?? JSON.stringify(error), /currently serving production/u);
+      return true;
+    },
+  );
+  await assert.rejects(
+    provider.deleteDeployment({ project, deploymentId: 'dpl_building', idempotencyKey: 'delete-active-build' }),
+    (error: unknown) => {
+      assert.match((error as { message?: string }).message ?? JSON.stringify(error), /terminal/u);
+      return true;
+    },
+  );
+  await assert.rejects(
+    provider.deleteDeployment({ project, deploymentId: 'dpl_prodold', idempotencyKey: 'delete-historical-production' }),
+    (error: unknown) => {
+      assert.match((error as { message?: string }).message ?? JSON.stringify(error), /approval/u);
+      return true;
+    },
+  );
+
+  const preview = await provider.deleteDeployment({ project, deploymentId: 'dpl_preview', idempotencyKey: 'delete-preview' });
+  assert.equal(preview.verified, true);
+  assert.equal(preview.state, 'DELETED');
+
+  const historical = await provider.deleteDeployment({
+    project,
+    deploymentId: 'dpl_prodold',
+    approvalReference: 'owner-approved:delete-historical-production',
+    idempotencyKey: 'delete-historical-production-approved',
+  });
+  assert.equal(historical.verified, true);
+  assert.equal(historical.priorTarget, 'production');
+  assert.equal(calls.filter(call => call.method === 'DELETE').length, 2);
+});
+
+test('deployment cleanup replays durable idempotency instead of deleting twice', async () => {
+  const { provider, calls, project } = fixture();
+  const runtime = new ConductorToolRuntime({
+    providers: [provider],
+    deploymentProvider: provider,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const input = { project, deploymentId: 'dpl_preview', idempotencyKey: 'deployment-delete-replay' };
+  const first = await runtime.vercelDeleteDeployment(input);
+  assert.equal(first.status, 'succeeded');
+  const replay = await runtime.vercelDeleteDeployment(input);
+  assert.equal(replay.status, 'succeeded');
+  assert.equal(replay.idempotency?.replayed, true);
+  assert.equal(calls.filter(call => call.method === 'DELETE').length, 1);
 });
 
 test('exact Git source must match the linked project and full SHA', async () => {
@@ -102,11 +161,41 @@ test('variable values stay out of audit, receipts and durable idempotency state'
   assert.equal(removed.verifiedRemoved, true);
 });
 
-test('runtime log preflight does not claim endpoint permission from project read', async () => {
+test('runtime log preflight does not claim endpoint permission from a direct token project read', async () => {
   const { provider, project } = fixture();
   const preflight = (await provider.preflightOperation(project, 'deployment.runtime-logs'))?.[0];
   assert.equal(preflight?.status, 'degraded');
   assert.match(preflight?.diagnostics[0]?.message ?? '', /runtime-log endpoint access is unverified/u);
+});
+
+test('connected Vercel integration reports the documented runtime-log scope boundary without calling the endpoint', async () => {
+  const calls: string[] = [];
+  const provider = new VercelDeploymentProvider({
+    bindings: [{ id: 'app', project: 'app', teamId: 'team_1', connectionId: 'icfg_1' }],
+    tokenResolver: async () => 'installation-token',
+    fetch: async input => {
+      const path = new URL(String(input)).pathname;
+      calls.push(path);
+      if (path === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app' });
+      if (path === '/v13/deployments/dpl_preview') return Response.json({ id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: 'preview' });
+      if (path.includes('/runtime-logs')) throw new Error('runtime-log endpoint must not be called with an integration installation token');
+      return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
+    },
+  });
+  const project = { id: 'app' };
+  const preflight = (await provider.preflightOperation(project, 'deployment.runtime-logs'))?.[0];
+  assert.equal(preflight?.status, 'unavailable');
+  assert.match(preflight?.diagnostics[0]?.message ?? '', /installation tokens do not authorize/u);
+
+  await assert.rejects(
+    provider.getRuntimeLogs({ project, deploymentId: 'dpl_preview', limit: 10 }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'TOOL_UNAVAILABLE');
+      assert.match((error as { message?: string }).message ?? '', /Integration API installation tokens/u);
+      return true;
+    },
+  );
+  assert.equal(calls.some(path => path.includes('/runtime-logs')), false);
 });
 
 test('runtime logs stay bound and redact secrets', async () => {

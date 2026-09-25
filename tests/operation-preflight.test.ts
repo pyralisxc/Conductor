@@ -42,6 +42,16 @@ test('GitHub App operation preflight proves exact read permissions and blocks mi
     'pull-request.status',
   );
   assert.equal(read?.[0]?.status, 'ready');
+  const sourceRead = await provider.preflightOperation(
+    { id: 'pyralisxc/Conductor' },
+    'source.artifact.read',
+  );
+  assert.equal(sourceRead?.[0]?.status, 'ready');
+  const ciRead = await provider.preflightOperation(
+    { id: 'pyralisxc/Conductor' },
+    'ci.run.read',
+  );
+  assert.equal(ciRead?.[0]?.status, 'ready');
 
   const write = await provider.preflightOperation(
     { id: 'pyralisxc/Conductor' },

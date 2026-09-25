@@ -128,7 +128,7 @@ The v0 runtime includes an authenticated Streamable HTTP MCP adapter, owner-scop
 
 The preferred GitHub identity is a private GitHub App that mints repository-scoped installation tokens and proves operation-specific permissions. Static tokens remain an explicitly degraded migration path.
 
-Vercel reads may inspect one uniquely Git-linked project through an owner-connected installation. Vercel writes require an exact project/repository binding, active repository work scope, durable idempotency, and explicit owner approval for production traffic or production-variable changes. Environment values are write-only through Conductor. Runtime-log access remains permission-sensitive and is reported as degraded when the connected installation cannot prove or perform the exact endpoint read.
+Vercel reads may inspect one uniquely Git-linked project through an owner-connected installation. Vercel writes require an exact project/repository binding, active repository work scope, and durable idempotency. Production traffic, production-variable changes, and deletion of historical production rollback artifacts require explicit owner approval. Exact deployment cleanup protects current production and refuses active builds. Environment values are write-only through Conductor. Runtime-log access remains permission-sensitive and is reported as degraded when the connected installation cannot prove or perform the exact endpoint read.
 
 See `docs/TOOL_RUNTIME_V0.md`, `docs/GITHUB_AUTHORIZATION.md`, and `docs/MCP_RUNTIME.md` for the current contracts.
 

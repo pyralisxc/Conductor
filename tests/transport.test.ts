@@ -12,7 +12,7 @@ import {
   IdempotentMutationExecutor,
   InMemoryIdempotencyStore,
 } from '../src/index.js';
-import type { SourceControlMutationProvider } from '../src/index.js';
+import type { SourceControlMutationProvider, SourceArtifactReadProvider, CiReadProvider } from '../src/index.js';
 
 test('MCP adapter advertises only the core typed read-only runtime tools', async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -90,6 +90,7 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
     id: 'github',
     async getCapabilities() { return []; },
     async createBranch(input) { return { repository: input.project.repository!, branch: input.branch, commitSha: input.fromSha }; },
+    async deleteBranch(input) { return { repository: input.project.repository!, branch: input.branch, commitSha: input.expectedHeadSha, deleted: true as const, containedIn: 'preview' }; },
     async createCommit() { throw new Error('unused'); },
     async createPullRequest() { throw new Error('unused'); },
     async commentPullRequest() { throw new Error('unused'); },
@@ -109,7 +110,7 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
   await client.connect(clientTransport);
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name), [
-    'capabilities', 'preflight_project', 'git.branch.create', 'git.commit.create',
+    'capabilities', 'preflight_project', 'git.branch.create', 'git.branch.delete', 'git.commit.create',
     'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
     'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
   ]);
@@ -118,3 +119,32 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
   await server.close();
 });
 
+test('MCP publishes DI-first exact source and CI drill-down reads when their providers are configured', async () => {
+  const sourceArtifactProvider: SourceArtifactReadProvider = {
+    id: 'source',
+    async getCapabilities() { return []; },
+    async getSourceArtifact(input) {
+      return { provider: 'github', repository: input.project.repository!, revisionSha: input.sha, path: input.path, blobSha: 'blob', size: 4, status: 'available', content: 'text', encoding: 'utf-8', reason: null, observedAt: '2026-09-25T00:00:00Z' };
+    },
+  };
+  const ciReadProvider: CiReadProvider = {
+    id: 'ci',
+    async getCapabilities() { return []; },
+    async getCiRunEvidence(input) {
+      return { provider: 'github', repository: input.project.repository!, pullRequestNumber: input.pullRequestNumber, headSha: input.expectedHeadSha, workflowRun: { id: input.workflowRunId, name: 'verify', status: 'completed', conclusion: 'failure', url: null, event: null, headSha: input.expectedHeadSha }, jobs: [], jobsTruncated: false, observedAt: '2026-09-25T00:00:00Z' };
+    },
+  };
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createConductorMcpServer(new ConductorToolRuntime({ sourceArtifactProvider, ciReadProvider }));
+  const client = new Client({ name: 'evidence-client', version: '1.0.0' });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const listed = await client.listTools();
+  const names = listed.tools.map(tool => tool.name);
+  assert.equal(names.includes('source.artifact.read'), true);
+  assert.equal(names.includes('ci.run.read'), true);
+  assert.equal(listed.tools.find(tool => tool.name === 'source.artifact.read')?.annotations?.readOnlyHint, true);
+  assert.equal(listed.tools.find(tool => tool.name === 'ci.run.read')?.annotations?.readOnlyHint, true);
+  await client.close();
+  await server.close();
+});

@@ -6,11 +6,17 @@ import type {
   ProjectReference,
   RuntimeOperationName,
   CreateBranchInput,
+  DeleteBranchInput,
   CreateCommitInput,
   CreatePullRequestInput,
   CommentPullRequestInput,
   GetPullRequestStatusInput,
   PullRequestStatus,
+  GetSourceArtifactInput,
+  SourceArtifactRead,
+  GetCiRunEvidenceInput,
+  CiRunEvidence,
+  CiJobEvidence,
   PullRequestOrchestration,
   PullRequestOrchestrationState,
   UpdatePullRequestLabelsInput,
@@ -37,7 +43,7 @@ import type {
   UpdateWorkItemClassificationInput,
 } from '../runtime/types.js';
 import { normalizeToolError } from '../runtime/errors.js';
-import type { OperationPreflightProvider, SourceControlMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
+import type { OperationPreflightProvider, SourceControlMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
 import {
   StaticGitHubCredentialProvider,
   type GitHubCredential,
@@ -113,6 +119,46 @@ interface GitHubWorkflowRunsResponse {
   }>;
 }
 
+interface GitHubWorkflowRunResponse {
+  id: number;
+  name?: string | null;
+  status: string;
+  conclusion: string | null;
+  html_url?: string | null;
+  head_sha: string;
+  event?: string | null;
+}
+
+interface GitHubWorkflowJobsResponse {
+  total_count: number;
+  jobs: Array<{
+    id: number;
+    name: string;
+    status: string;
+    conclusion: string | null;
+    html_url?: string | null;
+    started_at?: string | null;
+    completed_at?: string | null;
+    steps?: Array<{
+      number: number;
+      name: string;
+      status: string;
+      conclusion: string | null;
+      started_at?: string | null;
+      completed_at?: string | null;
+    }>;
+  }>;
+}
+
+interface GitHubContentResponse {
+  type: string;
+  path?: string;
+  sha?: string;
+  size?: number;
+  encoding?: string | null;
+  content?: string | null;
+}
+
 interface GitHubLabelResponse {
   name: string;
 }
@@ -138,7 +184,7 @@ export interface GitHubRuntimeProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, SourceControlMutationProvider, PullRequestReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
+export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, SourceControlMutationProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
   readonly id = 'github';
   private readonly credentials?: GitHubCredentialProvider;
   private readonly bindings: ReadonlyMap<string, GitHubRepositoryBinding>;
@@ -463,6 +509,200 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     };
   }
 
+  async getSourceArtifact(input: GetSourceArtifactInput): Promise<SourceArtifactRead> {
+    const { repository, credential } = await this.readableRepository(input.project, GITHUB_READ_OPERATION_PERMISSIONS['source.artifact.read']);
+    assertSha(input.sha, 'sha');
+    const path = validRepositoryPath(input.path);
+    const maxBytes = boundedInteger(input.maxBytes ?? 256 * 1024, 1, 1024 * 1024);
+    const payload = await this.request<GitHubContentResponse | GitHubContentResponse[]>(
+      repository,
+      `/contents/${encodePath(path)}?ref=${encodeURIComponent(input.sha)}`,
+      {},
+      credential,
+    );
+    if (Array.isArray(payload)) {
+      return {
+        provider: 'github', repository, revisionSha: input.sha, path, blobSha: null, size: null,
+        status: 'unsupported', content: null, encoding: null,
+        reason: 'Exact source artifact read supports files only; the requested path resolved to a directory.',
+        observedAt: new Date().toISOString(),
+      };
+    }
+
+    const size = typeof payload.size === 'number' ? payload.size : null;
+    const blobSha = typeof payload.sha === 'string' ? payload.sha : null;
+    if (payload.type !== 'file') {
+      return {
+        provider: 'github', repository, revisionSha: input.sha, path, blobSha, size,
+        status: 'unsupported', content: null, encoding: null,
+        reason: `GitHub path type ${payload.type || '(unknown)'} is not a regular file.`,
+        observedAt: new Date().toISOString(),
+      };
+    }
+    if (size !== null && size > maxBytes) {
+      return {
+        provider: 'github', repository, revisionSha: input.sha, path, blobSha, size,
+        status: 'too-large', content: null, encoding: null,
+        reason: `Source artifact is ${size} bytes; configured read limit is ${maxBytes} bytes.`,
+        observedAt: new Date().toISOString(),
+      };
+    }
+    if (payload.encoding !== 'base64' || typeof payload.content !== 'string') {
+      return {
+        provider: 'github', repository, revisionSha: input.sha, path, blobSha, size,
+        status: 'unsupported', content: null, encoding: null,
+        reason: 'GitHub did not return complete base64 file content for this bounded read.',
+        observedAt: new Date().toISOString(),
+      };
+    }
+
+    const bytes = Buffer.from(payload.content.replace(/\s/gu, ''), 'base64');
+    if (bytes.byteLength > maxBytes) {
+      return {
+        provider: 'github', repository, revisionSha: input.sha, path, blobSha, size: size ?? bytes.byteLength,
+        status: 'too-large', content: null, encoding: null,
+        reason: `Source artifact exceeds the configured ${maxBytes}-byte read limit.`,
+        observedAt: new Date().toISOString(),
+      };
+    }
+    if (bytes.includes(0)) {
+      return {
+        provider: 'github', repository, revisionSha: input.sha, path, blobSha, size: size ?? bytes.byteLength,
+        status: 'binary', content: null, encoding: null,
+        reason: 'Source artifact contains NUL bytes and is treated as binary.',
+        observedAt: new Date().toISOString(),
+      };
+    }
+    let content: string;
+    try {
+      content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      return {
+        provider: 'github', repository, revisionSha: input.sha, path, blobSha, size: size ?? bytes.byteLength,
+        status: 'binary', content: null, encoding: null,
+        reason: 'Source artifact is not valid UTF-8 text.',
+        observedAt: new Date().toISOString(),
+      };
+    }
+    return {
+      provider: 'github', repository, revisionSha: input.sha, path, blobSha, size: size ?? bytes.byteLength,
+      status: 'available', content, encoding: 'utf-8', reason: null, observedAt: new Date().toISOString(),
+    };
+  }
+
+  async getCiRunEvidence(input: GetCiRunEvidenceInput): Promise<CiRunEvidence> {
+    const { repository, credential } = await this.readableRepository(input.project, GITHUB_READ_OPERATION_PERMISSIONS['ci.run.read']);
+    assertPullRequestNumber(input.pullRequestNumber);
+    assertSha(input.expectedHeadSha, 'expectedHeadSha');
+    if (!Number.isSafeInteger(input.workflowRunId) || input.workflowRunId <= 0) {
+      throw { code: 'CONFLICT', message: 'workflowRunId must be a positive integer' };
+    }
+    if (input.jobId !== undefined && (!Number.isSafeInteger(input.jobId) || input.jobId <= 0)) {
+      throw { code: 'CONFLICT', message: 'jobId must be a positive integer when provided' };
+    }
+    const logTailBytes = boundedInteger(input.logTailBytes ?? 12_000, 1024, 50_000);
+
+    const pull = await this.request<GitHubPullRequestResponse>(
+      repository,
+      `/pulls/${input.pullRequestNumber}`,
+      {},
+      credential,
+    );
+    if (pull.head.sha !== input.expectedHeadSha) {
+      throw { code: 'CONFLICT', message: `Pull-request head changed from expected ${input.expectedHeadSha} to ${pull.head.sha}` };
+    }
+    const run = await this.request<GitHubWorkflowRunResponse>(
+      repository,
+      `/actions/runs/${input.workflowRunId}`,
+      {},
+      credential,
+    );
+    if (run.head_sha !== input.expectedHeadSha) {
+      throw { code: 'CONFLICT', message: `Workflow run ${input.workflowRunId} belongs to ${run.head_sha}, not expected head ${input.expectedHeadSha}` };
+    }
+    const jobsPayload = await this.request<GitHubWorkflowJobsResponse>(
+      repository,
+      `/actions/runs/${input.workflowRunId}/jobs?per_page=100`,
+      {},
+      credential,
+    );
+    if (input.jobId !== undefined && !jobsPayload.jobs.some(job => job.id === input.jobId)) {
+      throw { code: 'NOT_FOUND', message: `Job ${input.jobId} is not part of workflow run ${input.workflowRunId}` };
+    }
+
+    const failedJobIds = jobsPayload.jobs
+      .filter(job => isFailureConclusion(job.conclusion))
+      .slice(0, 3)
+      .map(job => job.id);
+    const requestedLogIds = new Set<number>(input.jobId !== undefined ? [input.jobId] : failedJobIds);
+
+    const jobs: CiJobEvidence[] = [];
+    for (const job of jobsPayload.jobs) {
+      const steps = (job.steps ?? []).map(step => ({
+        number: step.number,
+        name: step.name,
+        status: step.status,
+        conclusion: step.conclusion,
+        startedAt: step.started_at ?? null,
+        completedAt: step.completed_at ?? null,
+      }));
+      let log: CiJobEvidence['log'] = {
+        status: 'not-requested', text: null, truncated: false, totalBytes: null, reason: null,
+      };
+      if (requestedLogIds.has(job.id)) {
+        const response = await this.fetch(
+          `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/actions/jobs/${job.id}/logs`,
+          { headers: this.headers(credential.token) },
+        );
+        if (!response.ok) {
+          log = {
+            status: 'unavailable', text: null, truncated: false, totalBytes: null,
+            reason: `GitHub job logs are unavailable with status ${response.status}; logs may have expired or access may be restricted.`,
+          };
+        } else {
+          const tail = await readTailBytes(response, logTailBytes);
+          log = {
+            status: 'available',
+            text: redactGithubLog(tail.text),
+            truncated: tail.truncated,
+            totalBytes: tail.totalBytes,
+            reason: null,
+          };
+        }
+      }
+      jobs.push({
+        id: job.id,
+        name: job.name,
+        status: job.status,
+        conclusion: job.conclusion,
+        url: job.html_url ?? null,
+        startedAt: job.started_at ?? null,
+        completedAt: job.completed_at ?? null,
+        steps,
+        log,
+      });
+    }
+
+    return {
+      provider: 'github',
+      repository,
+      pullRequestNumber: pull.number,
+      headSha: input.expectedHeadSha,
+      workflowRun: {
+        id: run.id,
+        name: run.name ?? `workflow-${run.id}`,
+        status: run.status,
+        conclusion: run.conclusion,
+        url: run.html_url ?? null,
+        event: run.event ?? null,
+        headSha: run.head_sha,
+      },
+      jobs,
+      jobsTruncated: jobsPayload.total_count > jobsPayload.jobs.length,
+      observedAt: new Date().toISOString(),
+    };
+  }
+
   async createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }> {
     const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['git.branch.create']);
     assertWorkBranch(input.branch);
@@ -472,6 +712,72 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       body: JSON.stringify({ ref: `refs/heads/${input.branch}`, sha: input.fromSha }),
     }, credential);
     return { repository, branch: input.branch, commitSha: created.object.sha };
+  }
+
+  async deleteBranch(input: DeleteBranchInput): Promise<{ repository: string; branch: string; commitSha: string; deleted: true; containedIn: string }> {
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['git.branch.delete']);
+    assertCleanupBranch(input.branch);
+    assertSha(input.expectedHeadSha, 'expectedHeadSha');
+
+    const repositoryInfo = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+    const protectedBranches = new Set(
+      ['main', 'master', 'preview', 'vercel-preview', repositoryInfo.default_branch]
+        .filter((value): value is string => typeof value === 'string')
+        .map(value => value.toLowerCase()),
+    );
+    if (protectedBranches.has(input.branch.toLowerCase())) {
+      throw { code: 'PERMISSION_DENIED', message: `Branch cleanup cannot delete protected branch ${input.branch}` };
+    }
+
+    const owner = repository.split('/')[0]!;
+    const openPullRequests = await this.request<GitHubPullRequestResponse[]>(
+      repository,
+      `/pulls?state=open&head=${encodeURIComponent(`${owner}:${input.branch}`)}&per_page=1`,
+      {},
+      credential,
+    );
+    if (openPullRequests.length > 0) {
+      throw { code: 'CONFLICT', message: `Branch ${input.branch} is still the head of an open pull request` };
+    }
+
+    const integrationBases = [...new Set(
+      ['preview', 'vercel-preview', repositoryInfo.default_branch]
+        .filter((value): value is string => typeof value === 'string' && value.toLowerCase() !== input.branch.toLowerCase()),
+    )];
+    let containedIn: string | undefined;
+    for (const base of integrationBases) {
+      const response = await this.fetch(
+        `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(input.expectedHeadSha)}`,
+        { headers: this.headers(credential.token) },
+      );
+      if (response.status === 404) continue;
+      if (!response.ok) throw await githubResponseError(response);
+      const comparison = await response.json() as { status?: string };
+      if (comparison.status === 'behind' || comparison.status === 'identical') {
+        containedIn = base;
+        break;
+      }
+    }
+    if (!containedIn) {
+      throw { code: 'CONFLICT', message: `Branch ${input.branch} head ${input.expectedHeadSha} is not proven contained in Preview or the repository default branch` };
+    }
+
+    const ref = await this.request<{ object: { sha: string } }>(
+      repository,
+      `/git/ref/heads/${encodePath(input.branch)}`,
+      {},
+      credential,
+    );
+    if (ref.object.sha !== input.expectedHeadSha) {
+      throw { code: 'CONFLICT', message: `Branch head changed from expected ${input.expectedHeadSha} to ${ref.object.sha}` };
+    }
+
+    const response = await this.fetch(
+      `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/git/refs/heads/${encodePath(input.branch)}`,
+      { method: 'DELETE', headers: this.headers(credential.token) },
+    );
+    if (!response.ok) throw await githubResponseError(response);
+    return { repository, branch: input.branch, commitSha: input.expectedHeadSha, deleted: true, containedIn };
   }
 
   async createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }> {
@@ -1028,11 +1334,14 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
 type GitHubReadOperation =
   | 'development.status'
   | 'pull-request.status'
+  | 'source.artifact.read'
+  | 'ci.run.read'
   | 'work-item.status'
   | 'work-item.list';
 
 type GitHubWriteOperation =
   | 'git.branch.create'
+  | 'git.branch.delete'
   | 'git.commit.create'
   | 'pull-request.create'
   | 'pull-request.comment.create'
@@ -1060,6 +1369,11 @@ const GITHUB_READ_OPERATION_PERMISSIONS: Readonly<Record<
     checks: 'read',
     actions: 'read',
   },
+  'source.artifact.read': { contents: 'read' },
+  'ci.run.read': {
+    pull_requests: 'read',
+    actions: 'read',
+  },
   'work-item.status': { issues: 'read' },
   'work-item.list': { issues: 'read' },
 };
@@ -1069,6 +1383,7 @@ const GITHUB_WRITE_OPERATION_PERMISSIONS: Readonly<Record<
   Readonly<Record<string, 'write'>>
 >> = {
   'git.branch.create': { contents: 'write' },
+  'git.branch.delete': { contents: 'write' },
   'git.commit.create': { contents: 'write' },
   'pull-request.create': { pull_requests: 'write' },
   'pull-request.comment.create': { issues: 'write' },
@@ -1494,6 +1809,12 @@ function assertWorkBranch(branch: string): void {
   }
 }
 
+function assertCleanupBranch(branch: string): void {
+  if (!/^(?:work|repair|audit)\/[A-Za-z0-9._/-]+$/.test(branch) || branch.includes('..') || branch.endsWith('/')) {
+    throw { code: 'PERMISSION_DENIED', message: 'Branch cleanup is limited to valid work/*, repair/*, or audit/* branches' };
+  }
+}
+
 function assertSha(value: string, field: string): void {
   if (!/^[0-9a-f]{40}$/i.test(value)) throw { code: 'CONFLICT', message: `${field} must be a full 40-character Git SHA` };
 }
@@ -1503,6 +1824,43 @@ function validRepositoryPath(value: string): string {
     throw { code: 'PERMISSION_DENIED', message: `Unsafe repository path: ${value}` };
   }
   return value;
+}
+
+function boundedInteger(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+async function readTailBytes(response: Response, maxBytes: number): Promise<{ text: string; totalBytes: number; truncated: boolean }> {
+  if (!response.body) {
+    const text = await response.text();
+    const bytes = Buffer.from(text, 'utf8');
+    return {
+      text: bytes.subarray(Math.max(0, bytes.length - maxBytes)).toString('utf8'),
+      totalBytes: bytes.length,
+      truncated: bytes.length > maxBytes,
+    };
+  }
+  const reader = response.body.getReader();
+  let tail = Buffer.alloc(0);
+  let totalBytes = 0;
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) break;
+    const chunk = Buffer.from(next.value);
+    totalBytes += chunk.length;
+    tail = Buffer.concat([tail, chunk]);
+    if (tail.length > maxBytes) tail = tail.subarray(tail.length - maxBytes);
+  }
+  return { text: tail.toString('utf8'), totalBytes, truncated: totalBytes > maxBytes };
+}
+
+function redactGithubLog(value: string): string {
+  return value
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s]+/giu, '$1[redacted]')
+    .replace(/((?:token|secret|password|private[_-]?key|api[_-]?key)\s*[:=]\s*)[^\s,;]+/giu, '$1[redacted]')
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b/gu, '[redacted]')
+    .replace(/:\/\/[^\s/@:]+:[^\s/@]+@/gu, '://[redacted]@');
 }
 
 function encodePath(value: string): string {

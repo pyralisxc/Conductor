@@ -5,11 +5,16 @@ import type {
   ProjectReference,
   RuntimeOperationName,
   CreateBranchInput,
+  DeleteBranchInput,
   CreateCommitInput,
   CreatePullRequestInput,
   CommentPullRequestInput,
   GetPullRequestStatusInput,
   PullRequestStatus,
+  GetSourceArtifactInput,
+  SourceArtifactRead,
+  GetCiRunEvidenceInput,
+  CiRunEvidence,
   UpdatePullRequestLabelsInput,
   MergeIntegrationPullRequestInput,
   ReconcilePreviewPullRequestInput,
@@ -54,6 +59,14 @@ export interface PullRequestReadProvider extends RuntimeCapabilityProvider {
   getPullRequestStatus(input: GetPullRequestStatusInput): Promise<PullRequestStatus>;
 }
 
+export interface SourceArtifactReadProvider extends RuntimeCapabilityProvider {
+  getSourceArtifact(input: GetSourceArtifactInput): Promise<SourceArtifactRead>;
+}
+
+export interface CiReadProvider extends RuntimeCapabilityProvider {
+  getCiRunEvidence(input: GetCiRunEvidenceInput): Promise<CiRunEvidence>;
+}
+
 export interface WorkItemReadProvider extends RuntimeCapabilityProvider {
   getWorkItemStatus(input: GetWorkItemStatusInput): Promise<WorkItemRecord>;
   listWorkItems(input: ListWorkItemsInput): Promise<WorkItemList>;
@@ -83,6 +96,7 @@ export interface VercelOperationsProvider extends DeploymentReadProvider {
   createGitDeployment(input: VercelGitDeploymentInput): Promise<Record<string, unknown>>;
   promote(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
   rollback(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
+  deleteDeployment(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
   upsertEnvironment(input: VercelEnvInput): Promise<Record<string, unknown>>;
   updateEnvironment(input: VercelEnvEditInput): Promise<Record<string, unknown>>;
   removeEnvironment(input: VercelEnvRemoveInput): Promise<Record<string, unknown>>;
@@ -90,6 +104,7 @@ export interface VercelOperationsProvider extends DeploymentReadProvider {
 
 export interface SourceControlMutationProvider extends RuntimeCapabilityProvider {
   createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }>;
+  deleteBranch(input: DeleteBranchInput): Promise<{ repository: string; branch: string; commitSha: string; deleted: true; containedIn: string }>;
   createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }>;
   createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }>;
   commentPullRequest(input: CommentPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; commentId: string; url: string }>;

@@ -6,6 +6,8 @@ import {
   type SourceControlMutationProvider,
   type ProjectReferenceResolver,
   type PullRequestReadProvider,
+  type SourceArtifactReadProvider,
+  type CiReadProvider,
   type WorkItemCandidateReadProvider,
   type WorkItemMutationProvider,
   type DeploymentReadProvider,
@@ -33,11 +35,16 @@ import {
   type DevelopmentStatusProjection,
   type DevelopmentStatusWorkCounts,
   type CreateBranchInput,
+  type DeleteBranchInput,
   type CreateCommitInput,
   type CreatePullRequestInput,
   type CommentPullRequestInput,
   type GetPullRequestStatusInput,
   type PullRequestStatus,
+  type GetSourceArtifactInput,
+  type SourceArtifactRead,
+  type GetCiRunEvidenceInput,
+  type CiRunEvidence,
   type UpdatePullRequestLabelsInput,
   type MergeIntegrationPullRequestInput,
   type ReconcilePreviewPullRequestInput,
@@ -89,6 +96,19 @@ const PULL_REQUEST_READ_DEFINITION: ToolDefinition = {
   mutates: false,
 };
 
+const EXECUTION_EVIDENCE_READ_DEFINITIONS: readonly ToolDefinition[] = [
+  {
+    name: 'source.artifact.read',
+    description: 'Read one complete bounded UTF-8 source artifact at an exact immutable Git SHA and path; no search or semantic inference.',
+    mutates: false,
+  },
+  {
+    name: 'ci.run.read',
+    description: 'Read exact workflow-run jobs, steps, and bounded redacted failure-log tails for one exact pull-request head.',
+    mutates: false,
+  },
+];
+
 const DEPLOYMENT_READ_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.status', description: 'Read Vercel deployment/production state for one configured execution referent.', mutates: false },
   { name: 'deployment.logs', description: 'Read bounded/redacted deployment event logs for one exact Vercel deployment.', mutates: false },
@@ -104,6 +124,7 @@ const VERCEL_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.git.create', description: 'Create a deployment from exact linked Git source.', mutates: true },
   { name: 'deployment.promote', description: 'Promote one exact READY deployment to production.', mutates: true },
   { name: 'deployment.rollback', description: 'Rollback to one exact prior READY deployment.', mutates: true },
+  { name: 'deployment.delete', description: 'Delete one exact terminal deployment while protecting current production.', mutates: true },
   { name: 'deployment.env.upsert', description: 'Upsert one project environment variable.', mutates: true },
   { name: 'deployment.env.update', description: 'Update one exact project environment variable.', mutates: true },
   { name: 'deployment.env.remove', description: 'Remove one exact project environment variable.', mutates: true },
@@ -123,6 +144,7 @@ const WORK_ITEM_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
 
 const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'git.branch.create', description: 'Create a work/* branch from an exact Git SHA.', mutates: true },
+  { name: 'git.branch.delete', description: 'Delete one exact integrated development branch after proving its head is already contained in Preview or Main.', mutates: true },
   { name: 'git.commit.create', description: 'Create files in one commit and advance an existing work/* branch from an expected head SHA.', mutates: true },
   { name: 'pull-request.create', description: 'Open a work/* pull request against an explicit target branch.', mutates: true },
   { name: 'pull-request.comment.create', description: 'Add a comment to a pull request.', mutates: true },
@@ -155,6 +177,8 @@ export interface ConductorToolRuntimeOptions {
   mutationExecutor?: IdempotentMutationExecutor;
   projectResolver?: ProjectReferenceResolver;
   pullRequestProvider?: PullRequestReadProvider;
+  sourceArtifactProvider?: SourceArtifactReadProvider;
+  ciReadProvider?: CiReadProvider;
   workItemProvider?: WorkItemMutationProvider;
   workItemCandidateProvider?: WorkItemCandidateReadProvider;
   deploymentProvider?: VercelOperationsProvider;
@@ -171,6 +195,8 @@ export class ConductorToolRuntime {
   private readonly mutationExecutor?: IdempotentMutationExecutor;
   private readonly projectResolver?: ProjectReferenceResolver;
   private readonly pullRequestProvider?: PullRequestReadProvider;
+  private readonly sourceArtifactProvider?: SourceArtifactReadProvider;
+  private readonly ciReadProvider?: CiReadProvider;
   private readonly workItemProvider?: WorkItemMutationProvider;
   private readonly workItemCandidateProvider?: WorkItemCandidateReadProvider;
   private readonly deploymentProvider?: VercelOperationsProvider;
@@ -184,6 +210,8 @@ export class ConductorToolRuntime {
     this.mutationExecutor = options.mutationExecutor;
     this.projectResolver = options.projectResolver;
     this.pullRequestProvider = options.pullRequestProvider;
+    this.sourceArtifactProvider = options.sourceArtifactProvider;
+    this.ciReadProvider = options.ciReadProvider;
     this.workItemProvider = options.workItemProvider;
     this.workItemCandidateProvider = options.workItemCandidateProvider;
     this.deploymentProvider = options.deploymentProvider;
@@ -203,6 +231,14 @@ export class ConductorToolRuntime {
 
   get pullRequestReadEnabled(): boolean {
     return Boolean(this.pullRequestProvider);
+  }
+
+  get sourceArtifactReadEnabled(): boolean {
+    return Boolean(this.sourceArtifactProvider);
+  }
+
+  get ciReadEnabled(): boolean {
+    return Boolean(this.ciReadProvider);
   }
 
   get deploymentReadEnabled(): boolean {
@@ -416,6 +452,33 @@ export class ConductorToolRuntime {
   }
 
 
+  async sourceArtifactRead(input: GetSourceArtifactInput): Promise<ExecutionReceipt<SourceArtifactRead>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'source.artifact.read',
+      { kind: 'repository', id: resolvedProject.repository ?? resolvedProject.id, ref: input.sha },
+      async () => {
+        if (!this.sourceArtifactProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'Source-artifact read provider is not configured' };
+        return { result: await this.sourceArtifactProvider.getSourceArtifact({ ...input, project: resolvedProject }) };
+      },
+    );
+  }
+
+  async ciRunRead(input: GetCiRunEvidenceInput): Promise<ExecutionReceipt<CiRunEvidence>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'ci.run.read',
+      { kind: 'repository', id: resolvedProject.repository ?? resolvedProject.id, ref: input.expectedHeadSha },
+      async () => {
+        if (!this.ciReadProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'CI read provider is not configured' };
+        return {
+          result: await this.ciReadProvider.getCiRunEvidence({ ...input, project: resolvedProject }),
+          diagnostics: [{ level: 'info', source: 'github', message: 'CI log excerpts are bounded and redacted before leaving the provider adapter.' }],
+        };
+      },
+    );
+  }
+
   async deploymentStatus(input: GetDeploymentStatusInput): Promise<ExecutionReceipt<DeploymentProjectStatus>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
     return await this.executeRead(
@@ -472,6 +535,7 @@ export class ConductorToolRuntime {
   async vercelCreateGitDeployment(input: VercelGitDeploymentInput) { return this.vercelMutation('deployment.git.create', input, (provider, project) => provider.createGitDeployment({ ...input, project })); }
   async vercelPromote(input: VercelDeploymentInput) { return this.vercelMutation('deployment.promote', input, (provider, project) => provider.promote({ ...input, project })); }
   async vercelRollback(input: VercelDeploymentInput) { return this.vercelMutation('deployment.rollback', input, (provider, project) => provider.rollback({ ...input, project })); }
+  async vercelDeleteDeployment(input: VercelDeploymentInput) { return this.vercelMutation('deployment.delete', input, (provider, project) => provider.deleteDeployment({ ...input, project })); }
   async vercelEnvUpsert(input: VercelEnvInput) { return this.vercelMutation('deployment.env.upsert', input, (provider, project) => provider.upsertEnvironment({ ...input, project })); }
   async vercelEnvUpdate(input: VercelEnvEditInput) { return this.vercelMutation('deployment.env.update', input, (provider, project) => provider.updateEnvironment({ ...input, project })); }
   async vercelEnvRemove(input: VercelEnvRemoveInput) { return this.vercelMutation('deployment.env.remove', input, (provider, project) => provider.removeEnvironment({ ...input, project })); }
@@ -536,6 +600,13 @@ export class ConductorToolRuntime {
     });
   }
 
+  async deleteBranch(input: DeleteBranchInput) {
+    return await this.executeMutation(input, 'git.branch.delete', async (provider) => {
+      const result = await provider.deleteBranch(input);
+      return { result, identifiers: { branch: result.branch, commitSha: result.commitSha } };
+    });
+  }
+
   async createCommit(input: CreateCommitInput) {
     return await this.executeMutation(input, 'git.commit.create', async (provider) => {
       const result = await provider.createCommit(input);
@@ -595,6 +666,8 @@ export class ConductorToolRuntime {
       ...(this.operationPreflightEnabled ? [OPERATION_PREFLIGHT_DEFINITION] : []),
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
+      ...(this.sourceArtifactReadEnabled ? [EXECUTION_EVIDENCE_READ_DEFINITIONS[0]!] : []),
+      ...(this.ciReadEnabled ? [EXECUTION_EVIDENCE_READ_DEFINITIONS[1]!] : []),
       ...(this.deploymentReadEnabled ? [...DEPLOYMENT_READ_DEFINITIONS, ...VERCEL_AUDIT_DEFINITIONS] : []),
       ...(this.vercelMutationEnabled ? VERCEL_MUTATION_DEFINITIONS : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
@@ -765,7 +838,7 @@ export class ConductorToolRuntime {
 
   private async executeRead<Result>(
     operation: ToolOperationName,
-    target: { kind: 'runtime' | 'project'; id: string; ref?: string },
+    target: { kind: 'runtime' | 'project' | 'repository'; id: string; ref?: string },
     read: () => Promise<{
       result: Result;
       diagnostics?: ToolDiagnostic[];

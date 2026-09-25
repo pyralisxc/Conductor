@@ -13,6 +13,8 @@ import type {
   ProjectReference,
   ToolRuntimeProvider,
   SourceControlMutationProvider,
+  SourceArtifactReadProvider,
+  CiReadProvider,
 } from '../src/index.js';
 
 const project: ProjectReference = {
@@ -389,6 +391,10 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
       creates += 1;
       return { repository: input.project.repository!, branch: input.branch, commitSha: input.fromSha };
     },
+    async deleteBranch(input) {
+      creates += 1;
+      return { repository: input.project.repository!, branch: input.branch, commitSha: input.expectedHeadSha, deleted: true as const, containedIn: 'preview' };
+    },
     async createCommit() { throw new Error('unused'); },
     async createPullRequest() { throw new Error('unused'); },
     async commentPullRequest() { throw new Error('unused'); },
@@ -405,7 +411,7 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   assert.equal(capabilities.status, 'succeeded');
   if (capabilities.status === 'succeeded') {
     assert.deepEqual(capabilities.result.operations.filter((item) => item.mutates).map((item) => item.name), [
-      'git.branch.create', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
+      'git.branch.create', 'git.branch.delete', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
       'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
     ]);
   }
@@ -420,5 +426,53 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   assert.equal(first.status, 'succeeded');
   assert.equal(replay.idempotency?.replayed, true);
   assert.equal(creates, 1);
+
+  const deleteInput = {
+    project: { id: 'cardforge', repository: 'pyralisxc/CardForge' },
+    branch: 'work/cf-42',
+    expectedHeadSha: 'a'.repeat(40),
+    idempotencyKey: 'branch-delete:cardforge:cf-42',
+  };
+  const deleted = await runtime.deleteBranch(deleteInput);
+  const deleteReplay = await runtime.deleteBranch(deleteInput);
+  assert.equal(deleted.status, 'succeeded');
+  assert.equal(deleteReplay.idempotency?.replayed, true);
+  assert.equal(creates, 2);
 });
 
+test('runtime exposes exact source and CI evidence reads without enabling mutations', async () => {
+  const sourceArtifactProvider: SourceArtifactReadProvider = {
+    id: 'github-source',
+    async getCapabilities() { return []; },
+    async getSourceArtifact(input) {
+      return {
+        provider: 'github', repository: input.project.repository!, revisionSha: input.sha, path: input.path,
+        blobSha: 'blob', size: 4, status: 'available', content: 'text', encoding: 'utf-8', reason: null,
+        observedAt: '2026-09-25T00:00:00Z',
+      };
+    },
+  };
+  const ciReadProvider: CiReadProvider = {
+    id: 'github-ci',
+    async getCapabilities() { return []; },
+    async getCiRunEvidence(input) {
+      return {
+        provider: 'github', repository: input.project.repository!, pullRequestNumber: input.pullRequestNumber,
+        headSha: input.expectedHeadSha,
+        workflowRun: { id: input.workflowRunId, name: 'verify', status: 'completed', conclusion: 'failure', url: null, event: 'pull_request', headSha: input.expectedHeadSha },
+        jobs: [], jobsTruncated: false, observedAt: '2026-09-25T00:00:00Z',
+      };
+    },
+  };
+  const runtime = new ConductorToolRuntime({ sourceArtifactProvider, ciReadProvider });
+  const capabilities = await runtime.capabilities();
+  assert.equal(capabilities.status, 'succeeded');
+  if (capabilities.status === 'succeeded') {
+    assert.equal(capabilities.result.operations.some(item => item.name === 'source.artifact.read' && !item.mutates), true);
+    assert.equal(capabilities.result.operations.some(item => item.name === 'ci.run.read' && !item.mutates), true);
+  }
+  const source = await runtime.sourceArtifactRead({ project: { id: 'cardforge', repository: 'pyralisxc/CardForge' }, sha: 'a'.repeat(40), path: 'src/index.ts' });
+  assert.equal(source.status, 'succeeded');
+  const ci = await runtime.ciRunRead({ project: { id: 'cardforge', repository: 'pyralisxc/CardForge' }, pullRequestNumber: 2, expectedHeadSha: 'b'.repeat(40), workflowRunId: 3 });
+  assert.equal(ci.status, 'succeeded');
+});

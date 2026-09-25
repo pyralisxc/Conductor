@@ -31,12 +31,12 @@ const errorSchema = z.object({
 
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation',
-  'development.status', 'pull-request.status', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'work-item.status', 'work-item.list',
-  'git.branch.create', 'git.commit.create', 'git.push',
+  'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'work-item.status', 'work-item.list',
+  'git.branch.create', 'git.branch.delete', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
   'work-item.create', 'work-item.comment.create', 'work-item.update-status', 'work-item.classification.update',
-  'deployment.redeploy', 'deployment.git.create', 'deployment.promote', 'deployment.rollback',
+  'deployment.redeploy', 'deployment.git.create', 'deployment.promote', 'deployment.rollback', 'deployment.delete',
   'deployment.env.upsert', 'deployment.env.update', 'deployment.env.remove',
 ]);
 
@@ -321,6 +321,41 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
   }
 
 
+  if (runtime.sourceArtifactReadEnabled) {
+    server.registerTool('source.artifact.read', {
+      title: 'Read exact source artifact',
+      description: 'Use after Development Intelligence has narrowed the source area. Read one complete bounded UTF-8 file at an exact 40-character Git SHA and repository-relative path. This tool does no browsing, repository-wide search, architecture inference, or semantic interpretation.',
+      inputSchema: z.object({
+        project: projectSchema,
+        sha: z.string().regex(/^[0-9a-f]{40}$/i),
+        path: z.string().min(1).max(1024),
+        maxBytes: z.number().int().min(1).max(1024 * 1024).default(256 * 1024),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.sourceArtifactRead(input)));
+  }
+
+  if (runtime.ciReadEnabled) {
+    server.registerTool('ci.run.read', {
+      title: 'Read exact CI run evidence',
+      description: 'Use after pull-request.status identifies an actionable workflow failure. Verify the exact PR head and workflow run, then return bounded jobs/steps plus redacted tail logs for the requested job or up to three failed jobs. This tool never reruns, cancels, approves, or mutates CI.',
+      inputSchema: z.object({
+        project: projectSchema,
+        pullRequestNumber: z.number().int().positive(),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        workflowRunId: z.number().int().positive(),
+        jobId: z.number().int().positive().optional(),
+        logTailBytes: z.number().int().min(1024).max(50_000).default(12_000),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.ciRunRead(input)));
+  }
+
+
   if (runtime.deploymentReadEnabled) {
     server.registerTool('deployment.status', {
       title: 'Read deployment status',
@@ -367,7 +402,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     const base = { project: projectSchema, idempotencyKey, workContext: workContextSchema };
     const deployment = z.object({ ...base, deploymentId, approvalReference });
     const variable = z.object({ ...base, key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u), value: z.string(), type: z.enum(['plain', 'encrypted', 'sensitive']), target: z.array(z.enum(['production','preview','development'])).min(1).max(3), gitBranch: z.string().optional(), customEnvironmentIds: z.array(z.string()).max(20).optional(), approvalReference });
-    const writeTool = (name: 'deployment.redeploy' | 'deployment.git.create' | 'deployment.promote' | 'deployment.rollback' | 'deployment.env.upsert' | 'deployment.env.update' | 'deployment.env.remove', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any) => Promise<object>, destructive = false) => {
+    const writeTool = (name: 'deployment.redeploy' | 'deployment.git.create' | 'deployment.promote' | 'deployment.rollback' | 'deployment.delete' | 'deployment.env.upsert' | 'deployment.env.update' | 'deployment.env.remove', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any) => Promise<object>, destructive = false) => {
       server.registerTool(name, { title, description, inputSchema, outputSchema: mutationOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: destructive, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity } }, async (input, extra) => {
@@ -379,6 +414,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     writeTool('deployment.git.create', 'Deploy exact Git revision', 'Deploy linked repository full commit SHA and explicit ref to preview or approved production.', z.object({ ...base, repository: z.string(), ref: z.string(), sha: z.string().regex(/^[0-9a-f]{40}$/iu), target: z.enum(['preview','production']), approvalReference }), input => runtime.vercelCreateGitDeployment(input));
     writeTool('deployment.promote', 'Promote READY Vercel deployment', 'Point production at one exact READY bound deployment after owner approval.', deployment, input => runtime.vercelPromote(input), true);
     writeTool('deployment.rollback', 'Rollback READY Vercel deployment', 'Point production at one exact prior READY bound deployment after owner approval.', deployment, input => runtime.vercelRollback(input), true);
+    writeTool('deployment.delete', 'Delete exact Vercel deployment', 'Delete one exact terminal bound deployment. Current production and active builds are refused; historical production artifacts require exact owner approval.', deployment, input => runtime.vercelDeleteDeployment(input), true);
     writeTool('deployment.env.upsert', 'Upsert Vercel environment variable', 'Write-only value; production requires exact owner approval; receipt has metadata only.', variable, input => runtime.vercelEnvUpsert(input));
     writeTool('deployment.env.update', 'Update exact Vercel environment variable', 'Write-only value with exact variable ID/key and scoped targets.', variable.extend({ envId: z.string().min(3) }), input => runtime.vercelEnvUpdate(input));
     writeTool('deployment.env.remove', 'Remove exact Vercel environment variable', 'Remove exact ID/key after confirming project and production approval if applicable.', z.object({ ...base, envId: z.string().min(3), key: z.string(), approvalReference }), input => runtime.vercelEnvRemove(input), true);
@@ -430,6 +466,24 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     }, async (input, extra) => {
       await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.createBranch(withoutWorkContext(input)));
+    });
+
+    server.registerTool('git.branch.delete', {
+      title: 'Delete an integrated development branch',
+      description: 'Delete one exact work/*, repair/*, or audit/* branch only when its expected head is unchanged, no open pull request uses it, and GitHub proves that exact head is already contained in Preview or the repository default branch.',
+      inputSchema: z.object({
+        project: projectSchema,
+        workContext: workContextSchema,
+        branch: z.string().min(6),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        idempotencyKey: z.string().min(8).max(200),
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.deleteBranch(withoutWorkContext(input)));
     });
 
     server.registerTool('git.commit.create', {

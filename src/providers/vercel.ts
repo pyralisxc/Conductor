@@ -91,10 +91,14 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       }
       return [{
         provider: 'vercel',
-        status: operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit' || operation === 'deployment.env.list' ? 'ready' : 'degraded',
+        status: operation === 'deployment.runtime-logs' && binding.connectionId
+          ? 'unavailable'
+          : operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit' || operation === 'deployment.env.list' ? 'ready' : 'degraded',
         summary: `Vercel project ${resolved.name} (${resolved.id}) is ${explicit ? 'bound' : 'uniquely linked for read access'} for ${operation}`,
         diagnostics: [{ level: 'info', source: 'vercel', message: operation === 'deployment.runtime-logs'
-          ? 'Project read verified; runtime-log endpoint access is unverified. An exact deployment read may still return PERMISSION_DENIED.'
+          ? binding.connectionId
+            ? 'Vercel Integration API installation tokens do not authorize the documented runtime-log endpoint through any installable integration scope; deployment.logs remains available. Use an explicitly configured direct Vercel access-token binding for deployment.runtime-logs.'
+            : 'Project read verified with a direct Vercel access token; runtime-log endpoint access is unverified until an exact deployment read succeeds.'
           : environmentOperation
             ? operation === 'deployment.env.list'
               ? 'Environment metadata read verified.'
@@ -338,6 +342,49 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   async promote(input: VercelDeploymentInput) { return this.changeTraffic(input, 'promote'); }
   async rollback(input: VercelDeploymentInput) { return this.changeTraffic(input, 'rollback'); }
 
+  async deleteDeployment(input: VercelDeploymentInput): Promise<Record<string, unknown>> {
+    const bound = await this.exactDeployment(input.project, input.deploymentId);
+    const deployment = normalizeDeployment(bound.detail);
+    if (!deployment) throw { code: 'NOT_FOUND', source: 'vercel', message: 'Exact deployment could not be normalized before deletion' };
+
+    const productionTarget = recordField(recordField(bound.data, 'targets') ?? {}, 'production');
+    const currentProductionId = productionTarget
+      ? (stringField(productionTarget, 'id') ?? stringField(productionTarget, 'uid'))
+      : null;
+    if (currentProductionId === input.deploymentId) {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'The deployment currently serving production cannot be deleted' };
+    }
+
+    const state = deployment.state?.toUpperCase() ?? null;
+    if (!state || !['READY', 'ERROR', 'CANCELED'].includes(state)) {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'Deployment cleanup only deletes terminal READY, ERROR, or CANCELED deployments; active builds must not be canceled through cleanup' };
+    }
+    if (deployment.target === 'production') this.requireProductionApproval(input.approvalReference);
+
+    const response = await this.request(
+      `/v13/deployments/${encodeURIComponent(input.deploymentId)}`,
+      scopeQuery(bound.binding),
+      bound.binding,
+      { method: 'DELETE' },
+    );
+    const payload = await response.json().catch(() => null) as JsonRecord | null;
+    const removedId = payload ? (stringField(payload, 'uid') ?? stringField(payload, 'id')) : null;
+    const removedState = payload ? stringField(payload, 'state') : null;
+    if (removedId !== input.deploymentId || removedState !== 'DELETED') {
+      throw { code: 'COMMAND_FAILED', source: 'vercel', message: 'Vercel did not confirm exact deployment deletion; reconcile provider state before retrying' };
+    }
+    return {
+      provider: 'vercel',
+      projectId: bound.id,
+      deploymentId: input.deploymentId,
+      priorState: deployment.state,
+      priorTarget: deployment.target,
+      state: removedState,
+      verified: true,
+      observedAt: this.now().toISOString(),
+    };
+  }
+
   async listEnvironment(input: VercelProjectInput): Promise<Record<string, unknown>> {
     const bound = await this.readProject(input.project);
     const payload = await this.getJson(`/v10/projects/${encodeURIComponent(bound.id)}/env`, { ...scopeQuery(bound.binding), decrypt: 'false' }, bound.binding);
@@ -392,9 +439,20 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
 
   async getRuntimeLogs(input: VercelRuntimeLogsInput): Promise<Record<string, unknown>> {
     const bound = await this.exactDeployment(input.project, input.deploymentId, true);
+    if (bound.binding.connectionId) {
+      throw {
+        code: 'TOOL_UNAVAILABLE',
+        source: 'vercel',
+        message: 'Vercel Integration API installation tokens do not authorize the runtime-log endpoint; deployment.logs remains available. Configure an explicit direct Vercel access-token binding to use deployment.runtime-logs.',
+      };
+    }
     const limit = clamp(input.limit ?? 50, 1, 100);
-    const payload = await this.getJson(`/v1/projects/${encodeURIComponent(bound.id)}/deployments/${encodeURIComponent(input.deploymentId)}/runtime-logs`, { ...scopeQuery(bound.binding), limit: String(limit) }, bound.binding);
-    const entries = Array.isArray(payload) ? payload : arrayField(payload, 'logs').length ? arrayField(payload, 'logs') : arrayField(payload, 'data');
+    const response = await this.request(
+      `/v1/projects/${encodeURIComponent(bound.id)}/deployments/${encodeURIComponent(input.deploymentId)}/runtime-logs`,
+      { ...scopeQuery(bound.binding), limit: String(limit) },
+      bound.binding,
+    );
+    const entries = parseEventStream(await response.text());
     return { provider: 'vercel', projectId: bound.id, deploymentId: input.deploymentId, entries: entries.slice(0, limit).map(normalizeLogEntry).filter(Boolean), truncated: entries.length > limit, observedAt: this.now().toISOString() };
   }
 
@@ -583,8 +641,10 @@ function parseEventStream(body: string): unknown[] {
     if (Array.isArray(parsed)) return parsed;
     const value = record(parsed);
     if (value) {
-      const events = value.events;
-      if (Array.isArray(events)) return events;
+      for (const field of ['events', 'logs', 'data'] as const) {
+        const entries = value[field];
+        if (Array.isArray(entries)) return entries;
+      }
       return [parsed];
     }
   } catch {}

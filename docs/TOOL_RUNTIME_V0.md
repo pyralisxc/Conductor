@@ -13,10 +13,12 @@ v0 always exposes the core non-mutating runtime tools:
 - `preflight_operation(project, operation)` is exposed when at least one configured provider can supply operation-level evidence. It verifies whether one exact exposed Conductor operation can execute against the supplied routing referent, aggregates only responsible providers, and never infers which operation the project needs.
 - `development.status(project, limit?)` reconstructs compact inspect-time preflight plus ready/in-progress/blocked/review work. Each active work item includes same-repository PR candidates discovered through native issue timeline cross-references and reuses exact PR check/workflow truth. It never ranks or selects work.
 - `pull-request.status(project, pullRequestNumber, previous?)` is exposed when a GitHub PR provider is configured and returns exact head/base identity plus labels, check/workflow truth and a derived orchestration state. A caller may supply its prior head/state observation to detect meaningful transitions without Conductor storing PR history.
+- `source.artifact.read(project, sha, path, maxBytes?)` is the narrow DI-first bridge from semantic narrowing to mutation: it requires an exact immutable 40-character Git SHA plus one repository-relative path and returns one complete bounded UTF-8 file or an explicit binary/too-large/unsupported result. It does not browse, search, index, infer architecture, or replace Development Intelligence.
+- `ci.run.read(project, pullRequestNumber, expectedHeadSha, workflowRunId, jobId?, logTailBytes?)` is a failure drill-down after `pull-request.status`: it re-verifies the exact PR head and workflow-run SHA, returns bounded job/step metadata, and includes redacted tail logs only for an exact requested job or up to three failed jobs. It never reruns, cancels, approves, or otherwise mutates CI.
 - `deployment.status(project, limit?)` is exposed when a deployment read provider is configured and returns provider-native current production, latest production attempt, recent deployments, source revision/ref where available, and deployment domains.
 - `deployment.logs(project, deploymentId, limit?)` reads one exact deployment's bounded/redacted build/deployment event output. Provider event retention/coverage remains explicit and is not treated as a complete runtime archive.
 - `deployment.audit(project)` reads bounded project/team posture, Git linkage, domains/aliases, custom environments, recent deployments, environment-variable metadata, and supported account posture without copying provider state into Conductor.
-- `deployment.runtime-logs(project, deploymentId, limit?)` reads bounded/redacted runtime output for one exact deployment when the connected installation has endpoint permission; denial remains explicit and preflight stays degraded until proven.
+- `deployment.runtime-logs(project, deploymentId, limit?)` reads bounded/redacted runtime output only through an explicitly configured direct Vercel access-token binding. Vercel's published Integration API scope mapping does not grant installation tokens access to the runtime-log endpoint, so connected-installation preflight reports this operation as unavailable instead of repeatedly probing a known provider boundary. Direct-token preflight stays degraded until one exact deployment read proves access.
 - `deployment.env.list(project)` lists environment-variable metadata for one exact project and never returns values.
 - `work-item.status(project, issueNumber)` reads one durable work item with normalized lifecycle status, kind, and origin.
 - `work-item.list(project, ...)` lists issue-backed work and can filter by normalized status, kind, and origin. Pull requests are excluded.
@@ -24,6 +26,7 @@ v0 always exposes the core non-mutating runtime tools:
 When explicitly enabled with durable Redis idempotency state, the current source-control mutation family exposes bounded GitHub mutations:
 
 - `git.branch.create` creates only `work/*` branches from an exact SHA.
+- `git.branch.delete` removes one exact integrated `work/*`, `repair/*`, or `audit/*` branch only after refetching the expected head, refusing open-PR/protected branches, and proving the exact head is already contained in Preview or the repository default branch. It is destructive but idempotent; no bulk or age-based cleanup exists.
 - `git.commit.create` creates a bounded file commit, supports tracked-path deletion with null content, and advances a `work/*` branch only from an expected head SHA.
 - `pull-request.create` opens `work/*` pull requests against an explicit target branch. Opening a proposal does not authorize or perform merge/promotion; consequential acceptance remains a separate operation and gate.
 - `pull-request.comment.create` adds an idempotent pull-request comment.
@@ -34,6 +37,7 @@ When explicitly enabled with durable Redis idempotency state, the current source
 - `deployment.redeploy` redeploys one exact bound deployment; production-source redeploys require exact owner approval.
 - `deployment.git.create` creates a deployment from an exact linked Git repository/ref/full SHA. Preview lets Vercel infer the Preview target; production requires exact owner approval.
 - `deployment.promote` and `deployment.rollback` move production traffic only to one exact READY bound deployment with explicit owner approval and read-after-write reconciliation.
+- `deployment.delete` removes one exact terminal bound deployment. It refuses current production and active builds; deleting a historical production rollback artifact requires explicit owner approval.
 - `deployment.env.upsert`, `deployment.env.update`, and `deployment.env.remove` mutate one exact bound project's variable configuration. Values are write-only, and production-scoped changes require explicit owner approval.
 - `work-item.create` creates durable issue-backed work with optional normalized status, kind, and origin.
 - `work-item.comment.create` adds idempotent evidence or a consolidation link to an existing issue. It refuses pull requests.
@@ -98,7 +102,7 @@ The included in-memory idempotency store is suitable for tests and one-process d
 - multi-agent workers or handoffs
 - scheduling and durable waits
 - session management
-- arbitrary deployment deletion, bulk provider cleanup, alias/domain mutation, or secret-value reads; supported Vercel mutations remain exact-project, exact-target, idempotent, and gated
+- project-wide/bulk deployment cleanup, delete-by-URL, active-build cancellation through cleanup, alias/domain mutation, or secret-value reads; exact deployment deletion remains one-target, idempotent, and gated
 - a provider-specific orchestration transport beyond the thin authenticated MCP adapter
 - a second source of project intelligence
 

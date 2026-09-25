@@ -6,6 +6,8 @@ export type ToolOperationName =
   | 'preflight_operation'
   | 'development.status'
   | 'pull-request.status'
+  | 'source.artifact.read'
+  | 'ci.run.read'
   | 'work-item.status'
   | 'work-item.list'
   | 'deployment.status'
@@ -18,6 +20,7 @@ export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
 export type MutationOperationName =
   | 'git.branch.create'
+  | 'git.branch.delete'
   | 'git.commit.create'
   | 'git.push'
   | 'pull-request.create'
@@ -34,6 +37,7 @@ export type MutationOperationName =
   | 'deployment.git.create'
   | 'deployment.promote'
   | 'deployment.rollback'
+  | 'deployment.delete'
   | 'deployment.env.upsert'
   | 'deployment.env.update'
   | 'deployment.env.remove';
@@ -262,6 +266,13 @@ export interface CreateBranchInput {
   idempotencyKey: string;
 }
 
+export interface DeleteBranchInput {
+  project: ProjectReference;
+  branch: string;
+  expectedHeadSha: string;
+  idempotencyKey: string;
+}
+
 export interface CreateCommitFile {
   path: string;
   content: string | null;
@@ -391,6 +402,86 @@ export interface PullRequestStatus {
   };
   workflowRuns: PullRequestWorkflowRunState[];
   orchestration: PullRequestOrchestration;
+}
+
+export type SourceArtifactStatus = 'available' | 'too-large' | 'binary' | 'unsupported';
+
+export interface GetSourceArtifactInput {
+  project: ProjectReference;
+  sha: string;
+  path: string;
+  maxBytes?: number;
+}
+
+export interface SourceArtifactRead {
+  provider: 'github';
+  repository: string;
+  revisionSha: string;
+  path: string;
+  blobSha: string | null;
+  size: number | null;
+  status: SourceArtifactStatus;
+  content: string | null;
+  encoding: 'utf-8' | null;
+  reason: string | null;
+  observedAt: string;
+}
+
+export interface GetCiRunEvidenceInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  expectedHeadSha: string;
+  workflowRunId: number;
+  jobId?: number;
+  logTailBytes?: number;
+}
+
+export interface CiStepEvidence {
+  number: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface CiJobLogEvidence {
+  status: 'available' | 'unavailable' | 'not-requested';
+  text: string | null;
+  truncated: boolean;
+  totalBytes: number | null;
+  reason: string | null;
+}
+
+export interface CiJobEvidence {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  url: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  steps: CiStepEvidence[];
+  log: CiJobLogEvidence;
+}
+
+export interface CiRunEvidence {
+  provider: 'github';
+  repository: string;
+  pullRequestNumber: number;
+  headSha: string;
+  workflowRun: {
+    id: number;
+    name: string;
+    status: string;
+    conclusion: string | null;
+    url: string | null;
+    event: string | null;
+    headSha: string;
+  };
+  jobs: CiJobEvidence[];
+  jobsTruncated: boolean;
+  observedAt: string;
 }
 
 export type WorkItemStatus =
