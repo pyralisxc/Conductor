@@ -14,7 +14,8 @@ export type ToolOperationName =
   | 'deployment.logs'
   | 'deployment.audit'
   | 'deployment.runtime-logs'
-  | 'deployment.env.list';
+  | 'deployment.env.list'
+  | 'deployment.vcr.get';
 
 export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
@@ -40,7 +41,8 @@ export type MutationOperationName =
   | 'deployment.delete'
   | 'deployment.env.upsert'
   | 'deployment.env.update'
-  | 'deployment.env.remove';
+  | 'deployment.env.remove'
+  | 'deployment.vcr.create';
 
 export type RuntimeOperationName =
   | ToolOperationName
@@ -70,7 +72,9 @@ export type DevelopmentCapability =
   | 'deployment.audit.read'
   | 'deployment.write'
   | 'deployment.env.read'
-  | 'deployment.env.write';
+  | 'deployment.env.write'
+  | 'deployment.vcr.read'
+  | 'deployment.vcr.write';
 
 export type ToolErrorCode =
   | 'AUTH_REQUIRED'
@@ -711,3 +715,5 @@ export interface VercelEnvInput extends VercelProjectInput { key: string; value:
 export interface VercelEnvEditInput extends VercelEnvInput { envId: string }
 export interface VercelEnvRemoveInput extends VercelProjectInput { envId: string; key: string; idempotencyKey: string; approvalReference?: string }
 export interface VercelRuntimeLogsInput extends VercelProjectInput { deploymentId: string; limit?: number }
+export interface VercelVcrRepositoryInput extends VercelProjectInput { name: string }
+export interface VercelVcrCreateInput extends VercelVcrRepositoryInput { idempotencyKey: string }
