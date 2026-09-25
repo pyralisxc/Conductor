@@ -20,6 +20,8 @@ v0 always exposes the core non-mutating runtime tools:
 - `deployment.audit(project)` reads bounded project/team posture, Git linkage, domains/aliases, custom environments, recent deployments, environment-variable metadata, and supported account posture without copying provider state into Conductor.
 - `deployment.runtime-logs(project, deploymentId, limit?)` reads bounded/redacted runtime output only through an explicitly configured direct Vercel access-token binding. Vercel's published Integration API scope mapping does not grant installation tokens access to the runtime-log endpoint, so connected-installation preflight reports this operation as unavailable instead of repeatedly probing a known provider boundary. Direct-token preflight stays degraded until one exact deployment read proves access.
 - `deployment.env.list(project)` lists environment-variable metadata for one exact project and never returns values.
+- `deployment.vcr.get(project, name)` reads one exact project-scoped Vercel Container Registry repository by validated name and returns only bounded repository metadata.
+- `deployment.vcr.create(project, name, idempotencyKey)` creates one exact project-scoped VCR repository when absent, then reads the same name back from Vercel before reporting verified success. Existing exact repositories are returned without a duplicate create effect.
 - `work-item.status(project, issueNumber)` reads one durable work item with normalized lifecycle status, kind, and origin.
 - `work-item.list(project, ...)` lists issue-backed work and can filter by normalized status, kind, and origin. Pull requests are excluded.
 

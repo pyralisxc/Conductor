@@ -9,7 +9,7 @@ import type {
   GetDeploymentStatusInput,
   OperationPreflightCheck,
   ProjectReference,
-  VercelProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput,
+  VercelProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput,
   RuntimeOperationName,
 } from '../runtime/types.js';
 import type { VercelOperationsProvider, OperationPreflightProvider } from './runtime.js';
@@ -63,6 +63,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       capability('deployment.env.read', configured, authenticated),
       capability('deployment.write', configured, authenticated),
       capability('deployment.env.write', configured, authenticated),
+      capability('deployment.vcr.read', configured, authenticated),
+      capability('deployment.vcr.write', configured, authenticated),
     ];
   }
 
@@ -85,6 +87,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
         ? await this.boundProject(project)
         : await this.readProject(project);
       const environmentOperation = operation === 'deployment.env.list' || operation.startsWith('deployment.env.');
+      const vcrOperation = operation === 'deployment.vcr.get' || operation === 'deployment.vcr.create';
       if (environmentOperation) {
         // Project read access does not imply access to project environment variables.
         await this.listEnvironment({ project });
@@ -103,6 +106,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
             ? operation === 'deployment.env.list'
               ? 'Environment metadata read verified.'
               : 'Environment metadata read verified; write permission cannot be proven without a mutation.'
+            : vcrOperation
+              ? 'Vercel project binding is verified. VCR repository permission is proven only by the exact repository read or create operation.'
             : operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit'
               ? 'Project binding and read credential verified; operation-specific provider access is confirmed only by the read itself.'
               : 'Vercel project binding and read credential verified; write permission cannot be proven without a mutation.' }],
@@ -392,6 +397,59 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     return { provider: 'vercel', projectId: bound.id, variables: raw.slice(0, 200).map(item => envMetadata(record(item) ?? {})), truncated: raw.length > 200, observedAt: this.now().toISOString() };
   }
 
+  async getVcrRepository(input: VercelVcrRepositoryInput): Promise<Record<string, unknown>> {
+    assertVcrRepositoryName(input.name);
+    const bound = await this.readProject(input.project);
+    return await this.readVcrRepository(bound, input.name);
+  }
+
+  async createVcrRepository(input: VercelVcrCreateInput): Promise<Record<string, unknown>> {
+    assertVcrRepositoryName(input.name);
+    const bound = await this.boundProject(input.project);
+    try {
+      const existing = await this.readVcrRepository(bound, input.name);
+      return { ...existing, created: false, verified: true };
+    } catch (error) {
+      if ((error as { status?: number }).status !== 404) throw error;
+    }
+
+    await this.request('/v1/vcr/repository', scopeQuery(bound.binding), bound.binding, {
+      method: 'POST',
+      body: { projectId: bound.id, name: input.name },
+    });
+    const verified = await this.readVcrRepository(bound, input.name);
+    return { ...verified, created: true, verified: true };
+  }
+
+  private async readVcrRepository(
+    bound: { binding: VercelProjectBinding; id: string; data: JsonRecord },
+    name: string,
+  ): Promise<Record<string, unknown>> {
+    const response = await this.request(
+      `/v1/vcr/repository/${encodeURIComponent(name)}`,
+      { ...scopeQuery(bound.binding), projectId: bound.id },
+      bound.binding,
+    );
+    const payload = await response.json().catch(() => null);
+    const envelope = record(payload);
+    const value = envelope ? (recordField(envelope, 'repository') ?? envelope) : null;
+    if (!value) throw { code: 'COMMAND_FAILED', source: 'vercel', message: 'Vercel returned an invalid VCR repository response' };
+    const repositoryName = stringField(value, 'name');
+    const projectId = stringField(value, 'projectId') ?? stringField(recordField(value, 'project') ?? {}, 'id');
+    if (repositoryName !== name || (projectId && projectId !== bound.id)) {
+      throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'VCR repository identity does not match the bound project and requested name' };
+    }
+    return {
+      provider: 'vercel',
+      projectId: bound.id,
+      repositoryId: stringField(value, 'id') ?? stringField(value, 'uid'),
+      name: repositoryName,
+      createdAt: value.createdAt ?? null,
+      updatedAt: value.updatedAt ?? null,
+      observedAt: this.now().toISOString(),
+    };
+  }
+
   private async exactEnvironment(project: ProjectReference, envId: string, key: string) {
     const bound = await this.boundProject(project);
     const listed = await this.listEnvironment({ project });
@@ -538,7 +596,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
 }
 
 function capability(
-  capabilityName: 'deployment.read' | 'deployment.logs.read' | 'deployment.audit.read' | 'deployment.env.read' | 'deployment.write' | 'deployment.env.write',
+  capabilityName: 'deployment.read' | 'deployment.logs.read' | 'deployment.audit.read' | 'deployment.env.read' | 'deployment.write' | 'deployment.env.write' | 'deployment.vcr.read' | 'deployment.vcr.write',
   configured: boolean,
   authenticated: boolean,
 ): CapabilityAvailability {
@@ -565,7 +623,13 @@ function scopeQuery(binding: VercelProjectBinding): Record<string, string> {
 
 function isDeploymentRead(operation: RuntimeOperationName): boolean {
   return operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit'
-    || operation === 'deployment.runtime-logs' || operation === 'deployment.env.list';
+    || operation === 'deployment.runtime-logs' || operation === 'deployment.env.list' || operation === 'deployment.vcr.get';
+}
+
+function assertVcrRepositoryName(name: string): void {
+  if (name.length < 1 || name.length > 128 || !/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u.test(name)) {
+    throw { code: 'CONFLICT', source: 'vercel', message: 'VCR repository name must use lowercase letters, numbers, periods, underscores, or dashes and cannot begin or end with punctuation' };
+  }
 }
 
 function linkedRepository(project: JsonRecord, repository: string): boolean {
