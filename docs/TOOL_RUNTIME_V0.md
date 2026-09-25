@@ -30,7 +30,7 @@ When explicitly enabled with durable Redis idempotency state, the current source
 - `git.branch.create` creates only `work/*` branches from an exact SHA.
 - `git.branch.delete` removes one exact integrated `work/*`, `repair/*`, or `audit/*` branch only after refetching the expected head, refusing open-PR/protected branches, and proving the exact head is already contained in Preview or the repository default branch. It is destructive but idempotent; no bulk or age-based cleanup exists.
 - `git.commit.create` creates a bounded file commit, supports tracked-path deletion with null content, and advances a `work/*` branch only from an expected head SHA.
-- `pull-request.create` opens `work/*` pull requests against an explicit target branch. Opening a proposal does not authorize or perform merge/promotion; consequential acceptance remains a separate operation and gate.
+- `pull-request.create` opens `work/*` pull requests against an explicit target branch and may also open the single bounded promotion-proposal lane from `preview`/`vercel-preview` to the provider-native repository default branch. The default branch is re-read from GitHub before that proposal is created. Opening a proposal does not authorize or perform merge/promotion; consequential acceptance remains a separate operation and gate.
 - `pull-request.comment.create` adds an idempotent pull-request comment.
 - `pull-request.labels.update` adds/removes labels while preserving unrelated labels.
 - `pull-request.merge.integration` merges only an exact head/base candidate from a bounded work/repair/audit/release source into a non-accepted integration branch.

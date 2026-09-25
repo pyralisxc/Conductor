@@ -1054,10 +1054,22 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
 
   async createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }> {
     const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.create']);
-    assertWorkBranch(input.head);
     const base = input.base.trim();
     if (!base || base.startsWith('refs/')) throw { code: 'CONFLICT', message: 'Pull-request base must be a branch name' };
     if (base === input.head) throw { code: 'CONFLICT', message: 'Pull-request head and base must differ' };
+
+    const promotionProposal = ['preview', 'vercel-preview'].includes(input.head.toLowerCase());
+    if (promotionProposal) {
+      assertPromotionSourceBranch(input.head);
+      const metadata = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+      const defaultBranch = metadata.default_branch?.trim();
+      if (!defaultBranch || base !== defaultBranch) {
+        throw { code: 'PERMISSION_DENIED', message: 'Preview promotion pull requests must target the repository default branch' };
+      }
+    } else {
+      assertWorkBranch(input.head);
+    }
+
     const created = await this.request<{ number: number; html_url: string }>(repository, '/pulls', {
       method: 'POST',
       body: JSON.stringify({
