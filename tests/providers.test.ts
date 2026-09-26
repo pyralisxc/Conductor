@@ -97,10 +97,11 @@ test('GitHub App credentials discover the repository installation and mint a rep
 });
 
 test('GitHub App credential force refresh bypasses a still-valid cached installation token', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   let tokenCalls = 0;
   const credentials = new GitHubAppCredentialProvider({
     appId: '12345',
-    privateKey: TEST_GITHUB_APP_PRIVATE_KEY,
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
     fetch: async (input) => {
       const url = String(input);
       if (url.endsWith('/app')) return Response.json({ id: 12345, slug: 'dev-os-conductor' });
