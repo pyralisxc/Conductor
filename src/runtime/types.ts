@@ -29,6 +29,9 @@ export type MutationOperationName =
   | 'pull-request.create'
   | 'pull-request.comment.create'
   | 'pull-request.labels.update'
+  | 'pull-request.close'
+  | 'pull-request.ready-for-review'
+  | 'pull-request.verify.rerun'
   | 'pull-request.merge.integration'
   | 'pull-request.merge.reconcile-preview'
   | 'pull-request.merge.promote'
@@ -429,6 +432,7 @@ export interface PullRequestCheckState {
   conclusion: string | null;
   detailsUrl: string | null;
   app: string | null;
+  historical?: boolean;
 }
 
 export interface PullRequestWorkflowRunState {
@@ -437,6 +441,9 @@ export interface PullRequestWorkflowRunState {
   status: string;
   conclusion: string | null;
   url: string | null;
+  runAttempt?: number | null;
+  createdAt?: string | null;
+  historical?: boolean;
 }
 
 export interface PullRequestOrchestration {
@@ -687,6 +694,28 @@ export interface UpdatePullRequestLabelsInput {
   pullRequestNumber: number;
   add?: string[];
   remove?: string[];
+  idempotencyKey: string;
+}
+
+export interface ClosePullRequestInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  expectedHeadSha: string;
+  idempotencyKey: string;
+}
+
+export interface ReadyPullRequestForReviewInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  expectedHeadSha: string;
+  idempotencyKey: string;
+}
+
+export interface RerunPullRequestVerificationInput {
+  project: ProjectReference;
+  pullRequestNumber: number;
+  expectedHeadSha: string;
+  workflowRunId: number;
   idempotencyKey: string;
 }
 

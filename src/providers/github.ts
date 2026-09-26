@@ -20,6 +20,9 @@ import type {
   PullRequestOrchestration,
   PullRequestOrchestrationState,
   UpdatePullRequestLabelsInput,
+  ClosePullRequestInput,
+  ReadyPullRequestForReviewInput,
+  RerunPullRequestVerificationInput,
   MergeIntegrationPullRequestInput,
   ReconcilePreviewPullRequestInput,
   PromotePullRequestInput,
@@ -73,6 +76,7 @@ interface GitHubRepositoryResponse {
 interface GitHubPullRequestResponse {
   number: number;
   html_url: string;
+  node_id?: string;
   state: string;
   draft?: boolean;
   merged?: boolean;
@@ -124,6 +128,8 @@ interface GitHubWorkflowRunsResponse {
     status: string;
     conclusion: string | null;
     html_url?: string | null;
+    run_attempt?: number | null;
+    created_at?: string | null;
   }>;
 }
 
@@ -135,6 +141,8 @@ interface GitHubWorkflowRunResponse {
   html_url?: string | null;
   head_sha: string;
   event?: string | null;
+  run_attempt?: number | null;
+  created_at?: string | null;
 }
 
 interface GitHubWorkflowJobsResponse {
@@ -480,31 +488,34 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         credential,
       ),
     ]);
-    const items = checkRuns.check_runs.map((check) => ({
+    const items = markHistoricalChecks(checkRuns.check_runs.map((check) => ({
       id: check.id,
       name: check.name,
       status: check.status,
       conclusion: check.conclusion,
       detailsUrl: check.details_url ?? null,
       app: check.app?.slug ?? check.app?.name ?? null,
-    }));
-    const pending = items.filter((check) => check.status !== 'completed').length;
-    const successful = items.filter((check) => check.conclusion === 'success').length;
-    const neutral = items.filter((check) => check.conclusion === 'neutral').length;
-    const skipped = items.filter((check) => check.conclusion === 'skipped').length;
-    const failed = items.filter((check) =>
+    })));
+    const activeItems = items.filter((check) => !check.historical);
+    const pending = activeItems.filter((check) => check.status !== 'completed').length;
+    const successful = activeItems.filter((check) => check.conclusion === 'success').length;
+    const neutral = activeItems.filter((check) => check.conclusion === 'neutral').length;
+    const skipped = activeItems.filter((check) => check.conclusion === 'skipped').length;
+    const failed = activeItems.filter((check) =>
       check.status === 'completed'
       && check.conclusion !== null
       && !['success', 'neutral', 'skipped'].includes(check.conclusion)
     ).length;
     const labels = (pull.labels ?? []).flatMap((label) => label.name ? [label.name] : []);
-    const observedWorkflowRuns = workflowRuns.workflow_runs.map((run) => ({
+    const observedWorkflowRuns = markHistoricalWorkflowRuns(workflowRuns.workflow_runs.map((run) => ({
       id: run.id,
       name: run.name ?? `workflow-${run.id}`,
       status: run.status,
       conclusion: run.conclusion,
       url: run.html_url ?? null,
-    }));
+      runAttempt: run.run_attempt ?? null,
+      createdAt: run.created_at ?? null,
+    })));
     const orchestration = derivePullRequestOrchestration({
       pull,
       labels,
@@ -1506,6 +1517,76 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     };
   }
 
+
+  async closePullRequest(input: ClosePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string; state: string; draft: boolean; merged: boolean; headSha: string }> {
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.close']);
+    assertPullRequestNumber(input.pullRequestNumber);
+    assertSha(input.expectedHeadSha, 'expectedHeadSha');
+    let pull = await this.request<GitHubPullRequestResponse>(repository, `/pulls/${input.pullRequestNumber}`, {}, credential);
+    if (pull.head.sha !== input.expectedHeadSha) {
+      throw { code: 'CONFLICT', message: `Pull-request head changed from expected ${input.expectedHeadSha} to ${pull.head.sha}` };
+    }
+    if (pull.merged) throw { code: 'CONFLICT', message: `Pull request #${input.pullRequestNumber} is already merged and cannot be closed as obsolete` };
+    if (pull.state !== 'closed') {
+      await this.request<GitHubPullRequestResponse>(repository, `/pulls/${input.pullRequestNumber}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ state: 'closed' }),
+      }, credential);
+      pull = await this.request<GitHubPullRequestResponse>(repository, `/pulls/${input.pullRequestNumber}`, {}, credential);
+    }
+    if (pull.state !== 'closed') throw { code: 'COMMAND_FAILED', message: `GitHub did not close pull request #${input.pullRequestNumber}` };
+    return { repository, pullRequestNumber: pull.number, url: pull.html_url, state: pull.state, draft: pull.draft ?? false, merged: pull.merged ?? false, headSha: pull.head.sha };
+  }
+
+  async readyPullRequestForReview(input: ReadyPullRequestForReviewInput): Promise<{ repository: string; pullRequestNumber: number; url: string; state: string; draft: boolean; merged: boolean; headSha: string }> {
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.ready-for-review']);
+    assertPullRequestNumber(input.pullRequestNumber);
+    assertSha(input.expectedHeadSha, 'expectedHeadSha');
+    let pull = await this.request<GitHubPullRequestResponse>(repository, `/pulls/${input.pullRequestNumber}`, {}, credential);
+    if (pull.head.sha !== input.expectedHeadSha) {
+      throw { code: 'CONFLICT', message: `Pull-request head changed from expected ${input.expectedHeadSha} to ${pull.head.sha}` };
+    }
+    if (pull.merged || pull.state !== 'open') throw { code: 'CONFLICT', message: `Pull request #${input.pullRequestNumber} is not an open review candidate` };
+    if (pull.draft) {
+      if (!pull.node_id) throw { code: 'NOT_FOUND', message: `GitHub node identity is unavailable for pull request #${input.pullRequestNumber}` };
+      const response = await this.fetch(`${this.apiBaseUrl}/graphql`, {
+        method: 'POST',
+        headers: this.headers(credential.token),
+        body: JSON.stringify({
+          query: 'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft}}}',
+          variables: { id: pull.node_id },
+        }),
+      });
+      if (!response.ok) throw await githubResponseError(response);
+      const body = await response.json().catch(() => null) as { errors?: Array<{ message?: string }> } | null;
+      if (body?.errors?.length) throw { code: 'COMMAND_FAILED', message: body.errors.map((error) => error.message ?? 'GitHub GraphQL error').join('; ') };
+      pull = await this.request<GitHubPullRequestResponse>(repository, `/pulls/${input.pullRequestNumber}`, {}, credential);
+    }
+    if (pull.draft) throw { code: 'COMMAND_FAILED', message: `GitHub did not mark pull request #${input.pullRequestNumber} ready for review` };
+    return { repository, pullRequestNumber: pull.number, url: pull.html_url, state: pull.state, draft: false, merged: pull.merged ?? false, headSha: pull.head.sha };
+  }
+
+  async rerunPullRequestVerification(input: RerunPullRequestVerificationInput): Promise<{ repository: string; pullRequestNumber: number; workflowRunId: number; url: string | null; headSha: string; requested: true }> {
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.verify.rerun']);
+    assertPullRequestNumber(input.pullRequestNumber);
+    assertSha(input.expectedHeadSha, 'expectedHeadSha');
+    if (!Number.isSafeInteger(input.workflowRunId) || input.workflowRunId < 1) throw { code: 'CONFLICT', message: 'workflowRunId must be a positive integer' };
+    const pull = await this.request<GitHubPullRequestResponse>(repository, `/pulls/${input.pullRequestNumber}`, {}, credential);
+    if (pull.state !== 'open' || pull.merged) throw { code: 'CONFLICT', message: `Pull request #${input.pullRequestNumber} is not open` };
+    if (pull.head.sha !== input.expectedHeadSha) {
+      throw { code: 'CONFLICT', message: `Pull-request head changed from expected ${input.expectedHeadSha} to ${pull.head.sha}` };
+    }
+    const run = await this.request<GitHubWorkflowRunResponse>(repository, `/actions/runs/${input.workflowRunId}`, {}, credential);
+    if (run.head_sha !== input.expectedHeadSha) throw { code: 'CONFLICT', message: `Workflow run #${input.workflowRunId} belongs to head ${run.head_sha}, not expected ${input.expectedHeadSha}` };
+    if (normalizedCheckName(run.name ?? '') !== 'verify') throw { code: 'PERMISSION_DENIED', message: `Workflow run #${input.workflowRunId} is not the verify workflow` };
+    const response = await this.fetch(
+      `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/actions/runs/${input.workflowRunId}/rerun`,
+      { method: 'POST', headers: this.headers(credential.token) },
+    );
+    if (!response.ok) throw await githubResponseError(response);
+    return { repository, pullRequestNumber: pull.number, workflowRunId: run.id, url: run.html_url ?? null, headSha: input.expectedHeadSha, requested: true };
+  }
+
   async mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }> {
     const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.merge.integration']);
     const pull = await this.mergeCandidate(repository, credential, input.pullRequestNumber, input.expectedHeadSha, input.expectedBaseSha);
@@ -1885,6 +1966,9 @@ type GitHubWriteOperation =
   | 'pull-request.create'
   | 'pull-request.comment.create'
   | 'pull-request.labels.update'
+  | 'pull-request.close'
+  | 'pull-request.ready-for-review'
+  | 'pull-request.verify.rerun'
   | 'pull-request.merge.integration'
   | 'pull-request.merge.reconcile-preview'
   | 'pull-request.merge.promote'
@@ -1927,6 +2011,9 @@ const GITHUB_WRITE_OPERATION_PERMISSIONS: Readonly<Record<
   'pull-request.create': { pull_requests: 'write' },
   'pull-request.comment.create': { issues: 'write' },
   'pull-request.labels.update': { issues: 'write' },
+  'pull-request.close': { pull_requests: 'write' },
+  'pull-request.ready-for-review': { pull_requests: 'write' },
+  'pull-request.verify.rerun': { actions: 'write' },
   'pull-request.merge.integration': { contents: 'write' },
   'pull-request.merge.reconcile-preview': { contents: 'write' },
   'pull-request.merge.promote': { contents: 'write' },
@@ -1978,8 +2065,10 @@ function derivePullRequestOrchestration(input: {
   previous?: GetPullRequestStatusInput['previous'];
 }): PullRequestOrchestration {
   const sealRequested = input.labels.some((label) => label.toLowerCase() === 'seal-b');
+  const activeChecks = input.checks.filter((check) => !check.historical);
+  const activeWorkflowRuns = input.workflowRuns.filter((run) => !run.historical);
   const namedChecks = (name: string) =>
-    input.checks.filter((check) => normalizedCheckName(check.name) === name);
+    activeChecks.filter((check) => normalizedCheckName(check.name) === name);
 
   const verifyChecks = namedChecks('verify');
   const actionSmokeChecks = namedChecks('action-smoke');
@@ -1999,19 +2088,19 @@ function derivePullRequestOrchestration(input: {
     && selfSealActive;
 
   const pendingSignals = uniqueStrings([
-    ...input.checks
+    ...activeChecks
       .filter((check) => check.status !== 'completed')
       .map((check) => `check:${check.name}`),
-    ...input.workflowRuns
+    ...activeWorkflowRuns
       .filter((run) => run.status !== 'completed')
       .map((run) => `workflow:${run.name}`),
   ]);
 
   const actionRequiredSignals = uniqueStrings([
-    ...input.checks
+    ...activeChecks
       .filter((check) => check.conclusion === 'action_required')
       .map((check) => `check:${check.name}`),
-    ...input.workflowRuns
+    ...activeWorkflowRuns
       .filter((run) => run.conclusion === 'action_required')
       .map((run) => `workflow:${run.name}`),
   ]);
@@ -2082,8 +2171,8 @@ function derivePullRequestOrchestration(input: {
   } else if (
     sealRequested
     && headChanged === true
-    && input.checks.length === 0
-    && input.workflowRuns.length === 0
+    && activeChecks.length === 0
+    && activeWorkflowRuns.length === 0
   ) {
     state = 'sealed-head-verification-required';
     action = 'rerun-exact-head';
@@ -2101,7 +2190,7 @@ function derivePullRequestOrchestration(input: {
     summary = 'Checks are settled but GitHub reports the pull request as not mergeable; inspect the merge blocker.';
   } else if (
     verifyChecks.length === 0
-    && !input.workflowRuns.some((run) => normalizedCheckName(run.name) === 'verify')
+    && !activeWorkflowRuns.some((run) => normalizedCheckName(run.name) === 'verify')
   ) {
     state = 'external-gate-pending';
     action = 'wait';
@@ -2157,6 +2246,41 @@ function derivePullRequestOrchestration(input: {
       failed: failedSignals,
     },
   };
+}
+
+
+function markHistoricalChecks(checks: PullRequestStatus['checks']['items']): PullRequestStatus['checks']['items'] {
+  const latest = new Map<string, number>();
+  for (const check of checks) {
+    const key = normalizedCheckName(check.name);
+    latest.set(key, Math.max(latest.get(key) ?? Number.MIN_SAFE_INTEGER, check.id));
+  }
+  return checks.map((check) => ({ ...check, historical: latest.get(normalizedCheckName(check.name)) !== check.id }));
+}
+
+function markHistoricalWorkflowRuns(runs: PullRequestStatus['workflowRuns']): PullRequestStatus['workflowRuns'] {
+  const latest = new Map<string, PullRequestStatus['workflowRuns'][number]>();
+  for (const run of runs) {
+    const key = normalizedCheckName(run.name);
+    const current = latest.get(key);
+    if (!current || workflowRunIsNewer(run, current)) latest.set(key, run);
+  }
+  return runs.map((run) => ({ ...run, historical: latest.get(normalizedCheckName(run.name))?.id !== run.id }));
+}
+
+function workflowRunIsNewer(
+  candidate: PullRequestStatus['workflowRuns'][number],
+  current: PullRequestStatus['workflowRuns'][number],
+): boolean {
+  const candidateTime = candidate.createdAt ? Date.parse(candidate.createdAt) : Number.NaN;
+  const currentTime = current.createdAt ? Date.parse(current.createdAt) : Number.NaN;
+  if (Number.isFinite(candidateTime) && Number.isFinite(currentTime) && candidateTime !== currentTime) {
+    return candidateTime > currentTime;
+  }
+  if ((candidate.runAttempt ?? 0) !== (current.runAttempt ?? 0)) {
+    return (candidate.runAttempt ?? 0) > (current.runAttempt ?? 0);
+  }
+  return candidate.id > current.id;
 }
 
 function normalizedCheckName(name: string): string {

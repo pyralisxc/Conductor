@@ -20,6 +20,8 @@ function providerFor(input: {
     name: string;
     status: string;
     conclusion: string | null;
+    createdAt?: string;
+    runAttempt?: number;
   }>;
   mergeable?: boolean | null;
   headRef?: string;
@@ -72,8 +74,13 @@ function providerFor(input: {
       if (url.includes('/actions/runs?')) {
         return Response.json({
           workflow_runs: (input.workflowRuns ?? []).map((run) => ({
-            ...run,
+            id: run.id,
+            name: run.name,
+            status: run.status,
+            conclusion: run.conclusion,
             html_url: `https://actions/${run.id}`,
+            created_at: run.createdAt,
+            run_attempt: run.runAttempt,
           })),
         });
       }
@@ -180,6 +187,32 @@ test('bot-pushed sealed head with action_required asks for exact-head rerun', as
   assert.equal(result.orchestration.transition.meaningful, true);
   assert.equal(result.orchestration.seal.exactHeadVerificationRequired, true);
   assert.deepEqual(result.orchestration.signals.actionRequired, ['workflow:verify']);
+});
+
+test('newer successful verify supersedes historical action_required evidence on the exact head', async () => {
+  const provider = providerFor({
+    headSha: newHead,
+    labels: ['seal-b'],
+    checks: [
+      { id: 20, name: 'verify', status: 'completed', conclusion: 'success' },
+      { id: 21, name: 'action-smoke', status: 'completed', conclusion: 'success' },
+      { id: 22, name: 'self-seal', status: 'completed', conclusion: 'success' },
+    ],
+    workflowRuns: [
+      { id: 10, name: 'verify', status: 'completed', conclusion: 'action_required', createdAt: '2026-09-25T00:00:00Z' },
+      { id: 11, name: 'verify', status: 'completed', conclusion: 'success', createdAt: '2026-09-25T00:01:00Z' },
+    ],
+  });
+
+  const result = await status(provider, {
+    headSha: newHead,
+    orchestrationState: 'sealed-head-verification-required',
+  });
+
+  assert.equal(result.workflowRuns.find((run) => run.id === 10)?.historical, true);
+  assert.equal(result.workflowRuns.find((run) => run.id === 11)?.historical, false);
+  assert.equal(result.orchestration.state, 'integration-ready');
+  assert.deepEqual(result.orchestration.signals.actionRequired, []);
 });
 
 test('real source verification failure remains actionable even during seal-b', async () => {
