@@ -35,6 +35,7 @@ const runtimeOperationSchema = z.enum([
   'repository.acquire',
   'git.branch.create', 'git.branch.delete', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
+  'pull-request.close', 'pull-request.ready-for-review', 'pull-request.verify.rerun',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
   'work-item.create', 'work-item.comment.create', 'work-item.update-status', 'work-item.classification.update',
   'deployment.redeploy', 'deployment.git.create', 'deployment.promote', 'deployment.rollback', 'deployment.delete',
@@ -605,6 +606,53 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.updatePullRequestLabels(withoutWorkContext(input)));
     });
+
+
+    if (runtime.pullRequestLifecycleMutationsEnabled) {
+      const exactPullSchema = z.object({
+        project: projectSchema,
+        workContext: workContextSchema,
+        pullRequestNumber: z.number().int().positive(),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+        idempotencyKey: z.string().min(8).max(200),
+      });
+
+      server.registerTool('pull-request.close', {
+        title: 'Close an exact pull request',
+        description: 'Close one exact unmerged pull request without merging it. Already-closed unmerged pull requests are idempotent; merged pull requests are rejected.',
+        inputSchema: exactPullSchema,
+        outputSchema: mutationOutputSchema,
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+        _meta: { securitySchemes: oauthWriteSecurity },
+      }, async (input, extra) => {
+        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        return result(await runtime.closePullRequest(withoutWorkContext(input)));
+      });
+
+      server.registerTool('pull-request.ready-for-review', {
+        title: 'Mark an exact draft pull request ready',
+        description: 'Mark one exact open draft pull request ready for review. This changes review state only and does not authorize merge or promotion.',
+        inputSchema: exactPullSchema,
+        outputSchema: mutationOutputSchema,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        _meta: { securitySchemes: oauthWriteSecurity },
+      }, async (input, extra) => {
+        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        return result(await runtime.readyPullRequestForReview(withoutWorkContext(input)));
+      });
+
+      server.registerTool('pull-request.verify.rerun', {
+        title: 'Rerun exact-head pull request verification',
+        description: 'Rerun one exact GitHub Actions verify workflow run only after proving the run belongs to the expected pull-request head. Requires GitHub Actions write permission.',
+        inputSchema: exactPullSchema.extend({ workflowRunId: z.number().int().positive() }),
+        outputSchema: mutationOutputSchema,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        _meta: { securitySchemes: oauthWriteSecurity },
+      }, async (input, extra) => {
+        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        return result(await runtime.rerunPullRequestVerification(withoutWorkContext(input)));
+      });
+    }
 
     server.registerTool('pull-request.merge.integration', {
       title: 'Merge an integration pull request',

@@ -586,6 +586,78 @@ test('GitHub provider updates PR labels without erasing unrelated labels', async
   assert.deepEqual(requests.at(-1)?.body?.labels, ['existing', 'seal-b']);
 });
 
+test('GitHub provider bounds pull-request lifecycle and exact-head verification reruns', async () => {
+  const headSha = '9'.repeat(40);
+  let state = 'open';
+  let draft = true;
+  const calls: Array<{ url: string; method: string; body?: any }> = [];
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { pull_requests: 'write', actions: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ url, method, body });
+      if (url.endsWith('/graphql') && method === 'POST') {
+        draft = false;
+        return Response.json({ data: { markPullRequestReadyForReview: { pullRequest: { id: 'PR_node', isDraft: false } } } });
+      }
+      if (url.endsWith('/pulls/30') && method === 'GET') return Response.json({
+        number: 30, node_id: 'PR_node', html_url: 'https://github.com/pyralisxc/Conductor/pull/30',
+        state, draft, merged: false, mergeable: true, mergeable_state: 'clean',
+        head: { ref: 'work/lifecycle', sha: headSha }, base: { ref: 'preview', sha: '8'.repeat(40) }, labels: [],
+      });
+      if (url.endsWith('/pulls/30') && method === 'PATCH') {
+        state = body.state;
+        return Response.json({
+          number: 30, node_id: 'PR_node', html_url: 'https://github.com/pyralisxc/Conductor/pull/30',
+          state, draft, merged: false, head: { ref: 'work/lifecycle', sha: headSha }, base: { ref: 'preview', sha: '8'.repeat(40) },
+        });
+      }
+      if (url.endsWith('/actions/runs/77') && method === 'GET') return Response.json({
+        id: 77, name: 'verify', status: 'completed', conclusion: 'action_required', html_url: 'https://actions/77',
+        head_sha: headSha, event: 'pull_request', run_attempt: 1, created_at: '2026-09-25T00:00:00Z',
+      });
+      if (url.endsWith('/actions/runs/77/rerun') && method === 'POST') return new Response(null, { status: 201 });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    },
+  });
+
+  const ready = await provider.readyPullRequestForReview({
+    project: { id: 'pyralisxc/Conductor' }, pullRequestNumber: 30, expectedHeadSha: headSha, idempotencyKey: 'pr30-ready',
+  });
+  assert.equal(ready.draft, false);
+
+  const rerun = await provider.rerunPullRequestVerification({
+    project: { id: 'pyralisxc/Conductor' }, pullRequestNumber: 30, expectedHeadSha: headSha, workflowRunId: 77, idempotencyKey: 'pr30-rerun',
+  });
+  assert.equal(rerun.requested, true);
+  assert.equal(rerun.workflowRunId, 77);
+
+  const closed = await provider.closePullRequest({
+    project: { id: 'pyralisxc/Conductor' }, pullRequestNumber: 30, expectedHeadSha: headSha, idempotencyKey: 'pr30-close',
+  });
+  assert.equal(closed.state, 'closed');
+
+  const replayByState = await provider.closePullRequest({
+    project: { id: 'pyralisxc/Conductor' }, pullRequestNumber: 30, expectedHeadSha: headSha, idempotencyKey: 'pr30-close-other',
+  });
+  assert.equal(replayByState.state, 'closed');
+  assert.equal(calls.filter((call) => call.url.endsWith('/pulls/30') && call.method === 'PATCH').length, 1);
+});
+
 test('GitHub provider separates integration merge from accepted-branch promotion', async () => {
   const headSha = 'a'.repeat(40);
   const integrationBaseSha = 'b'.repeat(40);

@@ -52,6 +52,9 @@ import {
   type GetCiRunEvidenceInput,
   type CiRunEvidence,
   type UpdatePullRequestLabelsInput,
+  type ClosePullRequestInput,
+  type ReadyPullRequestForReviewInput,
+  type RerunPullRequestVerificationInput,
   type MergeIntegrationPullRequestInput,
   type ReconcilePreviewPullRequestInput,
   type PromotePullRequestInput,
@@ -162,6 +165,12 @@ const WORK_ITEM_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'work-item.classification.update', description: 'Update normalized work kind and/or origin without changing lifecycle status.', mutates: true },
 ];
 
+const PULL_REQUEST_LIFECYCLE_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
+  { name: 'pull-request.close', description: 'Close one exact unmerged pull request without accepting its code.', mutates: true },
+  { name: 'pull-request.ready-for-review', description: 'Mark one exact open draft pull request ready for review without bypassing verification.', mutates: true },
+  { name: 'pull-request.verify.rerun', description: 'Rerun one exact verify workflow run after proving it belongs to the expected pull-request head.', mutates: true },
+];
+
 const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'git.branch.create', description: 'Create a work/* branch from an exact Git SHA.', mutates: true },
   { name: 'git.branch.delete', description: 'Delete one exact integrated development branch after proving its head is already contained in Preview or Main.', mutates: true },
@@ -250,6 +259,17 @@ export class ConductorToolRuntime {
 
   get sourceControlMutationsEnabled(): boolean {
     return Boolean(this.sourceControlMutationProvider && this.mutationExecutor);
+  }
+
+  get pullRequestLifecycleMutationsEnabled(): boolean {
+    const provider = this.sourceControlMutationProvider;
+    return Boolean(
+      provider
+      && this.mutationExecutor
+      && provider.closePullRequest
+      && provider.readyPullRequestForReview
+      && provider.rerunPullRequestVerification
+    );
   }
 
   get operationPreflightEnabled(): boolean {
@@ -742,6 +762,30 @@ export class ConductorToolRuntime {
     });
   }
 
+  async closePullRequest(input: ClosePullRequestInput) {
+    return await this.executeMutation(input, 'pull-request.close', async (provider) => {
+      if (!provider.closePullRequest) throw { code: 'TOOL_UNAVAILABLE', message: 'Pull-request close is not enabled' };
+      const result = await provider.closePullRequest(input);
+      return { result, identifiers: { pullRequestNumber: result.pullRequestNumber } };
+    });
+  }
+
+  async readyPullRequestForReview(input: ReadyPullRequestForReviewInput) {
+    return await this.executeMutation(input, 'pull-request.ready-for-review', async (provider) => {
+      if (!provider.readyPullRequestForReview) throw { code: 'TOOL_UNAVAILABLE', message: 'Pull-request ready-for-review is not enabled' };
+      const result = await provider.readyPullRequestForReview(input);
+      return { result, identifiers: { pullRequestNumber: result.pullRequestNumber } };
+    });
+  }
+
+  async rerunPullRequestVerification(input: RerunPullRequestVerificationInput) {
+    return await this.executeMutation(input, 'pull-request.verify.rerun', async (provider) => {
+      if (!provider.rerunPullRequestVerification) throw { code: 'TOOL_UNAVAILABLE', message: 'Pull-request verification rerun is not enabled' };
+      const result = await provider.rerunPullRequestVerification(input);
+      return { result, identifiers: { pullRequestNumber: result.pullRequestNumber, workflowRunId: String(result.workflowRunId) } };
+    });
+  }
+
   async mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput) {
     return await this.executeMutation(input, 'pull-request.merge.integration', async (provider) => {
       const result = await provider.mergeIntegrationPullRequest(input);
@@ -778,6 +822,7 @@ export class ConductorToolRuntime {
       ...(this.vercelMutationEnabled ? VERCEL_MUTATION_DEFINITIONS : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
       ...(this.sourceControlMutationsEnabled ? MUTATION_DEFINITIONS : []),
+      ...(this.pullRequestLifecycleMutationsEnabled ? PULL_REQUEST_LIFECYCLE_MUTATION_DEFINITIONS : []),
       ...(this.workItemMutationsEnabled ? WORK_ITEM_MUTATION_DEFINITIONS : []),
     ];
   }
