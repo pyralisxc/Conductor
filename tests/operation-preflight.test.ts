@@ -102,6 +102,8 @@ test('runtime operation preflight fails closed when an operation is not exposed'
 
 test('generic repository acquisition preflight points to the dedicated acquisition preflight', async () => {
   const repositoryAcquisitionProvider = {
+    id: 'repository-acquisition',
+    async getCapabilities() { return []; },
     async preflightRepositoryAcquisition() { throw new Error('dedicated preflight is not called by generic preflight'); },
     async acquireRepository() { throw new Error('mutation is not called by preflight'); },
   };
