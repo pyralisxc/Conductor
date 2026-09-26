@@ -96,6 +96,43 @@ test('GitHub App credentials discover the repository installation and mint a rep
   assert.equal(requests.every((request) => request.authorization?.startsWith('Bearer eyJ')), true);
 });
 
+test('GitHub App credential force refresh bypasses a still-valid cached installation token', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  let tokenCalls = 0;
+  const credentials = new GitHubAppCredentialProvider({
+    appId: '12345',
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    fetch: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/app')) return Response.json({ id: 12345, slug: 'dev-os-conductor' });
+      if (url.endsWith('/repos/pyralisxc/CardForge/installation')) {
+        return Response.json({ id: 42, account: { login: 'pyralisxc' }, repository_selection: 'selected' });
+      }
+      if (url.endsWith('/app/installations/42/access_tokens')) {
+        tokenCalls += 1;
+        return Response.json({
+          token: `installation-token-${tokenCalls}`,
+          expires_at: '2099-01-01T00:00:00Z',
+          permissions: tokenCalls === 1
+            ? { contents: 'write' }
+            : { contents: 'write', workflows: 'write' },
+          repository_selection: 'selected',
+        });
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    },
+  });
+
+  const first = await credentials.getCredential('pyralisxc/CardForge');
+  const cached = await credentials.getCredential('pyralisxc/CardForge');
+  const refreshed = await credentials.getCredential('pyralisxc/CardForge', { forceRefresh: true });
+  assert.equal(first.token, 'installation-token-1');
+  assert.equal(cached.token, 'installation-token-1');
+  assert.equal(refreshed.token, 'installation-token-2');
+  assert.equal(refreshed.permissions?.workflows, 'write');
+  assert.equal(tokenCalls, 2);
+});
+
 test('GitHub App preflight proves operation-specific develop permissions', async () => {
   const credentials = {
     async getIdentity() { return { kind: 'app' as const, appId: '12345', appSlug: 'dev-os-conductor' }; },
@@ -973,13 +1010,16 @@ test('GitHub repository acquisition preflights workflows permission before mutat
   const provider = new GitHubRuntimeProvider({
     credentials: {
       async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
-      async getCredential(repository: string) {
+      async getCredential(repository: string, options?: { forceRefresh?: boolean }) {
         return {
-          token: 'installation-token',
+          token: options?.forceRefresh ? 'installation-token-refreshed' : 'installation-token-cached',
           kind: 'app-installation' as const,
           identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
           repository,
-          permissions: { contents: 'write', ...(allowWorkflows ? { workflows: 'write' } : {}) },
+          permissions: {
+            contents: 'write',
+            ...((allowWorkflows || options?.forceRefresh) ? { workflows: 'write' } : {}),
+          },
         };
       },
     },
@@ -998,13 +1038,13 @@ test('GitHub repository acquisition preflights workflows permission before mutat
     },
   });
 
-  const blocked = await provider.preflightRepositoryAcquisition({
+  const refreshedReady = await provider.preflightRepositoryAcquisition({
     upstreamRepository: 'example/upstream', upstreamRef: 'main',
     destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
   });
-  assert.equal(blocked.status, 'blocked');
-  assert.match(blocked.reason ?? '', /workflows:write/);
-  assert.equal(requests.some((url) => url.includes('/commits?sha=main&per_page=2')), false);
+  assert.equal(refreshedReady.status, 'ready');
+  assert.equal(refreshedReady.destination.empty, true);
+  assert.equal(requests.some((url) => url.includes('/commits?sha=main&per_page=2')), true);
 
   allowWorkflows = true;
   const ready = await provider.preflightRepositoryAcquisition({
