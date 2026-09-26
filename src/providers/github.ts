@@ -759,9 +759,9 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     );
     const blobs = acquisitionBlobs(tree);
     enforceAcquisitionBounds(tree, blobs);
-    const requiredPermissions = acquisitionRequiresWorkflowWrite(blobs)
-      ? { contents: 'write', workflows: 'write' } as const
-      : { contents: 'write' } as const;
+    const requiredPermissions: Record<string, 'write'> = acquisitionRequiresWorkflowWrite(blobs)
+      ? { contents: 'write', workflows: 'write' }
+      : { contents: 'write' };
     const { credential } = await this.writableRepository(
       { id: destination, repository: destination },
       requiredPermissions,
