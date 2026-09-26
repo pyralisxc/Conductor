@@ -911,6 +911,7 @@ test('GitHub CI run evidence binds PR head and workflow run and redacts bounded 
 test('GitHub repository acquisition preflight resolves exact public source and requires an empty authorized destination', async () => {
   const upstreamSha = 'a'.repeat(40);
   const treeSha = 'b'.repeat(40);
+  let destinationHasHistory = false;
   const provider = new GitHubRuntimeProvider({
     credentials: {
       async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
@@ -934,8 +935,13 @@ test('GitHub repository acquisition preflight resolves exact public source and r
         sha: treeSha, truncated: false, tree: [{ path: 'README.md', mode: '100644', type: 'blob', sha: 'c'.repeat(40), size: 4 }],
       });
       if (url.endsWith('/repos/pyralisxc/benchmark-copy')) return Response.json({
-        full_name: 'pyralisxc/benchmark-copy', default_branch: 'main', size: 0, pushed_at: null,
+        full_name: 'pyralisxc/benchmark-copy', default_branch: 'main', size: 0, pushed_at: '2026-09-25T00:00:00Z',
       });
+      if (url.endsWith('/repos/pyralisxc/benchmark-copy/commits?per_page=1')) {
+        return destinationHasHistory
+          ? Response.json([{ sha: 'd'.repeat(40) }])
+          : Response.json({ message: 'Git Repository is empty.' }, { status: 409 });
+      }
       throw new Error(`Unexpected request ${url}`);
     },
   });
@@ -948,6 +954,15 @@ test('GitHub repository acquisition preflight resolves exact public source and r
   assert.equal(result.upstream.treeSha, treeSha);
   assert.equal(result.destination.empty, true);
   assert.equal(result.codeWorkGranted, false);
+
+  destinationHasHistory = true;
+  const blocked = await provider.preflightRepositoryAcquisition({
+    upstreamRepository: 'example/upstream', upstreamRef: 'main',
+    destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
+  });
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.destination.empty, false);
+  assert.match(blocked.reason ?? '', /not empty/);
 });
 
 test('GitHub repository acquisition imports exact bounded tree and preserves provenance without granting work scope', async () => {
@@ -981,7 +996,8 @@ test('GitHub repository acquisition imports exact bounded tree and preserves pro
         sha: treeSha, truncated: false, tree: [{ path: 'hello.txt', mode: '100644', type: 'blob', sha: blobSha, size: 5 }],
       });
       if (url === `https://raw.githubusercontent.com/example/upstream/${upstreamSha}/hello.txt`) return new Response('hello');
-      if (url.endsWith('/repos/pyralisxc/benchmark-copy') && method === 'GET') return Response.json({ full_name: 'pyralisxc/benchmark-copy', default_branch: 'main', size: 0, pushed_at: null });
+      if (url.endsWith('/repos/pyralisxc/benchmark-copy') && method === 'GET') return Response.json({ full_name: 'pyralisxc/benchmark-copy', default_branch: 'main', size: 0, pushed_at: '2026-09-25T00:00:00Z' });
+      if (url.endsWith('/repos/pyralisxc/benchmark-copy/commits?per_page=1') && method === 'GET') return Response.json({ message: 'Git Repository is empty.' }, { status: 409 });
       if (url.endsWith('/contents/.conductor-bootstrap') && method === 'PUT') return Response.json({ commit: { sha: 'e'.repeat(40) } });
       if (url.endsWith('/git/blobs') && method === 'POST') return Response.json({ sha: blobSha });
       if (url.endsWith('/git/trees') && method === 'POST') return Response.json({ sha: treeSha });
