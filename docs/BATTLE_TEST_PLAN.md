@@ -37,7 +37,10 @@ This document tests the **current bounded runtime**. Future automation experimen
 23. Repeating the same head/state observation reports no meaningful transition.
 24. A `seal-b` candidate can distinguish expected pre-seal `action-smoke` failure from source `verify` failure.
 25. A bot-pushed sealed head with `action_required` reports exact-head verification required.
-26. Settled technical gates report `promotion-ready` without inferring Main approval.
+26. A newer successful exact-head verify supersedes an older same-head `action_required` run while preserving the older run as historical evidence.
+27. Exact-head verify rerun is bounded to one verified `verify` workflow run and requires `actions:write`.
+28. Exact PR lifecycle can close an unmerged obsolete PR idempotently and mark an exact open draft ready for review.
+29. Settled technical gates report `promotion-ready` without inferring Main approval.
 27. Integration merge rejects the repository default branch as target.
 28. Integration merge rejects unapproved source branch classes.
 29. Duplicate mutation attempts replay the durable idempotent receipt instead of repeating the side effect.

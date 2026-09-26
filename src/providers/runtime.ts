@@ -16,6 +16,9 @@ import type {
   GetCiRunEvidenceInput,
   CiRunEvidence,
   UpdatePullRequestLabelsInput,
+  ClosePullRequestInput,
+  ReadyPullRequestForReviewInput,
+  RerunPullRequestVerificationInput,
   MergeIntegrationPullRequestInput,
   ReconcilePreviewPullRequestInput,
   PromotePullRequestInput,
@@ -120,6 +123,9 @@ export interface SourceControlMutationProvider extends RuntimeCapabilityProvider
   createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }>;
   commentPullRequest(input: CommentPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; commentId: string; url: string }>;
   updatePullRequestLabels(input: UpdatePullRequestLabelsInput): Promise<{ repository: string; pullRequestNumber: number; labels: string[] }>;
+  closePullRequest?(input: ClosePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string; state: string; draft: boolean; merged: boolean; headSha: string }>;
+  readyPullRequestForReview?(input: ReadyPullRequestForReviewInput): Promise<{ repository: string; pullRequestNumber: number; url: string; state: string; draft: boolean; merged: boolean; headSha: string }>;
+  rerunPullRequestVerification?(input: RerunPullRequestVerificationInput): Promise<{ repository: string; pullRequestNumber: number; workflowRunId: number; url: string | null; headSha: string; requested: true }>;
   mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }>;
   reconcilePreviewPullRequest(input: ReconcilePreviewPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }>;
   promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string }>;

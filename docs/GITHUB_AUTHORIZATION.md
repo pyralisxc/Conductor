@@ -94,15 +94,17 @@ If webhook/event ingestion is introduced later, events are wake/reconciliation s
 
 ## Pull-request execution kernel
 
-The GitHub provider exposes five distinct concerns instead of one generic merge power:
+The GitHub provider exposes bounded PR concerns instead of one generic mutation power:
 
 - **status** — read exact PR head/base identity, labels, check/workflow truth, and derived orchestration state; prior observations may be supplied ephemerally to detect meaningful transitions without persisting PR state;
 - **labels** — add/remove PR labels while preserving unrelated labels;
+- **lifecycle** — close an exact unmerged PR or mark an exact draft ready for review, with head-SHA guards and provider read-back;
+- **verification rerun** — rerun one exact `verify` workflow run only when GitHub proves it belongs to the expected PR head; this requires GitHub App `actions:write`;
 - **integration merge** — merge an exact candidate into a non-accepted integration branch;
 - **Preview reconciliation** — merge an exact repository default-branch change into `preview` or `vercel-preview` when Main contains content absent from Preview;
 - **promotion merge** — merge an exact explicitly approved Preview candidate into the repository default branch, preserving Preview ancestry.
 
-State-aware PR status never authorizes its own next action. `promotion-ready` means observed technical gates are settled; Development OS/owner approval still governs consequential promotion. An `external-gate-pending` result with `shouldAct=false` is a signal to stop identical polling and wait for provider/user/event-driven re-entry.
+State-aware PR status preserves all observed check/workflow runs but marks superseded same-name evidence as historical; orchestration is derived only from the latest relevant exact-head evidence. State-aware PR status never authorizes its own next action. `promotion-ready` means observed technical gates are settled; Development OS/owner approval still governs consequential promotion. An `external-gate-pending` result with `shouldAct=false` is a signal to stop identical polling and wait for provider/user/event-driven re-entry.
 
 For self-sealing repositories, Conductor treats `seal-b` + successful source `verify` + failed `action-smoke` + active/successful `self-seal` as an expected pre-seal checkpoint mismatch rather than a source failure. If the seal changes the candidate SHA and GitHub reports `action_required`, status explicitly requests exact sealed-head verification before promotion.
 
