@@ -100,6 +100,35 @@ test('runtime operation preflight fails closed when an operation is not exposed'
   assert.equal(receipt.result.checks[0]?.error?.code, 'TOOL_UNAVAILABLE');
 });
 
+test('generic repository acquisition preflight points to the dedicated acquisition preflight', async () => {
+  const repositoryAcquisitionProvider = {
+    async preflightRepositoryAcquisition() { throw new Error('dedicated preflight is not called by generic preflight'); },
+    async acquireRepository() { throw new Error('mutation is not called by preflight'); },
+  };
+  const runtime = new ConductorToolRuntime({
+    repositoryAcquisitionProvider,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+
+  const receipt = await runtime.preflightOperation({
+    project: { id: 'pyralisxc/Conductor' },
+    operation: 'repository.acquire',
+  });
+  assert.equal(receipt.status, 'succeeded');
+  if (receipt.status !== 'succeeded') return;
+  assert.equal(receipt.result.exposed, true);
+  assert.equal(receipt.result.status, 'blocked');
+  const specialized = receipt.result.checks.find((check) =>
+    check.provider === 'conductor' && /repository\.acquire\.preflight/u.test(check.summary)
+  );
+  assert.ok(specialized);
+  assert.equal(specialized.error, undefined);
+  assert.equal(
+    receipt.result.checks.some((check) => check.error?.code === 'TOOL_UNAVAILABLE'),
+    false,
+  );
+});
+
 test('runtime operation preflight uses provider evidence for an exposed GitHub mutation', async () => {
   const github = new GitHubRuntimeProvider({
     credentials: {

@@ -252,7 +252,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
   if (runtime.operationPreflightEnabled) {
     server.registerTool('preflight_operation', {
       title: 'Preflight one exact Conductor operation',
-      description: 'Verify whether one exact exposed operation can execute against the supplied execution-routing referent. This does not infer which operation the project needs.',
+      description: 'Verify whether one exact exposed operation can execute against the supplied execution-routing referent. This does not infer which operation the project needs. Repository acquisition is specialized: use repository.acquire.preflight with exact upstream/ref/destination inputs before repository.acquire.',
       inputSchema: z.object({
         project: projectSchema,
         operation: runtimeOperationSchema,
