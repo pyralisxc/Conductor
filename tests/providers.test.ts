@@ -937,7 +937,7 @@ test('GitHub repository acquisition preflight resolves exact public source and r
       if (url.endsWith('/repos/pyralisxc/benchmark-copy')) return Response.json({
         full_name: 'pyralisxc/benchmark-copy', default_branch: 'main', size: 0, pushed_at: '2026-09-25T00:00:00Z',
       });
-      if (url.endsWith('/repos/pyralisxc/benchmark-copy/commits?per_page=1')) {
+      if (url.endsWith('/repos/pyralisxc/benchmark-copy/commits?sha=main&per_page=2')) {
         return destinationHasHistory
           ? Response.json([{ sha: 'd'.repeat(40) }])
           : Response.json({ message: 'Git Repository is empty.' }, { status: 409 });
@@ -962,6 +962,135 @@ test('GitHub repository acquisition preflight resolves exact public source and r
   });
   assert.equal(blocked.status, 'blocked');
   assert.equal(blocked.destination.empty, false);
+  assert.match(blocked.reason ?? '', /not empty/);
+});
+
+test('GitHub repository acquisition preflights workflows permission before mutating the destination', async () => {
+  const upstreamSha = 'a'.repeat(40);
+  const treeSha = 'b'.repeat(40);
+  let allowWorkflows = false;
+  const requests: string[] = [];
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write', ...(allowWorkflows ? { workflows: 'write' } : {}) },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith('/repos/example/upstream')) return Response.json({ full_name: 'example/upstream', html_url: 'https://github.com/example/upstream', private: false });
+      if (url.includes('/repos/example/upstream/commits/main')) return Response.json({ sha: upstreamSha, commit: { tree: { sha: treeSha } } });
+      if (url.includes(`/repos/example/upstream/git/trees/${treeSha}`)) return Response.json({
+        sha: treeSha, truncated: false, tree: [{ path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', sha: 'c'.repeat(40), size: 4 }],
+      });
+      if (url.endsWith('/repos/pyralisxc/benchmark-copy')) return Response.json({ full_name: 'pyralisxc/benchmark-copy', default_branch: 'main', size: 0 });
+      if (url.endsWith('/repos/pyralisxc/benchmark-copy/commits?sha=main&per_page=2')) return Response.json({ message: 'Git Repository is empty.' }, { status: 409 });
+      throw new Error(`Unexpected request ${url}`);
+    },
+  });
+
+  const blocked = await provider.preflightRepositoryAcquisition({
+    upstreamRepository: 'example/upstream', upstreamRef: 'main',
+    destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
+  });
+  assert.equal(blocked.status, 'blocked');
+  assert.match(blocked.reason ?? '', /workflows:write/);
+  assert.equal(requests.some((url) => url.includes('/commits?sha=main&per_page=2')), false);
+
+  allowWorkflows = true;
+  const ready = await provider.preflightRepositoryAcquisition({
+    upstreamRepository: 'example/upstream', upstreamRef: 'main',
+    destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
+  });
+  assert.equal(ready.status, 'ready');
+  assert.equal(ready.destination.empty, true);
+});
+
+test('GitHub repository acquisition resumes only an exact Conductor bootstrap state', async () => {
+  const upstreamSha = 'a'.repeat(40);
+  const treeSha = 'b'.repeat(40);
+  const blobSha = '8baef1b4abc478178b004d62031cf7fe6db6f903';
+  const bootstrapSha = 'e'.repeat(40);
+  const destinationCommit = 'd'.repeat(40);
+  let bootstrapContent = 'temporary bootstrap; removed by snapshot import\n';
+  const requests: Array<{ url: string; method: string; body?: any }> = [];
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      requests.push({ url, method, body });
+      if (url.endsWith('/repos/example/upstream')) return Response.json({ full_name: 'example/upstream', html_url: 'https://github.com/example/upstream', private: false });
+      if (url.includes('/repos/example/upstream/commits/main')) return Response.json({ sha: upstreamSha, commit: { tree: { sha: treeSha } } });
+      if (url.includes(`/repos/example/upstream/git/trees/${treeSha}`)) return Response.json({
+        sha: treeSha, truncated: false, tree: [{ path: 'hello.txt', mode: '100644', type: 'blob', sha: blobSha, size: 5 }],
+      });
+      if (url === `https://raw.githubusercontent.com/example/upstream/${upstreamSha}/hello.txt`) return new Response('hello');
+      if (url.endsWith('/repos/pyralisxc/benchmark-copy') && method === 'GET') return Response.json({ full_name: 'pyralisxc/benchmark-copy', default_branch: 'main', size: 1 });
+      if (url.endsWith('/commits?sha=main&per_page=2') && method === 'GET') return Response.json([{ sha: bootstrapSha, commit: { message: 'Initialize repository for Conductor snapshot acquisition', tree: { sha: 'f'.repeat(40) } } }]);
+      if (url.endsWith('/contents?ref=main') && method === 'GET') return Response.json([{ type: 'file', path: '.conductor-bootstrap', sha: '1'.repeat(40), size: bootstrapContent.length }]);
+      if (url.endsWith('/contents/.conductor-bootstrap?ref=main') && method === 'GET') return Response.json({ type: 'file', path: '.conductor-bootstrap', encoding: 'base64', content: Buffer.from(bootstrapContent).toString('base64') });
+      if (url.endsWith('/branches?per_page=2') && method === 'GET') return Response.json([{ name: 'main' }]);
+      if (url.endsWith('/tags?per_page=1') && method === 'GET') return Response.json([]);
+      if (url.endsWith('/git/ref/heads/main') && method === 'GET') return Response.json({ object: { sha: requests.some((request) => request.method === 'PATCH' && request.url.endsWith('/git/refs/heads/main')) ? destinationCommit : bootstrapSha } });
+      if (url.endsWith('/git/blobs') && method === 'POST') return Response.json({ sha: blobSha });
+      if (url.endsWith('/git/trees') && method === 'POST') return Response.json({ sha: treeSha });
+      if (url.endsWith('/git/commits') && method === 'POST') {
+        assert.deepEqual(body.parents, [bootstrapSha]);
+        return Response.json({ sha: destinationCommit });
+      }
+      if (url.endsWith('/git/refs/heads/main') && method === 'PATCH') return Response.json({ sha: destinationCommit });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    },
+  });
+
+  const preflight = await provider.preflightRepositoryAcquisition({
+    upstreamRepository: 'example/upstream', upstreamRef: 'main',
+    destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
+  });
+  assert.equal(preflight.status, 'ready');
+  assert.equal(preflight.destination.empty, false);
+  assert.equal(preflight.destination.recoverableBootstrap, true);
+  assert.equal(preflight.destination.bootstrapCommitSha, bootstrapSha);
+
+  const result = await provider.acquireRepository({
+    upstreamRepository: 'example/upstream', upstreamRef: 'main',
+    destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
+    expectedUpstreamSha: upstreamSha,
+    approvalReference: 'owner-approved:bootstrap-recovery',
+    idempotencyKey: 'repo-acquire-bootstrap-recovery',
+  });
+  assert.equal(result.commitSha, destinationCommit);
+  assert.equal(requests.some((request) => request.method === 'PUT' && request.url.includes('.conductor-bootstrap')), false);
+
+  bootstrapContent = 'user-owned content\n';
+  const blocked = await provider.preflightRepositoryAcquisition({
+    upstreamRepository: 'example/upstream', upstreamRef: 'main',
+    destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
+  });
+  assert.equal(blocked.status, 'blocked');
   assert.match(blocked.reason ?? '', /not empty/);
 });
 
@@ -997,7 +1126,7 @@ test('GitHub repository acquisition imports exact bounded tree and preserves pro
       });
       if (url === `https://raw.githubusercontent.com/example/upstream/${upstreamSha}/hello.txt`) return new Response('hello');
       if (url.endsWith('/repos/pyralisxc/benchmark-copy') && method === 'GET') return Response.json({ full_name: 'pyralisxc/benchmark-copy', default_branch: 'main', size: 0, pushed_at: '2026-09-25T00:00:00Z' });
-      if (url.endsWith('/repos/pyralisxc/benchmark-copy/commits?per_page=1') && method === 'GET') return Response.json({ message: 'Git Repository is empty.' }, { status: 409 });
+      if (url.endsWith('/repos/pyralisxc/benchmark-copy/commits?sha=main&per_page=2') && method === 'GET') return Response.json({ message: 'Git Repository is empty.' }, { status: 409 });
       if (url.endsWith('/contents/.conductor-bootstrap') && method === 'PUT') return Response.json({ commit: { sha: 'e'.repeat(40) } });
       if (url.endsWith('/git/blobs') && method === 'POST') return Response.json({ sha: blobSha });
       if (url.endsWith('/git/trees') && method === 'POST') return Response.json({ sha: treeSha });
