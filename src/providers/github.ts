@@ -980,7 +980,18 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     }
 
     const resolvedBranch = acquisitionBranch(input.destinationBranch ?? repository.default_branch ?? branch);
-    if ((repository.size ?? 0) !== 0 || repository.pushed_at) {
+    let hasHistory: boolean;
+    try {
+      hasHistory = await this.repositoryHasGitHistory(destination, credential);
+    } catch (error) {
+      const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', this.id);
+      return blocked(
+        `Unable to verify destination Git history before acquisition: ${normalized.message}`,
+        upstreamFacts,
+        { repository: destination, branch: resolvedBranch, exists: true, empty: null, authorized: true },
+      );
+    }
+    if (hasHistory) {
       return blocked(
         'Destination repository is not empty; acquisition refuses to overwrite existing repository history',
         upstreamFacts,
@@ -1652,6 +1663,23 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       }
     }
     return { repository, credential };
+  }
+
+  private async repositoryHasGitHistory(repository: string, credential: GitHubCredential): Promise<boolean> {
+    const response = await this.fetch(
+      `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/commits?per_page=1`,
+      { headers: this.headers(credential.token) },
+    );
+    if (response.status === 409) {
+      const conflict = await response.clone().json().catch(() => undefined) as { message?: string } | undefined;
+      if (/git repository is empty/i.test(conflict?.message ?? '')) return false;
+    }
+    if (!response.ok) throw await githubResponseError(response);
+    const commits = await response.json().catch(() => null);
+    if (!Array.isArray(commits)) {
+      throw { code: 'COMMAND_FAILED', message: `GitHub returned invalid commit history for ${repository}` };
+    }
+    return commits.length > 0;
   }
 
   private async request<Result>(
