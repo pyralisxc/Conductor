@@ -4,6 +4,7 @@ export type ToolOperationName =
   | 'capabilities'
   | 'preflight_project'
   | 'preflight_operation'
+  | 'repository.acquire.preflight'
   | 'development.status'
   | 'pull-request.status'
   | 'source.artifact.read'
@@ -20,6 +21,7 @@ export type ToolOperationName =
 export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
 export type MutationOperationName =
+  | 'repository.acquire'
   | 'git.branch.create'
   | 'git.branch.delete'
   | 'git.commit.create'
@@ -150,6 +152,71 @@ export interface ProjectReference {
 export interface GetOperationPreflightInput {
   project: ProjectReference;
   operation: RuntimeOperationName;
+}
+
+export interface RepositoryAcquisitionPreflightInput {
+  upstreamRepository: string;
+  upstreamRef: string;
+  destinationOwner: string;
+  destinationRepository: string;
+  destinationBranch?: string;
+}
+
+export interface RepositoryAcquisitionPreflight {
+  provider: 'github';
+  status: 'ready' | 'blocked';
+  method: 'snapshot-existing-destination';
+  upstream: {
+    repository: string;
+    url: string;
+    ref: string;
+    sha: string | null;
+    treeSha: string | null;
+    fileCount: number | null;
+    totalBytes: number | null;
+  };
+  destination: {
+    repository: string;
+    branch: string;
+    exists: boolean;
+    empty: boolean | null;
+    authorized: boolean;
+  };
+  limits: {
+    maxFiles: number;
+    maxTotalBytes: number;
+    maxSingleBlobBytes: number;
+  };
+  reason: string | null;
+  codeWorkGranted: false;
+  observedAt: string;
+}
+
+export interface AcquireRepositoryInput extends RepositoryAcquisitionPreflightInput {
+  expectedUpstreamSha: string;
+  approvalReference: string;
+  idempotencyKey: string;
+}
+
+export interface RepositoryAcquisitionResult {
+  provider: 'github';
+  destinationRepository: string;
+  url: string;
+  branch: string;
+  commitSha: string;
+  treeSha: string;
+  importedFiles: number;
+  totalBytes: number;
+  provenance: {
+    upstreamRepository: string;
+    upstreamUrl: string;
+    upstreamRef: string;
+    upstreamSha: string;
+    acquiredAt: string;
+  };
+  approvalReference: string;
+  codeWorkGranted: false;
+  cleanup: 'owner-provider-cleanup';
 }
 
 export interface OperationPreflightCheck {

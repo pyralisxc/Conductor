@@ -28,6 +28,10 @@ import type {
   CommentWorkItemInput,
   UpdateWorkItemStatusInput,
   UpdateWorkItemClassificationInput,
+  RepositoryAcquisitionPreflightInput,
+  RepositoryAcquisitionPreflight,
+  AcquireRepositoryInput,
+  RepositoryAcquisitionResult,
   GetDeploymentStatusInput,
   GetDeploymentLogsInput,
   DeploymentProjectStatus,
@@ -102,6 +106,11 @@ export interface VercelOperationsProvider extends DeploymentReadProvider {
   upsertEnvironment(input: VercelEnvInput): Promise<Record<string, unknown>>;
   updateEnvironment(input: VercelEnvEditInput): Promise<Record<string, unknown>>;
   removeEnvironment(input: VercelEnvRemoveInput): Promise<Record<string, unknown>>;
+}
+
+export interface RepositoryAcquisitionProvider extends RuntimeCapabilityProvider {
+  preflightRepositoryAcquisition(input: RepositoryAcquisitionPreflightInput): Promise<RepositoryAcquisitionPreflight>;
+  acquireRepository(input: AcquireRepositoryInput): Promise<RepositoryAcquisitionResult>;
 }
 
 export interface SourceControlMutationProvider extends RuntimeCapabilityProvider {

@@ -30,8 +30,9 @@ const errorSchema = z.object({
 });
 
 const runtimeOperationSchema = z.enum([
-  'capabilities', 'preflight_project', 'preflight_operation',
+  'capabilities', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
   'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
+  'repository.acquire',
   'git.branch.create', 'git.branch.delete', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
@@ -449,6 +450,43 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthSecurity },
     }, async (input) => result(await runtime.listWorkItems(input)));
+  }
+
+
+  if (runtime.repositoryAcquisitionReadEnabled) {
+    const acquisitionInputSchema = z.object({
+      upstreamRepository: z.string().regex(/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/u),
+      upstreamRef: z.string().trim().min(1).max(255),
+      destinationOwner: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u),
+      destinationRepository: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/u),
+      destinationBranch: z.string().trim().min(1).max(255).optional(),
+    });
+    server.registerTool('repository.acquire.preflight', {
+      title: 'Preflight an external repository acquisition',
+      description: 'Resolve one exact public GitHub upstream/ref and verify that an exact owner-approved destination already exists, is empty, and authorizes bounded snapshot acquisition. This never changes active code-work scope.',
+      inputSchema: acquisitionInputSchema,
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.repositoryAcquisitionPreflight(input)));
+
+    if (runtime.repositoryAcquisitionMutationEnabled) {
+      server.registerTool('repository.acquire', {
+        title: 'Acquire an exact external repository snapshot',
+        description: 'Import one bounded exact public GitHub snapshot into an already-authorized empty repository. Requires an exact upstream SHA and explicit owner approval. Acquisition does not grant or switch code-work authority.',
+        inputSchema: acquisitionInputSchema.extend({
+          expectedUpstreamSha: z.string().regex(/^[0-9a-f]{40}$/iu),
+          approvalReference: z.string().trim().min(1).max(500),
+          idempotencyKey: z.string().min(8).max(200),
+        }),
+        outputSchema: mutationOutputSchema,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        _meta: { securitySchemes: oauthWriteSecurity },
+      }, async (input, extra) => {
+        requireWriteScope(extra.authInfo?.scopes);
+        return result(await runtime.acquireRepository(input));
+      });
+    }
   }
 
   if (runtime.sourceControlMutationsEnabled) {
