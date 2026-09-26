@@ -92,7 +92,7 @@ export function createRuntimeFromEnvironment(
   }
 
   const sourceControlMutationsEnabled = environment.CONDUCTOR_ENABLE_GITHUB_MUTATIONS === '1';
-  if (!sourceControlMutationsEnabled) return new ConductorToolRuntime({ providers, projectResolver: githubProvider, pullRequestProvider: githubProvider, sourceArtifactProvider: githubProvider, ciReadProvider: githubProvider, workItemProvider: githubProvider, workItemCandidateProvider: githubProvider, deploymentProvider: vercelProvider });
+  if (!sourceControlMutationsEnabled) return new ConductorToolRuntime({ providers, repositoryAcquisitionProvider: githubProvider, projectResolver: githubProvider, pullRequestProvider: githubProvider, sourceArtifactProvider: githubProvider, ciReadProvider: githubProvider, workItemProvider: githubProvider, workItemCandidateProvider: githubProvider, deploymentProvider: vercelProvider });
   if (!githubProvider || (!environment.GITHUB_TOKEN && !githubApp)) {
     throw new Error('GitHub mutations require an authorized owner/project and GitHub authentication');
   }
@@ -103,6 +103,7 @@ export function createRuntimeFromEnvironment(
   }
   return new ConductorToolRuntime({
     providers,
+    repositoryAcquisitionProvider: githubProvider,
     sourceControlMutationProvider: githubProvider,
     mutationExecutor: new IdempotentMutationExecutor({
       store: new RedisIdempotencyStore({ url: redisUrl, token: redisToken }),

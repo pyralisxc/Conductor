@@ -15,6 +15,7 @@ import type {
   SourceControlMutationProvider,
   SourceArtifactReadProvider,
   CiReadProvider,
+  RepositoryAcquisitionProvider,
 } from '../src/index.js';
 
 const project: ProjectReference = {
@@ -475,4 +476,56 @@ test('runtime exposes exact source and CI evidence reads without enabling mutati
   assert.equal(source.status, 'succeeded');
   const ci = await runtime.ciRunRead({ project: { id: 'cardforge', repository: 'pyralisxc/CardForge' }, pullRequestNumber: 2, expectedHeadSha: 'b'.repeat(40), workflowRunId: 3 });
   assert.equal(ci.status, 'succeeded');
+});
+
+
+test('repository acquisition has a dedicated read preflight and idempotent mutation without code-work grant', async () => {
+  let acquisitions = 0;
+  const repositoryAcquisitionProvider: RepositoryAcquisitionProvider = {
+    id: 'github-acquisition',
+    async getCapabilities() { return []; },
+    async preflightRepositoryAcquisition(input) {
+      return {
+        provider: 'github', status: 'ready', method: 'snapshot-existing-destination',
+        upstream: { repository: input.upstreamRepository, url: 'https://github.com/example/upstream', ref: input.upstreamRef, sha: 'a'.repeat(40), treeSha: 'b'.repeat(40), fileCount: 1, totalBytes: 5 },
+        destination: { repository: `${input.destinationOwner}/${input.destinationRepository}`, branch: 'main', exists: true, empty: true, authorized: true },
+        limits: { maxFiles: 1500, maxTotalBytes: 25 * 1024 * 1024, maxSingleBlobBytes: 5 * 1024 * 1024 },
+        reason: null, codeWorkGranted: false, observedAt: '2026-09-25T00:00:00Z',
+      };
+    },
+    async acquireRepository(input) {
+      acquisitions += 1;
+      return {
+        provider: 'github', destinationRepository: `${input.destinationOwner}/${input.destinationRepository}`,
+        url: `https://github.com/${input.destinationOwner}/${input.destinationRepository}`, branch: 'main',
+        commitSha: 'c'.repeat(40), treeSha: 'b'.repeat(40), importedFiles: 1, totalBytes: 5,
+        provenance: { upstreamRepository: input.upstreamRepository, upstreamUrl: 'https://github.com/example/upstream', upstreamRef: input.upstreamRef, upstreamSha: input.expectedUpstreamSha, acquiredAt: '2026-09-25T00:00:00Z' },
+        approvalReference: input.approvalReference, codeWorkGranted: false, cleanup: 'owner-provider-cleanup',
+      };
+    },
+  };
+  const runtime = new ConductorToolRuntime({
+    repositoryAcquisitionProvider,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const capabilities = await runtime.capabilities();
+  assert.equal(capabilities.status, 'succeeded');
+  if (capabilities.status === 'succeeded') {
+    assert.equal(capabilities.result.operations.some(item => item.name === 'repository.acquire.preflight' && !item.mutates), true);
+    assert.equal(capabilities.result.operations.some(item => item.name === 'repository.acquire' && item.mutates), true);
+  }
+  const preflight = await runtime.repositoryAcquisitionPreflight({
+    upstreamRepository: 'example/upstream', upstreamRef: 'main', destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
+  });
+  assert.equal(preflight.status, 'succeeded');
+  const input = {
+    upstreamRepository: 'example/upstream', upstreamRef: 'main', destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
+    expectedUpstreamSha: 'a'.repeat(40), approvalReference: 'owner-approved:test', idempotencyKey: 'repository-acquire:runtime-test',
+  };
+  const first = await runtime.acquireRepository(input);
+  const replay = await runtime.acquireRepository(input);
+  assert.equal(first.status, 'succeeded');
+  assert.equal(replay.idempotency?.replayed, true);
+  assert.equal(acquisitions, 1);
+  if (first.status === 'succeeded') assert.equal(first.result.codeWorkGranted, false);
 });

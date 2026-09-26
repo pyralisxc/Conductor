@@ -906,3 +906,105 @@ test('GitHub CI run evidence binds PR head and workflow run and redacts bounded 
     (error: unknown) => (error as { message?: string }).message?.includes('Pull-request head changed') === true,
   );
 });
+
+
+test('GitHub repository acquisition preflight resolves exact public source and requires an empty authorized destination', async () => {
+  const upstreamSha = 'a'.repeat(40);
+  const treeSha = 'b'.repeat(40);
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        if (repository !== 'pyralisxc/benchmark-copy') throw { status: 404, message: 'Not Found' };
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/repos/example/upstream')) return Response.json({ full_name: 'example/upstream', html_url: 'https://github.com/example/upstream', private: false });
+      if (url.includes('/repos/example/upstream/commits/main')) return Response.json({ sha: upstreamSha, commit: { tree: { sha: treeSha } } });
+      if (url.includes(`/repos/example/upstream/git/trees/${treeSha}`)) return Response.json({
+        sha: treeSha, truncated: false, tree: [{ path: 'README.md', mode: '100644', type: 'blob', sha: 'c'.repeat(40), size: 4 }],
+      });
+      if (url.endsWith('/repos/pyralisxc/benchmark-copy')) return Response.json({
+        full_name: 'pyralisxc/benchmark-copy', default_branch: 'main', size: 0, pushed_at: null,
+      });
+      throw new Error(`Unexpected request ${url}`);
+    },
+  });
+  const result = await provider.preflightRepositoryAcquisition({
+    upstreamRepository: 'example/upstream', upstreamRef: 'main',
+    destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
+  });
+  assert.equal(result.status, 'ready');
+  assert.equal(result.upstream.sha, upstreamSha);
+  assert.equal(result.upstream.treeSha, treeSha);
+  assert.equal(result.destination.empty, true);
+  assert.equal(result.codeWorkGranted, false);
+});
+
+test('GitHub repository acquisition imports exact bounded tree and preserves provenance without granting work scope', async () => {
+  const upstreamSha = 'a'.repeat(40);
+  const treeSha = 'b'.repeat(40);
+  const blobSha = '8baef1b4abc478178b004d62031cf7fe6db6f903';
+  const destinationCommit = 'd'.repeat(40);
+  const requests: Array<{ url: string; method: string; body?: any }> = [];
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      requests.push({ url, method, body });
+      if (url.endsWith('/repos/example/upstream')) return Response.json({ full_name: 'example/upstream', html_url: 'https://github.com/example/upstream', private: false });
+      if (url.includes('/repos/example/upstream/commits/main')) return Response.json({ sha: upstreamSha, commit: { tree: { sha: treeSha } } });
+      if (url.includes(`/repos/example/upstream/git/trees/${treeSha}`)) return Response.json({
+        sha: treeSha, truncated: false, tree: [{ path: 'hello.txt', mode: '100644', type: 'blob', sha: blobSha, size: 5 }],
+      });
+      if (url === `https://raw.githubusercontent.com/example/upstream/${upstreamSha}/hello.txt`) return new Response('hello');
+      if (url.endsWith('/repos/pyralisxc/benchmark-copy') && method === 'GET') return Response.json({ full_name: 'pyralisxc/benchmark-copy', default_branch: 'main', size: 0, pushed_at: null });
+      if (url.endsWith('/contents/.conductor-bootstrap') && method === 'PUT') return Response.json({ commit: { sha: 'e'.repeat(40) } });
+      if (url.endsWith('/git/blobs') && method === 'POST') return Response.json({ sha: blobSha });
+      if (url.endsWith('/git/trees') && method === 'POST') return Response.json({ sha: treeSha });
+      if (url.endsWith('/git/commits') && method === 'POST') {
+        assert.match(body.message, new RegExp(`Upstream-SHA: ${upstreamSha}`));
+        assert.equal(body.tree, treeSha);
+        return Response.json({ sha: destinationCommit });
+      }
+      if (url.endsWith('/git/refs/heads/main') && method === 'PATCH') return Response.json({ sha: destinationCommit });
+      if (url.endsWith('/git/ref/heads/main') && method === 'GET') return Response.json({ object: { sha: destinationCommit } });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    },
+  });
+  const result = await provider.acquireRepository({
+    upstreamRepository: 'example/upstream', upstreamRef: 'main',
+    destinationOwner: 'pyralisxc', destinationRepository: 'benchmark-copy',
+    expectedUpstreamSha: upstreamSha,
+    approvalReference: 'owner-approved:test',
+    idempotencyKey: 'repo-acquire-test',
+  });
+  assert.equal(result.destinationRepository, 'pyralisxc/benchmark-copy');
+  assert.equal(result.treeSha, treeSha);
+  assert.equal(result.importedFiles, 1);
+  assert.equal(result.codeWorkGranted, false);
+  assert.equal(requests.some((request) => request.url.includes('/git/blobs') && request.method === 'POST'), true);
+});

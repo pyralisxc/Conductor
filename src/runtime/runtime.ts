@@ -3,6 +3,7 @@ import {
   supportsProjectPreflight,
   supportsOperationPreflight,
   type ToolRuntimeProvider,
+  type RepositoryAcquisitionProvider,
   type SourceControlMutationProvider,
   type ProjectReferenceResolver,
   type PullRequestReadProvider,
@@ -30,6 +31,10 @@ import {
   type ToolOperationName,
   type GetOperationPreflightInput,
   type OperationPreflight,
+  type RepositoryAcquisitionPreflightInput,
+  type RepositoryAcquisitionPreflight,
+  type AcquireRepositoryInput,
+  type RepositoryAcquisitionResult,
   type OperationPreflightCheck,
   type GetDevelopmentStatusInput,
   type DevelopmentStatusProjection,
@@ -83,6 +88,18 @@ const OPERATION_PREFLIGHT_DEFINITION: ToolDefinition = {
   name: 'preflight_operation',
   description: 'Verify whether one exact exposed Conductor operation can execute against a supplied execution referent.',
   mutates: false,
+};
+
+const REPOSITORY_ACQUISITION_PREFLIGHT_DEFINITION: ToolDefinition = {
+  name: 'repository.acquire.preflight',
+  description: 'Resolve one exact public GitHub upstream/ref and verify a bounded authorized empty destination without changing work scope.',
+  mutates: false,
+};
+
+const REPOSITORY_ACQUISITION_MUTATION_DEFINITION: ToolDefinition = {
+  name: 'repository.acquire',
+  description: 'Import one exact public GitHub snapshot into an already-authorized empty destination without granting code-work authority.',
+  mutates: true,
 };
 
 const DEVELOPMENT_STATUS_READ_DEFINITION: ToolDefinition = {
@@ -176,6 +193,7 @@ export interface ConductorToolRuntimeOptions {
   providers?: ToolRuntimeProvider[];
   now?: () => Date;
   createOperationId?: () => string;
+  repositoryAcquisitionProvider?: RepositoryAcquisitionProvider;
   sourceControlMutationProvider?: SourceControlMutationProvider;
   mutationExecutor?: IdempotentMutationExecutor;
   projectResolver?: ProjectReferenceResolver;
@@ -194,6 +212,7 @@ export class ConductorToolRuntime {
   private readonly providers: ToolRuntimeProvider[];
   private readonly now: () => Date;
   private readonly createOperationId: () => string;
+  private readonly repositoryAcquisitionProvider?: RepositoryAcquisitionProvider;
   private readonly sourceControlMutationProvider?: SourceControlMutationProvider;
   private readonly mutationExecutor?: IdempotentMutationExecutor;
   private readonly projectResolver?: ProjectReferenceResolver;
@@ -209,6 +228,7 @@ export class ConductorToolRuntime {
     this.now = options.now ?? (() => new Date());
     this.createOperationId =
       options.createOperationId ?? (() => randomUUID());
+    this.repositoryAcquisitionProvider = options.repositoryAcquisitionProvider;
     this.sourceControlMutationProvider = options.sourceControlMutationProvider;
     this.mutationExecutor = options.mutationExecutor;
     this.projectResolver = options.projectResolver;
@@ -218,6 +238,14 @@ export class ConductorToolRuntime {
     this.workItemProvider = options.workItemProvider;
     this.workItemCandidateProvider = options.workItemCandidateProvider;
     this.deploymentProvider = options.deploymentProvider;
+  }
+
+  get repositoryAcquisitionReadEnabled(): boolean {
+    return Boolean(this.repositoryAcquisitionProvider);
+  }
+
+  get repositoryAcquisitionMutationEnabled(): boolean {
+    return Boolean(this.repositoryAcquisitionProvider && this.mutationExecutor);
   }
 
   get sourceControlMutationsEnabled(): boolean {
@@ -615,6 +643,48 @@ export class ConductorToolRuntime {
     });
   }
 
+  async repositoryAcquisitionPreflight(input: RepositoryAcquisitionPreflightInput): Promise<ExecutionReceipt<RepositoryAcquisitionPreflight>> {
+    return await this.executeRead(
+      'repository.acquire.preflight',
+      { kind: 'repository', id: `${input.destinationOwner}/${input.destinationRepository}` },
+      async () => {
+        if (!this.repositoryAcquisitionProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'Repository acquisition is not configured' };
+        return { result: await this.repositoryAcquisitionProvider.preflightRepositoryAcquisition(input) };
+      },
+    );
+  }
+
+  async acquireRepository(input: AcquireRepositoryInput): Promise<ExecutionReceipt<RepositoryAcquisitionResult>> {
+    if (!this.repositoryAcquisitionProvider || !this.mutationExecutor) {
+      const executor = new IdempotentMutationExecutor({
+        store: {
+          async claim() { throw { code: 'TOOL_UNAVAILABLE', message: 'Repository acquisition is not enabled' }; },
+          async complete() {},
+        },
+        createOperationId: this.createOperationId,
+        now: this.now,
+      });
+      return await executor.execute({
+        key: input.idempotencyKey,
+        fingerprint: mutationFingerprint('repository.acquire', input),
+        operation: 'repository.acquire',
+        target: { kind: 'repository', id: `${input.destinationOwner}/${input.destinationRepository}` },
+      }, async () => { throw { code: 'TOOL_UNAVAILABLE', message: 'Repository acquisition is not enabled' }; });
+    }
+    if (!/^[A-Za-z0-9._:/-]{8,200}$/.test(input.idempotencyKey)) {
+      throw new Error('idempotencyKey must be 8-200 stable URL-safe characters');
+    }
+    return await this.mutationExecutor.execute({
+      key: input.idempotencyKey,
+      fingerprint: mutationFingerprint('repository.acquire', input),
+      operation: 'repository.acquire',
+      target: { kind: 'repository', id: `${input.destinationOwner}/${input.destinationRepository}` },
+    }, async () => {
+      const result = await this.repositoryAcquisitionProvider!.acquireRepository(input);
+      return { result, identifiers: { commitSha: result.commitSha } };
+    });
+  }
+
   async createBranch(input: CreateBranchInput) {
     return await this.executeMutation(input, 'git.branch.create', async (provider) => {
       const result = await provider.createBranch(input);
@@ -686,6 +756,8 @@ export class ConductorToolRuntime {
     return [
       ...TOOL_DEFINITIONS,
       ...(this.operationPreflightEnabled ? [OPERATION_PREFLIGHT_DEFINITION] : []),
+      ...(this.repositoryAcquisitionReadEnabled ? [REPOSITORY_ACQUISITION_PREFLIGHT_DEFINITION] : []),
+      ...(this.repositoryAcquisitionMutationEnabled ? [REPOSITORY_ACQUISITION_MUTATION_DEFINITION] : []),
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
       ...(this.sourceArtifactReadEnabled ? [EXECUTION_EVIDENCE_READ_DEFINITIONS[0]!] : []),

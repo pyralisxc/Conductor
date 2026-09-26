@@ -41,9 +41,13 @@ import type {
   CommentWorkItemInput,
   UpdateWorkItemStatusInput,
   UpdateWorkItemClassificationInput,
+  RepositoryAcquisitionPreflightInput,
+  RepositoryAcquisitionPreflight,
+  AcquireRepositoryInput,
+  RepositoryAcquisitionResult,
 } from '../runtime/types.js';
 import { normalizeToolError } from '../runtime/errors.js';
-import type { OperationPreflightProvider, SourceControlMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
+import type { OperationPreflightProvider, RepositoryAcquisitionProvider, SourceControlMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
 import {
   StaticGitHubCredentialProvider,
   type GitHubCredential,
@@ -52,6 +56,10 @@ import {
 
 interface GitHubRepositoryResponse {
   full_name: string;
+  html_url?: string;
+  private?: boolean;
+  size?: number;
+  pushed_at?: string | null;
   default_branch?: string;
   permissions?: {
     pull?: boolean;
@@ -169,6 +177,27 @@ interface GitHubMergeResponse {
   message: string;
 }
 
+interface GitHubCommitLookupResponse {
+  sha: string;
+  html_url?: string;
+  commit: { tree: { sha: string } };
+}
+
+interface GitHubTreeResponse {
+  sha: string;
+  truncated?: boolean;
+  tree: Array<{
+    path: string;
+    mode: string;
+    type: 'blob' | 'tree' | 'commit';
+    sha: string;
+    size?: number;
+  }>;
+}
+
+interface GitHubGitObjectResponse { sha: string }
+interface GitHubContentCreateResponse { commit: { sha: string } }
+
 export interface GitHubRepositoryBinding {
   id: string;
   repository: string;
@@ -184,7 +213,7 @@ export interface GitHubRuntimeProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, SourceControlMutationProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
+export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, RepositoryAcquisitionProvider, SourceControlMutationProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
   readonly id = 'github';
   private readonly credentials?: GitHubCredentialProvider;
   private readonly bindings: ReadonlyMap<string, GitHubRepositoryBinding>;
@@ -701,6 +730,293 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       jobsTruncated: jobsPayload.total_count > jobsPayload.jobs.length,
       observedAt: new Date().toISOString(),
     };
+  }
+
+
+  async preflightRepositoryAcquisition(input: RepositoryAcquisitionPreflightInput): Promise<RepositoryAcquisitionPreflight> {
+    return await this.inspectRepositoryAcquisition(input);
+  }
+
+  async acquireRepository(input: AcquireRepositoryInput): Promise<RepositoryAcquisitionResult> {
+    assertSha(input.expectedUpstreamSha, 'expectedUpstreamSha');
+    const approvalReference = input.approvalReference.trim();
+    if (!approvalReference || approvalReference.length > 500) {
+      throw { code: 'PERMISSION_DENIED', message: 'Repository acquisition requires an explicit owner approval reference' };
+    }
+
+    const preflight = await this.inspectRepositoryAcquisition(input);
+    if (preflight.status !== 'ready' || !preflight.upstream.sha || !preflight.upstream.treeSha) {
+      throw { code: 'PERMISSION_DENIED', message: preflight.reason ?? 'Repository acquisition preflight is blocked' };
+    }
+    if (preflight.upstream.sha.toLowerCase() !== input.expectedUpstreamSha.toLowerCase()) {
+      throw { code: 'CONFLICT', message: `Upstream ref moved: expected ${input.expectedUpstreamSha}, observed ${preflight.upstream.sha}` };
+    }
+
+    const destination = preflight.destination.repository;
+    const { credential } = await this.writableRepository(
+      { id: destination, repository: destination },
+      { contents: 'write' },
+    );
+    const tree = await this.publicRepositoryRequest<GitHubTreeResponse>(
+      preflight.upstream.repository,
+      `/git/trees/${preflight.upstream.treeSha}?recursive=1`,
+    );
+    const blobs = acquisitionBlobs(tree);
+    enforceAcquisitionBounds(tree, blobs);
+
+    const branch = preflight.destination.branch;
+    const bootstrap = await this.request<GitHubContentCreateResponse>(
+      destination,
+      '/contents/.conductor-bootstrap',
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          message: 'Initialize repository for Conductor snapshot acquisition',
+          content: Buffer.from('temporary bootstrap; removed by snapshot import\n').toString('base64'),
+          branch,
+        }),
+      },
+      credential,
+    );
+
+    for (let offset = 0; offset < blobs.length; offset += REPOSITORY_ACQUIRE_BLOB_CONCURRENCY) {
+      const batch = blobs.slice(offset, offset + REPOSITORY_ACQUIRE_BLOB_CONCURRENCY);
+      await Promise.all(batch.map(async (entry) => {
+        const rawUrl = rawGithubUrl(preflight.upstream.repository, preflight.upstream.sha!, entry.path);
+        const response = await this.fetch(rawUrl, { headers: { 'User-Agent': 'Conductor-Tool-Runtime' } });
+        if (!response.ok) throw await githubResponseError(response);
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.length !== entry.size) {
+          throw { code: 'CONFLICT', message: `Upstream blob size changed for ${entry.path}` };
+        }
+        const created = await this.request<GitHubGitObjectResponse>(
+          destination,
+          '/git/blobs',
+          {
+            method: 'POST',
+            body: JSON.stringify({ content: bytes.toString('base64'), encoding: 'base64' }),
+          },
+          credential,
+        );
+        if (created.sha.toLowerCase() !== entry.sha.toLowerCase()) {
+          throw { code: 'CONFLICT', message: `GitHub blob verification failed for ${entry.path}` };
+        }
+      }));
+    }
+
+    const createdTree = await this.request<GitHubGitObjectResponse>(
+      destination,
+      '/git/trees',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          tree: blobs.map((entry) => ({
+            path: entry.path,
+            mode: entry.mode,
+            type: 'blob',
+            sha: entry.sha,
+          })),
+        }),
+      },
+      credential,
+    );
+    if (createdTree.sha.toLowerCase() !== preflight.upstream.treeSha.toLowerCase()) {
+      throw { code: 'CONFLICT', message: 'Destination tree does not exactly match the resolved upstream snapshot' };
+    }
+
+    const acquiredAt = new Date().toISOString();
+    const message = [
+      'Import exact upstream snapshot',
+      '',
+      `Upstream-Repository: ${preflight.upstream.repository}`,
+      `Upstream-URL: ${preflight.upstream.url}`,
+      `Upstream-Ref: ${input.upstreamRef}`,
+      `Upstream-SHA: ${preflight.upstream.sha}`,
+      `Acquired-At: ${acquiredAt}`,
+    ].join('\n');
+    const commit = await this.request<GitHubGitObjectResponse>(
+      destination,
+      '/git/commits',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          message,
+          tree: createdTree.sha,
+          parents: [bootstrap.commit.sha],
+        }),
+      },
+      credential,
+    );
+    await this.request<GitHubGitObjectResponse>(
+      destination,
+      `/git/refs/heads/${encodeURIComponent(branch)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ sha: commit.sha, force: false }),
+      },
+      credential,
+    );
+    const verified = await this.request<{ object: { sha: string } }>(
+      destination,
+      `/git/ref/heads/${encodeURIComponent(branch)}`,
+      {},
+      credential,
+    );
+    if (verified.object.sha.toLowerCase() !== commit.sha.toLowerCase()) {
+      throw { code: 'CONFLICT', message: 'Destination branch read-back did not match the imported commit' };
+    }
+
+    return {
+      provider: 'github',
+      destinationRepository: destination,
+      url: `https://github.com/${destination}`,
+      branch,
+      commitSha: commit.sha,
+      treeSha: createdTree.sha,
+      importedFiles: blobs.length,
+      totalBytes: blobs.reduce((sum, entry) => sum + entry.size, 0),
+      provenance: {
+        upstreamRepository: preflight.upstream.repository,
+        upstreamUrl: preflight.upstream.url,
+        upstreamRef: input.upstreamRef,
+        upstreamSha: preflight.upstream.sha,
+        acquiredAt,
+      },
+      approvalReference,
+      codeWorkGranted: false,
+      cleanup: 'owner-provider-cleanup',
+    };
+  }
+
+  private async inspectRepositoryAcquisition(input: RepositoryAcquisitionPreflightInput): Promise<RepositoryAcquisitionPreflight> {
+    const upstream = exactRepositoryIdentity(input.upstreamRepository, 'upstreamRepository');
+    const destinationOwner = exactGitHubOwner(input.destinationOwner);
+    const authorizedOwner = this.allowedOwners.get(destinationOwner.toLowerCase());
+    const destinationName = exactRepositoryName(input.destinationRepository);
+    const destination = `${authorizedOwner ?? destinationOwner}/${destinationName}`;
+    const branch = acquisitionBranch(input.destinationBranch ?? 'main');
+    const blocked = (
+      reason: string,
+      upstreamFacts: RepositoryAcquisitionPreflight['upstream'] = {
+        repository: upstream, url: `https://github.com/${upstream}`, ref: input.upstreamRef,
+        sha: null, treeSha: null, fileCount: null, totalBytes: null,
+      },
+      destinationFacts: Partial<RepositoryAcquisitionPreflight['destination']> = {},
+    ): RepositoryAcquisitionPreflight => ({
+      provider: 'github',
+      status: 'blocked',
+      method: 'snapshot-existing-destination',
+      upstream: upstreamFacts,
+      destination: {
+        repository: destination,
+        branch,
+        exists: false,
+        empty: null,
+        authorized: false,
+        ...destinationFacts,
+      },
+      limits: acquisitionLimits(),
+      reason,
+      codeWorkGranted: false,
+      observedAt: new Date().toISOString(),
+    });
+
+    if (!authorizedOwner) return blocked(`Destination owner ${destinationOwner} is not in Conductor's authorized GitHub owner set`);
+    if (!input.upstreamRef.trim() || input.upstreamRef.length > 255 || /[\u0000-\u001f]/u.test(input.upstreamRef)) {
+      return blocked('upstreamRef must be a non-empty Git ref or SHA of 255 characters or fewer');
+    }
+
+    let sourceRepository: GitHubRepositoryResponse;
+    let sourceCommit: GitHubCommitLookupResponse;
+    let sourceTree: GitHubTreeResponse;
+    try {
+      sourceRepository = await this.publicRepositoryRequest<GitHubRepositoryResponse>(upstream, '');
+      if (sourceRepository.private === true) return blocked('Repository acquisition v0 accepts public upstream repositories only');
+      sourceCommit = await this.publicRepositoryRequest<GitHubCommitLookupResponse>(
+        upstream,
+        `/commits/${encodeURIComponent(input.upstreamRef)}`,
+      );
+      sourceTree = await this.publicRepositoryRequest<GitHubTreeResponse>(
+        upstream,
+        `/git/trees/${sourceCommit.commit.tree.sha}?recursive=1`,
+      );
+    } catch (error) {
+      const normalized = normalizeToolError(error, 'NOT_FOUND', this.id);
+      return blocked(`Unable to resolve public upstream: ${normalized.message}`);
+    }
+
+    const blobEntries = acquisitionBlobs(sourceTree);
+    const upstreamFacts: RepositoryAcquisitionPreflight['upstream'] = {
+      repository: upstream,
+      url: sourceRepository.html_url ?? `https://github.com/${upstream}`,
+      ref: input.upstreamRef,
+      sha: sourceCommit.sha,
+      treeSha: sourceCommit.commit.tree.sha,
+      fileCount: blobEntries.length,
+      totalBytes: blobEntries.reduce((sum, entry) => sum + entry.size, 0),
+    };
+    try {
+      enforceAcquisitionBounds(sourceTree, blobEntries);
+    } catch (error) {
+      return blocked(error instanceof Error ? error.message : String((error as { message?: string })?.message ?? error), upstreamFacts);
+    }
+
+    let credential: GitHubCredential;
+    let repository: GitHubRepositoryResponse;
+    try {
+      const writable = await this.writableRepository(
+        { id: destination, repository: destination },
+        { contents: 'write' },
+      );
+      credential = writable.credential;
+      repository = await this.request<GitHubRepositoryResponse>(destination, '', {}, credential);
+    } catch (error) {
+      const normalized = normalizeToolError(error, 'PERMISSION_DENIED', this.id);
+      return blocked(
+        `Destination must already exist and authorize Conductor before acquisition: ${normalized.message}`,
+        upstreamFacts,
+        { repository: destination, exists: false, empty: null, authorized: false },
+      );
+    }
+
+    const resolvedBranch = acquisitionBranch(input.destinationBranch ?? repository.default_branch ?? branch);
+    if ((repository.size ?? 0) !== 0 || repository.pushed_at) {
+      return blocked(
+        'Destination repository is not empty; acquisition refuses to overwrite existing repository history',
+        upstreamFacts,
+        { repository: destination, branch: resolvedBranch, exists: true, empty: false, authorized: true },
+      );
+    }
+
+    return {
+      provider: 'github',
+      status: 'ready',
+      method: 'snapshot-existing-destination',
+      upstream: upstreamFacts,
+      destination: {
+        repository: destination,
+        branch: resolvedBranch,
+        exists: true,
+        empty: true,
+        authorized: true,
+      },
+      limits: acquisitionLimits(),
+      reason: null,
+      codeWorkGranted: false,
+      observedAt: new Date().toISOString(),
+    };
+  }
+
+  private async publicRepositoryRequest<Result>(repository: string, path: string): Promise<Result> {
+    const response = await this.fetch(`${this.apiBaseUrl}/repos/${encodeRepository(repository)}${path}`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'Conductor-Tool-Runtime',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+    if (!response.ok) throw await githubResponseError(response);
+    return await response.json() as Result;
   }
 
   async createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }> {
@@ -1355,6 +1671,86 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
   }
 }
 
+
+
+const REPOSITORY_ACQUIRE_MAX_FILES = 1500;
+const REPOSITORY_ACQUIRE_MAX_TOTAL_BYTES = 25 * 1024 * 1024;
+const REPOSITORY_ACQUIRE_MAX_SINGLE_BLOB_BYTES = 5 * 1024 * 1024;
+const REPOSITORY_ACQUIRE_BLOB_CONCURRENCY = 8;
+
+type AcquisitionBlob = { path: string; mode: string; sha: string; size: number };
+
+function acquisitionLimits() {
+  return {
+    maxFiles: REPOSITORY_ACQUIRE_MAX_FILES,
+    maxTotalBytes: REPOSITORY_ACQUIRE_MAX_TOTAL_BYTES,
+    maxSingleBlobBytes: REPOSITORY_ACQUIRE_MAX_SINGLE_BLOB_BYTES,
+  };
+}
+
+function exactRepositoryIdentity(value: string, field: string): string {
+  const parts = value.trim().split('/');
+  if (parts.length !== 2) throw { code: 'CONFLICT', message: `${field} must be an exact owner/repository identity` };
+  return `${exactGitHubOwner(parts[0]!)}/${exactRepositoryName(parts[1]!)}`;
+}
+
+function exactGitHubOwner(value: string): string {
+  const owner = value.trim();
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(owner)) {
+    throw { code: 'CONFLICT', message: 'destinationOwner must be a valid exact GitHub owner' };
+  }
+  return owner;
+}
+
+function exactRepositoryName(value: string): string {
+  const name = value.trim();
+  if (!/^[A-Za-z0-9._-]{1,100}$/u.test(name) || name === '.' || name === '..') {
+    throw { code: 'CONFLICT', message: 'destinationRepository must be a valid exact GitHub repository name' };
+  }
+  return name;
+}
+
+function acquisitionBranch(value: string): string {
+  const branch = value.trim();
+  if (!safeMergeBranch(branch) || branch.length > 255) {
+    throw { code: 'CONFLICT', message: 'destinationBranch must be a valid exact Git branch name' };
+  }
+  return branch;
+}
+
+function acquisitionBlobs(tree: GitHubTreeResponse): AcquisitionBlob[] {
+  if (tree.truncated) throw { code: 'CONFLICT', message: 'Upstream tree response is truncated; acquisition refuses incomplete snapshots' };
+  if (tree.tree.some((entry) => entry.type === 'commit')) {
+    throw { code: 'CONFLICT', message: 'Upstream contains Git submodules; acquisition v0 refuses snapshots it cannot reproduce exactly' };
+  }
+  return tree.tree
+    .filter((entry) => entry.type === 'blob')
+    .map((entry) => {
+      if (!Number.isSafeInteger(entry.size) || (entry.size ?? -1) < 0) {
+        throw { code: 'CONFLICT', message: `Upstream blob size is unavailable for ${entry.path}` };
+      }
+      return { path: entry.path, mode: entry.mode, sha: entry.sha, size: entry.size! };
+    });
+}
+
+function enforceAcquisitionBounds(tree: GitHubTreeResponse, blobs: AcquisitionBlob[]): void {
+  if (tree.truncated) throw { code: 'CONFLICT', message: 'Upstream tree response is truncated; acquisition refuses incomplete snapshots' };
+  if (blobs.length > REPOSITORY_ACQUIRE_MAX_FILES) {
+    throw { code: 'CONFLICT', message: `Upstream snapshot has ${blobs.length} files; limit is ${REPOSITORY_ACQUIRE_MAX_FILES}` };
+  }
+  const oversized = blobs.find((entry) => entry.size > REPOSITORY_ACQUIRE_MAX_SINGLE_BLOB_BYTES);
+  if (oversized) {
+    throw { code: 'CONFLICT', message: `Upstream blob ${oversized.path} exceeds the ${REPOSITORY_ACQUIRE_MAX_SINGLE_BLOB_BYTES}-byte per-file limit` };
+  }
+  const total = blobs.reduce((sum, entry) => sum + entry.size, 0);
+  if (total > REPOSITORY_ACQUIRE_MAX_TOTAL_BYTES) {
+    throw { code: 'CONFLICT', message: `Upstream snapshot is ${total} bytes; limit is ${REPOSITORY_ACQUIRE_MAX_TOTAL_BYTES}` };
+  }
+}
+
+function rawGithubUrl(repository: string, sha: string, path: string): string {
+  return `https://raw.githubusercontent.com/${repository.split('/').map(encodeURIComponent).join('/')}/${encodeURIComponent(sha)}/${path.split('/').map(encodeURIComponent).join('/')}`;
+}
 
 type GitHubReadOperation =
   | 'development.status'
