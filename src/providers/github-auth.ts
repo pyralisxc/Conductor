@@ -24,7 +24,7 @@ export interface GitHubCredential {
 
 export interface GitHubCredentialProvider {
   getIdentity(): Promise<GitHubIdentity>;
-  getCredential(repository: string): Promise<GitHubCredential>;
+  getCredential(repository: string, options?: { forceRefresh?: boolean }): Promise<GitHubCredential>;
 }
 
 export class StaticGitHubCredentialProvider implements GitHubCredentialProvider {
@@ -34,7 +34,7 @@ export class StaticGitHubCredentialProvider implements GitHubCredentialProvider 
     return { kind: 'static-token' };
   }
 
-  async getCredential(repository: string): Promise<GitHubCredential> {
+  async getCredential(repository: string, _options?: { forceRefresh?: boolean }): Promise<GitHubCredential> {
     return {
       token: this.token,
       kind: 'static-token',
@@ -108,9 +108,9 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     return this.identity;
   }
 
-  async getCredential(repository: string): Promise<GitHubCredential> {
+  async getCredential(repository: string, options: { forceRefresh?: boolean } = {}): Promise<GitHubCredential> {
     const cached = this.cache.get(repository.toLowerCase());
-    if (cached && cached.expiresAtMs - this.now().getTime() > 5 * 60_000) {
+    if (!options.forceRefresh && cached && cached.expiresAtMs - this.now().getTime() > 5 * 60_000) {
       return cached.credential;
     }
 

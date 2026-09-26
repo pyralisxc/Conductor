@@ -981,12 +981,17 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       return blocked(error instanceof Error ? error.message : String((error as { message?: string })?.message ?? error), upstreamFacts);
     }
 
+    const requiresWorkflowWrite = acquisitionRequiresWorkflowWrite(blobEntries);
+    const acquisitionPermissions: Record<string, 'write'> = requiresWorkflowWrite
+      ? { contents: 'write', workflows: 'write' }
+      : { contents: 'write' };
+
     let credential: GitHubCredential;
     let repository: GitHubRepositoryResponse;
     try {
       const writable = await this.writableRepository(
         { id: destination, repository: destination },
-        { contents: 'write' },
+        acquisitionPermissions,
       );
       credential = writable.credential;
       repository = await this.request<GitHubRepositoryResponse>(destination, '', {}, credential);
@@ -1000,22 +1005,12 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     }
 
     const resolvedBranch = acquisitionBranch(input.destinationBranch ?? repository.default_branch ?? branch);
-    if (acquisitionRequiresWorkflowWrite(blobEntries)) {
-      if (credential.kind !== 'app-installation') {
-        return blocked(
-          'Static-token repository acquisition cannot safely import .github/workflows files because workflow scope cannot be proven',
-          upstreamFacts,
-          { repository: destination, branch: resolvedBranch, exists: true, empty: null, authorized: false },
-        );
-      }
-      const missingWorkflowPermissions = missingPermissions(credential, { workflows: 'write' });
-      if (missingWorkflowPermissions.length > 0) {
-        return blocked(
-          `Destination GitHub App installation lacks required permission for workflow-bearing snapshot: ${missingWorkflowPermissions.join(', ')}`,
-          upstreamFacts,
-          { repository: destination, branch: resolvedBranch, exists: true, empty: null, authorized: false },
-        );
-      }
+    if (requiresWorkflowWrite && credential.kind !== 'app-installation') {
+      return blocked(
+        'Static-token repository acquisition cannot safely import .github/workflows files because workflow scope cannot be proven',
+        upstreamFacts,
+        { repository: destination, branch: resolvedBranch, exists: true, empty: null, authorized: false },
+      );
     }
 
     let destinationState: RepositoryAcquisitionDestinationState;
@@ -1668,16 +1663,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     const resolution = this.resolveBinding(project);
     if ('error' in resolution) throw { code: resolution.code, message: resolution.error };
     const repository = resolution.binding.repository;
-    const credential = await this.credentials.getCredential(repository);
-    if (credential.kind === 'app-installation') {
-      const missing = missingPermissions(credential, requiredPermissions);
-      if (missing.length > 0) {
-        throw {
-          code: 'PERMISSION_DENIED',
-          message: `GitHub App installation lacks required permissions for ${repository}: ${missing.join(', ')}`,
-        };
-      }
-    }
+    const credential = await this.credentialWithPermissions(repository, requiredPermissions);
     return { repository, credential };
   }
 
@@ -1692,17 +1678,30 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       throw { code: 'PERMISSION_DENIED', message: `Writes are disabled for ${resolution.binding.repository}` };
     }
     const repository = resolution.binding.repository;
-    const credential = await this.credentials.getCredential(repository);
-    if (credential.kind === 'app-installation') {
-      const missing = missingPermissions(credential, requiredPermissions);
-      if (missing.length > 0) {
-        throw {
-          code: 'PERMISSION_DENIED',
-          message: `GitHub App installation lacks required permissions for ${repository}: ${missing.join(', ')}`,
-        };
-      }
-    }
+    const credential = await this.credentialWithPermissions(repository, requiredPermissions);
     return { repository, credential };
+  }
+
+  private async credentialWithPermissions(
+    repository: string,
+    requiredPermissions: Readonly<Record<string, 'read' | 'write'>>,
+  ): Promise<GitHubCredential> {
+    if (!this.credentials) throw { code: 'AUTH_REQUIRED', message: 'GitHub authentication is not configured' };
+    let credential = await this.credentials.getCredential(repository);
+    if (credential.kind !== 'app-installation') return credential;
+
+    let missing = missingPermissions(credential, requiredPermissions);
+    if (missing.length === 0) return credential;
+
+    credential = await this.credentials.getCredential(repository, { forceRefresh: true });
+    missing = missingPermissions(credential, requiredPermissions);
+    if (missing.length > 0) {
+      throw {
+        code: 'PERMISSION_DENIED',
+        message: `GitHub App installation lacks required permissions for ${repository}: ${missing.join(', ')}`,
+      };
+    }
+    return credential;
   }
 
   private async repositoryAcquisitionDestinationState(
