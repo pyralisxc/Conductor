@@ -180,7 +180,7 @@ interface GitHubMergeResponse {
 interface GitHubCommitLookupResponse {
   sha: string;
   html_url?: string;
-  commit: { tree: { sha: string } };
+  commit: { message?: string; tree: { sha: string } };
 }
 
 interface GitHubTreeResponse {
@@ -753,31 +753,51 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     }
 
     const destination = preflight.destination.repository;
-    const { credential } = await this.writableRepository(
-      { id: destination, repository: destination },
-      { contents: 'write' },
-    );
     const tree = await this.publicRepositoryRequest<GitHubTreeResponse>(
       preflight.upstream.repository,
       `/git/trees/${preflight.upstream.treeSha}?recursive=1`,
     );
     const blobs = acquisitionBlobs(tree);
     enforceAcquisitionBounds(tree, blobs);
+    const requiredPermissions = acquisitionRequiresWorkflowWrite(blobs)
+      ? { contents: 'write', workflows: 'write' } as const
+      : { contents: 'write' } as const;
+    const { credential } = await this.writableRepository(
+      { id: destination, repository: destination },
+      requiredPermissions,
+    );
 
     const branch = preflight.destination.branch;
-    const bootstrap = await this.request<GitHubContentCreateResponse>(
-      destination,
-      '/contents/.conductor-bootstrap',
-      {
-        method: 'PUT',
-        body: JSON.stringify({
-          message: 'Initialize repository for Conductor snapshot acquisition',
-          content: Buffer.from('temporary bootstrap; removed by snapshot import\n').toString('base64'),
-          branch,
-        }),
-      },
-      credential,
-    );
+    let bootstrapCommitSha = preflight.destination.bootstrapCommitSha ?? null;
+    if (preflight.destination.recoverableBootstrap) {
+      if (!bootstrapCommitSha) {
+        throw { code: 'CONFLICT', message: 'Recoverable bootstrap preflight did not provide an exact bootstrap commit' };
+      }
+      const current = await this.request<{ object: { sha: string } }>(
+        destination,
+        `/git/ref/heads/${encodeURIComponent(branch)}`,
+        {},
+        credential,
+      );
+      if (current.object.sha.toLowerCase() !== bootstrapCommitSha.toLowerCase()) {
+        throw { code: 'CONFLICT', message: 'Destination bootstrap changed after acquisition preflight' };
+      }
+    } else {
+      const bootstrap = await this.request<GitHubContentCreateResponse>(
+        destination,
+        `/contents/${REPOSITORY_ACQUIRE_BOOTSTRAP_PATH}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            message: REPOSITORY_ACQUIRE_BOOTSTRAP_MESSAGE,
+            content: Buffer.from(REPOSITORY_ACQUIRE_BOOTSTRAP_CONTENT).toString('base64'),
+            branch,
+          }),
+        },
+        credential,
+      );
+      bootstrapCommitSha = bootstrap.commit.sha;
+    }
 
     for (let offset = 0; offset < blobs.length; offset += REPOSITORY_ACQUIRE_BLOB_CONCURRENCY) {
       const batch = blobs.slice(offset, offset + REPOSITORY_ACQUIRE_BLOB_CONCURRENCY);
@@ -842,7 +862,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         body: JSON.stringify({
           message,
           tree: createdTree.sha,
-          parents: [bootstrap.commit.sha],
+          parents: [bootstrapCommitSha],
         }),
       },
       credential,
@@ -980,9 +1000,27 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     }
 
     const resolvedBranch = acquisitionBranch(input.destinationBranch ?? repository.default_branch ?? branch);
-    let hasHistory: boolean;
+    if (acquisitionRequiresWorkflowWrite(blobEntries)) {
+      if (credential.kind !== 'app-installation') {
+        return blocked(
+          'Static-token repository acquisition cannot safely import .github/workflows files because workflow scope cannot be proven',
+          upstreamFacts,
+          { repository: destination, branch: resolvedBranch, exists: true, empty: null, authorized: false },
+        );
+      }
+      const missingWorkflowPermissions = missingPermissions(credential, { workflows: 'write' });
+      if (missingWorkflowPermissions.length > 0) {
+        return blocked(
+          `Destination GitHub App installation lacks required permission for workflow-bearing snapshot: ${missingWorkflowPermissions.join(', ')}`,
+          upstreamFacts,
+          { repository: destination, branch: resolvedBranch, exists: true, empty: null, authorized: false },
+        );
+      }
+    }
+
+    let destinationState: RepositoryAcquisitionDestinationState;
     try {
-      hasHistory = await this.repositoryHasGitHistory(destination, credential);
+      destinationState = await this.repositoryAcquisitionDestinationState(destination, resolvedBranch, credential);
     } catch (error) {
       const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', this.id);
       return blocked(
@@ -991,7 +1029,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         { repository: destination, branch: resolvedBranch, exists: true, empty: null, authorized: true },
       );
     }
-    if (hasHistory) {
+    if (destinationState.kind === 'history') {
       return blocked(
         'Destination repository is not empty; acquisition refuses to overwrite existing repository history',
         upstreamFacts,
@@ -1008,8 +1046,10 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         repository: destination,
         branch: resolvedBranch,
         exists: true,
-        empty: true,
+        empty: destinationState.kind === 'empty',
         authorized: true,
+        recoverableBootstrap: destinationState.kind === 'bootstrap',
+        bootstrapCommitSha: destinationState.kind === 'bootstrap' ? destinationState.commitSha : null,
       },
       limits: acquisitionLimits(),
       reason: null,
@@ -1665,21 +1705,59 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     return { repository, credential };
   }
 
-  private async repositoryHasGitHistory(repository: string, credential: GitHubCredential): Promise<boolean> {
+  private async repositoryAcquisitionDestinationState(
+    repository: string,
+    branch: string,
+    credential: GitHubCredential,
+  ): Promise<RepositoryAcquisitionDestinationState> {
     const response = await this.fetch(
-      `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/commits?per_page=1`,
+      `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/commits?sha=${encodeURIComponent(branch)}&per_page=2`,
       { headers: this.headers(credential.token) },
     );
     if (response.status === 409) {
       const conflict = await response.clone().json().catch(() => undefined) as { message?: string } | undefined;
-      if (/git repository is empty/i.test(conflict?.message ?? '')) return false;
+      if (/git repository is empty/i.test(conflict?.message ?? '')) return { kind: 'empty' };
     }
     if (!response.ok) throw await githubResponseError(response);
-    const commits = await response.json().catch(() => null);
+    const commits = await response.json().catch(() => null) as GitHubCommitLookupResponse[] | null;
     if (!Array.isArray(commits)) {
       throw { code: 'COMMAND_FAILED', message: `GitHub returned invalid commit history for ${repository}` };
     }
-    return commits.length > 0;
+    if (commits.length === 0) return { kind: 'empty' };
+    if (commits.length !== 1) return { kind: 'history' };
+    const commit = commits[0];
+    if (!commit?.sha || commit.commit?.message !== REPOSITORY_ACQUIRE_BOOTSTRAP_MESSAGE) {
+      return { kind: 'history' };
+    }
+
+    const [root, bootstrap, branches, tags] = await Promise.all([
+      this.request<GitHubContentResponse[]>(repository, `/contents?ref=${encodeURIComponent(branch)}`, {}, credential),
+      this.request<GitHubContentResponse>(
+        repository,
+        `/contents/${REPOSITORY_ACQUIRE_BOOTSTRAP_PATH}?ref=${encodeURIComponent(branch)}`,
+        {},
+        credential,
+      ),
+      this.request<Array<{ name: string }>>(repository, '/branches?per_page=2', {}, credential),
+      this.request<Array<{ name: string }>>(repository, '/tags?per_page=1', {}, credential),
+    ]);
+    if (
+      root.length !== 1
+      || root[0]?.type !== 'file'
+      || root[0]?.path !== REPOSITORY_ACQUIRE_BOOTSTRAP_PATH
+      || branches.length !== 1
+      || branches[0]?.name !== branch
+      || tags.length !== 0
+      || bootstrap.type !== 'file'
+      || bootstrap.path !== REPOSITORY_ACQUIRE_BOOTSTRAP_PATH
+      || bootstrap.encoding !== 'base64'
+      || !bootstrap.content
+    ) {
+      return { kind: 'history' };
+    }
+    const bootstrapContent = Buffer.from(bootstrap.content.replace(/\s+/gu, ''), 'base64').toString('utf8');
+    if (bootstrapContent !== REPOSITORY_ACQUIRE_BOOTSTRAP_CONTENT) return { kind: 'history' };
+    return { kind: 'bootstrap', commitSha: commit.sha };
   }
 
   private async request<Result>(
@@ -1700,6 +1778,15 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
 }
 
 
+
+const REPOSITORY_ACQUIRE_BOOTSTRAP_PATH = '.conductor-bootstrap';
+const REPOSITORY_ACQUIRE_BOOTSTRAP_MESSAGE = 'Initialize repository for Conductor snapshot acquisition';
+const REPOSITORY_ACQUIRE_BOOTSTRAP_CONTENT = 'temporary bootstrap; removed by snapshot import\n';
+
+type RepositoryAcquisitionDestinationState =
+  | { kind: 'empty' }
+  | { kind: 'bootstrap'; commitSha: string }
+  | { kind: 'history' };
 
 const REPOSITORY_ACQUIRE_MAX_FILES = 1500;
 const REPOSITORY_ACQUIRE_MAX_TOTAL_BYTES = 25 * 1024 * 1024;
@@ -1759,6 +1846,10 @@ function acquisitionBlobs(tree: GitHubTreeResponse): AcquisitionBlob[] {
       }
       return { path: entry.path, mode: entry.mode, sha: entry.sha, size: entry.size! };
     });
+}
+
+function acquisitionRequiresWorkflowWrite(blobs: AcquisitionBlob[]): boolean {
+  return blobs.some((entry) => /^\.github\/workflows\//u.test(entry.path));
 }
 
 function enforceAcquisitionBounds(tree: GitHubTreeResponse, blobs: AcquisitionBlob[]): void {
@@ -2478,15 +2569,19 @@ function githubChecks(
 
 async function githubResponseError(response: Response): Promise<unknown> {
   const requestId = response.headers.get('x-github-request-id');
+  const acceptedPermissions = response.headers.get('x-accepted-github-permissions');
   const body = await response.json().catch(() => undefined) as { message?: string } | undefined;
+  const details: Record<string, string> = {};
+  if (requestId) details.requestId = requestId;
+  if (acceptedPermissions) details.acceptedPermissions = acceptedPermissions;
   return {
     status: response.status,
     message: body?.message ?? `GitHub request failed with status ${response.status}`,
-    diagnostics: requestId ? [{
+    diagnostics: Object.keys(details).length > 0 ? [{
       level: 'error',
       source: 'github',
       message: 'GitHub request failed',
-      details: { requestId },
+      details,
     }] : undefined,
   };
 }

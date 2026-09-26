@@ -181,6 +181,8 @@ export interface RepositoryAcquisitionPreflight {
     exists: boolean;
     empty: boolean | null;
     authorized: boolean;
+    recoverableBootstrap?: boolean;
+    bootstrapCommitSha?: string | null;
   };
   limits: {
     maxFiles: number;
