@@ -50,6 +50,7 @@ This document tests the **current bounded runtime**. Future automation experimen
 - `git.branch.delete` refuses Main/default, Preview, `vercel-preview`, release/accepted, and any branch outside `work/*`, `repair/*`, or `audit/*`.
 - It requires an exact expected head SHA, refuses a moved head and any branch still used by an open pull request, and proves that exact SHA is already contained in Preview or the repository default branch before deletion.
 - Replay with the same idempotency key produces no second provider deletion.
+- PR lifecycle dogfood closes a superseded draft whose exact head is already contained in Preview, then branch cleanup succeeds without weakening the containment guard.
 - Live acceptance removes one already-integrated historical development branch and confirms Preview/Main remain unchanged.
 
 ## Current runtime — Vercel provider boundary
