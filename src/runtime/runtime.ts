@@ -385,7 +385,19 @@ export class ConductorToolRuntime {
               });
             }
           }
-          if (supportingProviders === 0 && !CORE_PREFLIGHT_OPERATIONS.has(input.operation)) {
+          if (supportingProviders === 0 && input.operation === 'repository.acquire') {
+            const summary = 'Repository acquisition requires repository.acquire.preflight with exact upstream, ref, and destination inputs; generic preflight_operation cannot evaluate those acquisition-specific facts.';
+            checks.push({
+              provider: 'conductor',
+              status: 'blocked',
+              summary,
+              diagnostics: [{
+                level: 'info',
+                source: 'conductor',
+                message: 'Use repository.acquire.preflight as the authoritative readiness check before repository.acquire.',
+              }],
+            });
+          } else if (supportingProviders === 0 && !CORE_PREFLIGHT_OPERATIONS.has(input.operation)) {
             const error = normalizeToolError({
               code: 'TOOL_UNAVAILABLE',
               message: `No configured provider can preflight operation ${input.operation}`,
