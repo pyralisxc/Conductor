@@ -41,9 +41,9 @@ This document tests the **current bounded runtime**. Future automation experimen
 27. Exact-head verify rerun is bounded to one verified `verify` workflow run and requires `actions:write`.
 28. Exact PR lifecycle can close an unmerged obsolete PR idempotently and mark an exact open draft ready for review.
 29. Settled technical gates report `promotion-ready` without inferring Main approval.
-27. Integration merge rejects the repository default branch as target.
-28. Integration merge rejects unapproved source branch classes.
-29. Duplicate mutation attempts replay the durable idempotent receipt instead of repeating the side effect.
+29a. Integration merge rejects the repository default branch as target.
+29b. Integration merge rejects unapproved source branch classes.
+29c. Duplicate mutation attempts replay the durable idempotent receipt instead of repeating the side effect.
 
 ## Git branch cleanup boundary
 
