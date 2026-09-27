@@ -52,6 +52,11 @@ function validIdentity(value: string, field: string): string {
   return normalized;
 }
 
+function isProviderConnectionRecordStore(value: ProviderConnectionRecordStore | { url: string; token: string }): value is ProviderConnectionRecordStore {
+  const candidate = value as Partial<ProviderConnectionRecordStore>;
+  return typeof candidate.get === 'function' && typeof candidate.set === 'function' && typeof candidate.del === 'function';
+}
+
 function credentialKey(provider: string, connectionId: string): string {
   return `${providerConnectionPrefix}:${encodeURIComponent(provider)}:${encodeURIComponent(connectionId)}`;
 }
@@ -89,9 +94,9 @@ export class RedisProviderConnectionCredentialStore implements ProviderConnectio
     storeOrConfig: ProviderConnectionRecordStore | { url: string; token: string },
     options: { now?: () => Date } = {},
   ) {
-    this.#store = 'url' in storeOrConfig
-      ? new Redis({ url: storeOrConfig.url, token: storeOrConfig.token, enableTelemetry: false })
-      : storeOrConfig;
+    this.#store = isProviderConnectionRecordStore(storeOrConfig)
+      ? storeOrConfig
+      : new Redis({ url: storeOrConfig.url, token: storeOrConfig.token, enableTelemetry: false });
     this.#now = options.now ?? (() => new Date());
   }
 

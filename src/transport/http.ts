@@ -33,6 +33,13 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
 
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', options.publicUrl);
+    if (request.method === 'GET' && url.pathname === '/') {
+      response.statusCode = 303;
+      response.setHeader('Location', '/connections/vercel');
+      response.setHeader('Cache-Control', 'no-store');
+      response.end();
+      return;
+    }
     if (request.method === 'GET' && url.pathname === '/health') {
       json(response, 200, {
         status: 'ready',
