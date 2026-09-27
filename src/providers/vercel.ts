@@ -115,11 +115,11 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
         summary: `Vercel project ${resolved.name} (${resolved.id}) is ${explicit ? 'bound' : 'uniquely linked for read access'} for ${operation}`,
         diagnostics: [{ level: 'info', source: 'vercel', message: operation === 'deployment.runtime-logs'
           ? runtimeRoute === 'shared-connection'
-            ? 'Project identity remains verified through the bound installation; runtime request-log reads use the shared owner connection and remain unverified until one exact deployment read succeeds.'
+            ? 'Project identity is verified through the bound installation; runtime request-log reads use the shared owner connection, while each exact deployment read remains authoritative for provider health.'
             : runtimeRoute === 'legacy-direct'
               ? 'Project identity remains verified through the bound installation; runtime-log reads use the legacy direct token compatibility path and remain unverified until one exact deployment read succeeds.'
               : runtimeRoute === 'direct-primary'
-                ? 'Project read uses a direct Vercel token; runtime request-log access is unverified until one exact deployment read succeeds.'
+                ? 'Project read uses a direct Vercel token; each exact runtime request-log read remains authoritative for provider health.'
                 : 'Vercel Integration API installation tokens do not authorize the documented runtime-log endpoint. Connect owner runtime-log access once in Conductor; deployment.logs remains available.'
           : environmentOperation
             ? operation === 'deployment.env.list'
@@ -537,32 +537,48 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
 
     const deployment = normalizeDeployment(bound.detail);
     const nowMs = this.now().getTime();
-    const retentionStart = nowMs - 72 * 60 * 60 * 1_000;
+    const defaultStart = nowMs - 24 * 60 * 60 * 1_000;
     const deploymentStart = deployment?.createdAt ? Date.parse(deployment.createdAt) : Number.NaN;
-    const startDate = Number.isFinite(deploymentStart) ? Math.max(retentionStart, deploymentStart) : retentionStart;
+    const primaryStart = Number.isFinite(deploymentStart) ? Math.max(defaultStart, deploymentStart) : defaultStart;
+    const environment = deployment?.target ?? null;
+    const branch = deployment?.sourceRef ?? null;
 
-    const url = new URL(`${this.logsBaseUrl}/api/logs/request-logs`);
-    url.searchParams.set('projectId', bound.id);
-    url.searchParams.set('ownerId', ownerId);
-    url.searchParams.set('deploymentId', input.deploymentId);
-    url.searchParams.set('page', '0');
-    url.searchParams.set('startDate', String(startDate));
-    url.searchParams.set('endDate', String(nowMs));
+    const fetchSnapshot = async (startDate: number): Promise<{ response: Response; startDate: number }> => {
+      const url = new URL(`${this.logsBaseUrl}/api/logs/request-logs`);
+      url.searchParams.set('projectId', bound.id);
+      url.searchParams.set('ownerId', ownerId);
+      url.searchParams.set('deploymentId', input.deploymentId);
+      url.searchParams.set('page', '0');
+      url.searchParams.set('startDate', String(startDate));
+      url.searchParams.set('endDate', String(nowMs));
+      if (environment) url.searchParams.set('environment', environment);
+      if (branch) url.searchParams.set('branch', branch);
 
-    const controller = new AbortController();
-    const deadline = setTimeout(() => controller.abort(), this.runtimeLogTotalMs);
-    let response: Response;
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), this.runtimeLogTotalMs);
+      try {
+        const response = await this.fetch(url, {
+          headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'User-Agent': 'Conductor-Tool-Runtime' },
+          signal: controller.signal,
+        });
+        return { response, startDate };
+      } catch (error) {
+        if (controller.signal.aborted) throw { code: 'TRANSIENT', source: 'vercel', message: 'Vercel request-log snapshot did not respond before the bounded deadline' };
+        throw error;
+      } finally {
+        clearTimeout(deadline);
+      }
+    };
+
+    let snapshot: { response: Response; startDate: number };
     try {
-      response = await this.fetch(url, {
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'User-Agent': 'Conductor-Tool-Runtime' },
-        signal: controller.signal,
-      });
+      snapshot = await fetchSnapshot(primaryStart);
     } catch (error) {
-      if (controller.signal.aborted) throw { code: 'TRANSIENT', source: 'vercel', message: 'Vercel request-log snapshot did not respond before the bounded deadline' };
-      throw error;
-    } finally {
-      clearTimeout(deadline);
+      const narrowedStart = Math.max(nowMs - 60 * 60 * 1_000, Number.isFinite(deploymentStart) ? deploymentStart : Number.NEGATIVE_INFINITY);
+      if ((error as { code?: string }).code !== 'TRANSIENT' || narrowedStart <= primaryStart) throw error;
+      snapshot = await fetchSnapshot(narrowedStart);
     }
+    const { response, startDate } = snapshot;
 
     if (!response.ok) {
       const body = await response.text().catch(() => '');

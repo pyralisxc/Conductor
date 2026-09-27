@@ -177,7 +177,7 @@ test('runtime log preflight does not claim endpoint permission from a direct tok
   const { provider, project } = fixture();
   const preflight = (await provider.preflightOperation(project, 'deployment.runtime-logs'))?.[0];
   assert.equal(preflight?.status, 'degraded');
-  assert.match(preflight?.diagnostics[0]?.message ?? '', /runtime request-log access is unverified/u);
+  assert.match(preflight?.diagnostics[0]?.message ?? '', /authoritative for provider health/u);
 });
 
 test('connected Vercel integration reports the documented runtime-log scope boundary without calling the endpoint', async () => {
@@ -351,6 +351,10 @@ test('runtime request-log snapshot is exact and uses current CLI query shape', a
   assert.equal(u.searchParams.get('ownerId'), 'team_1');
   assert.equal(u.searchParams.get('deploymentId'), 'dpl_snapshot');
   assert.equal(u.searchParams.get('page'), '0');
+  assert.equal(u.searchParams.get('environment'), 'production');
+  assert.equal(u.searchParams.get('branch'), 'main');
+  assert.equal(u.searchParams.get('startDate'), String(Date.parse('2026-09-27T04:00:00.000Z')));
+  assert.equal(u.searchParams.get('endDate'), String(Date.parse('2026-09-27T05:00:00.000Z')));
   assert.equal(logs.source, 'request-logs');
   assert.equal(logs.sourceRevision, 'a'.repeat(40));
   assert.doesNotMatch(JSON.stringify(logs), /super-secret-value/);
@@ -371,4 +375,38 @@ test('runtime request-log snapshot fails closed on crossed deployment evidence',
     },
   });
   await assert.rejects(provider.getRuntimeLogs({ project: { id: 'app' }, deploymentId: 'dpl_expected', limit: 10 }), (error: unknown) => (error as { code?: string }).code === 'PERMISSION_DENIED');
+});
+
+
+test('runtime request-log snapshot caps old deployments to the current CLI 24-hour window and preserves exact filters', async () => {
+  const seen: URL[] = [];
+  const now = new Date('2026-09-27T05:00:00.000Z');
+  const provider = new VercelDeploymentProvider({
+    token: 'direct-token',
+    logsBaseUrl: 'https://vercel.test',
+    now: () => now,
+    bindings: [{ id: 'app', project: 'app', teamId: 'team_1', repository: 'owner/app' }],
+    fetch: async input => {
+      const url = new URL(String(input));
+      seen.push(url);
+      if (url.pathname === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app', link: { type: 'github', org: 'owner', repo: 'app' } });
+      if (url.pathname === '/v13/deployments/dpl_old') return Response.json({
+        id: 'dpl_old',
+        projectId: 'prj_app',
+        createdAt: Date.parse('2026-09-20T00:00:00.000Z'),
+        readyState: 'READY',
+        target: 'production',
+        meta: { githubCommitSha: 'b'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/app' },
+      });
+      if (url.pathname === '/api/logs/request-logs') return Response.json({ rows: [], hasMoreRows: false });
+      return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
+    },
+  });
+  const logs = await provider.getRuntimeLogs({ project: { id: 'app', repository: 'owner/app' }, deploymentId: 'dpl_old', limit: 10 });
+  const u = seen.find(url => url.pathname === '/api/logs/request-logs');
+  assert.ok(u);
+  assert.equal(u.searchParams.get('startDate'), String(now.getTime() - 24 * 60 * 60 * 1000));
+  assert.equal(u.searchParams.get('environment'), 'production');
+  assert.equal(u.searchParams.get('branch'), 'main');
+  assert.deepEqual(logs.entries, []);
 });
