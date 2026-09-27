@@ -302,7 +302,7 @@ export interface RepositoryProviderAudit {
       name: string;
       sha: string;
       protected: boolean;
-      hasOpenPullRequest: boolean;
+      hasOpenPullRequest: boolean | null;
     }>;
     truncated: boolean;
   };

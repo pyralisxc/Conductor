@@ -677,7 +677,7 @@ export class ConductorToolRuntime {
               });
             }
           }
-          const detached = githubAudit.developmentBranches.items.filter((branch) => !branch.hasOpenPullRequest);
+          const detached = githubAudit.developmentBranches.items.filter((branch) => branch.hasOpenPullRequest === false);
           if (detached.length) {
             findings.push({
               code: 'topology.development-branches-without-open-pr',
@@ -685,7 +685,7 @@ export class ConductorToolRuntime {
               category: 'topology',
               state: 'observed',
               basis: 'provider-native',
-              summary: `${detached.length} sampled development branch(es) have no open pull request.`,
+              summary: `${detached.length} sampled development branch(es) are proven to have no open pull request.`,
               evidence: { count: detached.length, truncated: githubAudit.developmentBranches.truncated },
             });
           }

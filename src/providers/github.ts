@@ -1119,7 +1119,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       ),
       this.request<GitHubPullRequestResponse[]>(
         repository,
-        `/pulls?state=open&sort=updated&direction=desc&per_page=${detailedPullLimit + 1}`,
+        '/pulls?state=open&sort=updated&direction=desc&per_page=100',
         {},
         credential,
       ),
@@ -1132,7 +1132,8 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     const pullStatuses = await Promise.all(selectedPulls.map((pull) =>
       this.getPullRequestStatus({ project: input.project, pullRequestNumber: pull.number })
     ));
-    const openHeads = new Set(selectedPulls.map((pull) => pull.head.ref));
+    const openHeads = new Set(pulls.map((pull) => pull.head.ref));
+    const openPullIndexComplete = pulls.length < 100;
     const developmentBranches = branches
       .filter((branch) => /^(?:work|repair|audit|release)\//u.test(branch.name))
       .slice(0, limit)
@@ -1140,7 +1141,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         name: branch.name,
         sha: branch.commit.sha,
         protected: branch.protected === true,
-        hasOpenPullRequest: openHeads.has(branch.name),
+        hasOpenPullRequest: openHeads.has(branch.name) ? true : openPullIndexComplete ? false : null,
       }));
 
     return {
