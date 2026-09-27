@@ -111,7 +111,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
           ? runtimeRoute === 'shared-connection'
             ? 'Project identity remains verified through the bound installation; runtime-log reads use the shared owner runtime connection and remain unverified until one exact deployment read succeeds.'
             : runtimeRoute === 'legacy-direct'
-              ? 'Project identity remains verified through the bound installation; runtime-log reads use the legacy direct-token compatibility path and remain unverified until one exact deployment read succeeds.'
+              ? 'Project identity remains verified through the bound installation; runtime-log reads use the legacy direct token compatibility path and remain unverified until one exact deployment read succeeds.'
               : runtimeRoute === 'direct-primary'
                 ? 'Project read uses a direct Vercel token; runtime-log endpoint access is unverified until one exact deployment read succeeds.'
                 : 'Vercel Integration API installation tokens do not authorize the documented runtime-log endpoint. Connect owner runtime-log access once in Conductor; deployment.logs remains available.'
