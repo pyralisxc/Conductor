@@ -1,10 +1,12 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v1' as const;
 
 export type ToolOperationName =
   | 'capabilities'
   | 'preflight_project'
   | 'preflight_operation'
   | 'repository.acquire.preflight'
+  | 'work.bootstrap'
   | 'development.status'
   | 'pull-request.status'
   | 'source.artifact.read'
@@ -132,6 +134,8 @@ export interface ProviderHealth {
 
 export interface CapabilityReport {
   contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
+  catalogVersion: typeof TOOL_CATALOG_VERSION;
+  catalogDigest: string;
   operations: ToolDefinition[];
   capabilities: CapabilityAvailability[];
   providers: ProviderHealth[];
@@ -241,6 +245,53 @@ export interface OperationPreflight {
   checks: OperationPreflightCheck[];
 }
 
+
+export interface RepositoryBootstrapTopology {
+  provider: 'github';
+  repository: string;
+  defaultBranch: string;
+  defaultHead: string;
+  integrationBranch: 'preview' | 'vercel-preview' | null;
+  integrationHead: string | null;
+  observedAt: string;
+}
+
+export type ClientCatalogFreshness = 'unknown' | 'current' | 'stale-client-schema';
+
+export interface GetWorkBootstrapInput {
+  project: ProjectReference;
+  limit?: number;
+  clientCatalogDigest?: string;
+}
+
+export interface WorkBootstrapProjection {
+  contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
+  catalogVersion: typeof TOOL_CATALOG_VERSION;
+  catalogDigest: string;
+  clientCatalog: {
+    suppliedDigest: string | null;
+    freshness: ClientCatalogFreshness;
+  };
+  project: ProjectReference;
+  topology: RepositoryBootstrapTopology | null;
+  preflight: ProjectPreflight;
+  work: DevelopmentStatusProjection['work'];
+  intelligence: {
+    status: 'ready' | 'degraded' | 'blocked' | 'unavailable';
+    summary: string;
+  };
+  deployment: {
+    provider: string;
+    projectId: string;
+    projectName: string;
+    teamId: string | null;
+    productionBranch: string | null;
+    production: DeploymentRecord | null;
+    observedAt: string;
+  } | null;
+  observedAt: string;
+}
+
 export interface GetDevelopmentStatusInput {
   project: ProjectReference;
   limit?: number;
@@ -316,9 +367,22 @@ export interface DeploymentProjectStatus {
   observedAt: string;
 }
 
+
+export interface VercelReadEvidence {
+  provider: 'vercel';
+  projectId: string;
+  teamId: string | null;
+  repository: string;
+  projectName: string;
+  productionBranch: string | null;
+  productionDeploymentId: string | null;
+  observedAt: string;
+}
+
 export interface GetDeploymentStatusInput {
   project: ProjectReference;
   limit?: number;
+  readEvidence?: VercelReadEvidence;
 }
 
 export interface DeploymentLogEntry {
@@ -343,6 +407,7 @@ export interface GetDeploymentLogsInput {
   project: ProjectReference;
   deploymentId: string;
   limit?: number;
+  readEvidence?: VercelReadEvidence;
 }
 
 export interface CreateBranchInput {
@@ -820,11 +885,12 @@ export type ExecutionReceipt<Result> =
   | FailedExecutionReceipt;
 
 export interface VercelProjectInput { project: ProjectReference }
+export interface VercelReadProjectInput extends VercelProjectInput { readEvidence?: VercelReadEvidence }
 export interface VercelDeploymentInput extends VercelProjectInput { deploymentId: string; idempotencyKey: string; approvalReference?: string }
 export interface VercelGitDeploymentInput extends VercelProjectInput { repository: string; ref: string; sha: string; target: 'preview' | 'production'; idempotencyKey: string; approvalReference?: string }
 export interface VercelEnvInput extends VercelProjectInput { key: string; value: string; type: 'plain' | 'encrypted' | 'sensitive'; target: ('production' | 'preview' | 'development')[]; gitBranch?: string; customEnvironmentIds?: string[]; idempotencyKey: string; approvalReference?: string }
 export interface VercelEnvEditInput extends VercelEnvInput { envId: string }
 export interface VercelEnvRemoveInput extends VercelProjectInput { envId: string; key: string; idempotencyKey: string; approvalReference?: string }
-export interface VercelRuntimeLogsInput extends VercelProjectInput { deploymentId: string; limit?: number }
+export interface VercelRuntimeLogsInput extends VercelReadProjectInput { deploymentId: string; limit?: number }
 export interface VercelVcrRepositoryInput extends VercelProjectInput { name: string }
 export interface VercelVcrCreateInput extends VercelVcrRepositoryInput { idempotencyKey: string }

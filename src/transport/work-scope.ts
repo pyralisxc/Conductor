@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { Redis } from '@upstash/redis';
-import type { ProjectReference } from '../runtime/types.js';
+import type { ProjectReference, VercelReadEvidence } from '../runtime/types.js';
 import { derivedSecret } from './owner-auth.js';
 
 export type WorkAction = 'route-work' | 'develop';
@@ -50,6 +50,86 @@ function contextRepository(token: string, clientId: string): string {
   }
   try { return normalizeRepository(value.repository); }
   catch { throw new Error('Invalid work context'); }
+}
+
+
+const BOOTSTRAP_EVIDENCE_TTL_MS = 5 * 60 * 1000;
+
+export interface BootstrapEvidence {
+  v: 1;
+  clientFingerprint: string;
+  repository: string;
+  projectId: string;
+  catalogDigest: string;
+  observedAt: string;
+  expiresAt: number;
+  id: string;
+  vercel?: VercelReadEvidence;
+}
+
+function bootstrapEvidenceSignature(payload: string): string {
+  return createHmac('sha256', derivedSecret('bootstrap-evidence')).update(payload).digest('base64url');
+}
+
+export function issueBootstrapEvidence(clientId: string, input: {
+  repository: string;
+  projectId: string;
+  catalogDigest: string;
+  observedAt: string;
+  vercel?: VercelReadEvidence;
+}): { handle: string; expiresAt: number } {
+  const repository = normalizeRepository(input.repository);
+  if (!/^[0-9a-f]{64}$/u.test(input.catalogDigest)) throw new Error('Invalid catalog digest');
+  const expiresAt = Date.now() + BOOTSTRAP_EVIDENCE_TTL_MS;
+  const vercel = input.vercel ? {
+    ...input.vercel,
+    repository: normalizeRepository(input.vercel.repository),
+  } : undefined;
+  if (vercel) {
+    if (vercel.provider !== 'vercel' || !/^prj_[A-Za-z0-9]+$/u.test(vercel.projectId)) throw new Error('Invalid Vercel bootstrap evidence');
+    if (vercel.teamId !== null && !/^team_[A-Za-z0-9]+$/u.test(vercel.teamId)) throw new Error('Invalid Vercel bootstrap team identity');
+    if (vercel.repository !== repository) throw new Error('Vercel bootstrap repository mismatch');
+    if (!vercel.projectName.trim() || Number.isNaN(Date.parse(vercel.observedAt))) throw new Error('Invalid Vercel bootstrap project metadata');
+    if (vercel.productionDeploymentId !== null && !/^dpl_[A-Za-z0-9]+$/u.test(vercel.productionDeploymentId)) throw new Error('Invalid Vercel bootstrap production deployment identity');
+  }
+  const value: BootstrapEvidence = {
+    v: 1,
+    clientFingerprint: clientFingerprint(clientId),
+    repository,
+    projectId: input.projectId,
+    catalogDigest: input.catalogDigest,
+    observedAt: input.observedAt,
+    expiresAt,
+    id: randomUUID(),
+    ...(vercel ? { vercel } : {}),
+  };
+  const payload = Buffer.from(JSON.stringify(value)).toString('base64url');
+  return { handle: `${payload}.${bootstrapEvidenceSignature(payload)}`, expiresAt };
+}
+
+export function verifyBootstrapEvidence(handle: string, clientId: string, expected?: {
+  repository?: string;
+  projectId?: string;
+  catalogDigest?: string;
+}): BootstrapEvidence {
+  if (handle.length > 2048) throw new Error('Invalid bootstrap evidence');
+  const parts = handle.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error('Invalid bootstrap evidence');
+  const expectedSignature = Buffer.from(bootstrapEvidenceSignature(parts[0]));
+  const received = Buffer.from(parts[1]);
+  if (expectedSignature.length !== received.length || !timingSafeEqual(expectedSignature, received)) throw new Error('Invalid bootstrap evidence');
+  let value: BootstrapEvidence;
+  try { value = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as BootstrapEvidence; }
+  catch { throw new Error('Invalid bootstrap evidence'); }
+  if (!value || value.v !== 1 || value.clientFingerprint !== clientFingerprint(clientId)
+    || typeof value.id !== 'string' || !Number.isSafeInteger(value.expiresAt)
+    || value.expiresAt <= Date.now() || value.expiresAt > Date.now() + BOOTSTRAP_EVIDENCE_TTL_MS) {
+    throw new Error('Expired or mismatched bootstrap evidence');
+  }
+  if (expected?.repository && value.repository !== normalizeRepository(expected.repository)) throw new Error('Bootstrap evidence repository mismatch');
+  if (expected?.projectId && value.projectId !== expected.projectId) throw new Error('Bootstrap evidence project mismatch');
+  if (expected?.catalogDigest && value.catalogDigest !== expected.catalogDigest) throw new Error('Bootstrap evidence catalog mismatch');
+  return value;
 }
 
 export function clientFingerprint(clientId: string): string {

@@ -5,7 +5,7 @@ import { CONDUCTOR_WRITE_SCOPE } from './auth.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { ProjectReference } from '../runtime/types.js';
 import type { WorkAction, WorkScopeAuthorizer } from './work-scope.js';
-import { clientFingerprint } from './work-scope.js';
+import { clientFingerprint, issueBootstrapEvidence, verifyBootstrapEvidence } from './work-scope.js';
 
 const diagnosticSchema = z.object({
   level: z.enum(['info', 'warning', 'error']),
@@ -31,7 +31,7 @@ const errorSchema = z.object({
 
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
-  'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
+  'work.bootstrap', 'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
   'repository.acquire',
   'git.branch.create', 'git.branch.delete', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
@@ -78,6 +78,8 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
+      catalogVersion: z.literal('conductor.catalog.v1'),
+      catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
         description: z.string(),
@@ -126,6 +128,7 @@ const preflightReceiptSchema = z.union([
 const oauthSecurity = [{ type: 'oauth2', scopes: ['conductor.read'] }];
 const oauthWriteSecurity = [{ type: 'oauth2', scopes: ['conductor.read', 'conductor.write'] }];
 const workContextSchema = z.string().min(20).max(1024).describe('Token from work-scope.begin for this conversation’s active repository; required for code/deployment writes');
+const bootstrapEvidenceSchema = z.string().min(20).max(2048).optional().describe('Short-lived signed handle from work.bootstrap; valid only for safe adjacent reads and never for mutations');
 
 function withoutWorkContext<T extends Record<string, unknown>>(input: T): Omit<T, 'workContext'> {
   const { workContext: _context, ...operationInput } = input;
@@ -186,6 +189,23 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     if (!workScope) throw new Error('Owner-managed work scope is not configured');
     await workScope.assertAllowed(auth, action, runtime.resolveProjectReference(project), workContext);
   }
+
+  function withBootstrapReadEvidence(input: Record<string, any>, extra: { authInfo?: AuthInfo }): Record<string, any> {
+    const handle = typeof input.bootstrapEvidence === 'string' ? input.bootstrapEvidence : undefined;
+    const { bootstrapEvidence: _handle, ...rest } = input;
+    if (!handle) return rest;
+    const clientId = extra.authInfo?.clientId;
+    if (!clientId) throw new Error('Authenticated client identity is required for bootstrap evidence reuse');
+    const project = runtime.resolveProjectReference(input.project as ProjectReference);
+    const repository = project.repository ?? project.id;
+    const evidence = verifyBootstrapEvidence(handle, clientId, {
+      repository,
+      projectId: project.id,
+      catalogDigest: runtime.catalogDigest(),
+    });
+    if (!evidence.vercel) throw new Error('Bootstrap evidence does not contain reusable Vercel project identity');
+    return { ...rest, project, readEvidence: evidence.vercel };
+  }
   const server = new McpServer(
     { name: 'conductor', version: '0.1.0' },
     {
@@ -218,6 +238,62 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     if (!clientId) throw new Error('Authenticated client identity is required');
     return { content: [{ type: 'text', text: JSON.stringify(workScope.begin(clientId, repository)) }] };
   });
+
+
+  const bootstrapWorkScope = workScope;
+  if (runtime.workBootstrapReadEnabled && bootstrapWorkScope) {
+    server.registerTool('work.bootstrap', {
+      title: 'Bootstrap one development conversation',
+      description: 'Use at the start/resume of a development conversation. In one call it establishes the exact active repository work context and returns compact Main/Preview topology, active work/preflight, DI posture, deployment posture, and server catalog freshness. Echo a previously observed catalogDigest as clientCatalogDigest; stale-client-schema means refresh/reconnect before treating absent tools as unavailable.',
+      inputSchema: z.object({
+        project: projectSchema,
+        limit: z.number().int().min(1).max(25).default(10),
+        clientCatalogDigest: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      const clientId = extra.authInfo?.clientId;
+      if (!clientId) throw new Error('Authenticated client identity is required');
+      const project = runtime.resolveProjectReference(input.project);
+      const repository = project.repository ?? project.id;
+      const workContext = bootstrapWorkScope.begin(clientId, repository);
+      const ownerScope = await bootstrapWorkScope.describe(clientId);
+      const receipt = await runtime.workBootstrap({ ...input, project });
+      if (receipt.status === 'succeeded') {
+        const evidence = issueBootstrapEvidence(clientId, {
+          repository: workContext.repository,
+          projectId: project.id,
+          catalogDigest: receipt.result.catalogDigest,
+          observedAt: receipt.result.observedAt,
+          ...(receipt.result.deployment ? {
+            vercel: {
+              provider: 'vercel',
+              projectId: receipt.result.deployment.projectId,
+              teamId: receipt.result.deployment.teamId,
+              repository: workContext.repository,
+              projectName: receipt.result.deployment.projectName,
+              productionBranch: receipt.result.deployment.productionBranch,
+              productionDeploymentId: receipt.result.deployment.production?.id ?? null,
+              observedAt: receipt.result.deployment.observedAt,
+            },
+          } : {}),
+        });
+        Object.assign(receipt.result, {
+          workScope: { ...workContext, ownerScope },
+          evidence: {
+            handle: evidence.handle,
+            expiresAt: evidence.expiresAt,
+            reusableFor: ['deployment.status', 'deployment.logs', 'deployment.runtime-logs', 'deployment.env.list'],
+            note: 'Short-lived client/repository/catalog-bound proof only. Mutations still re-read TOCTOU-sensitive provider truth.',
+          },
+        });
+      }
+      return result(receipt);
+    });
+  }
 
   server.registerTool('capabilities', {
     title: 'Report Conductor capabilities',
@@ -365,11 +441,12 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       inputSchema: z.object({
         project: projectSchema,
         limit: z.number().int().min(1).max(50).default(10),
+        bootstrapEvidence: bootstrapEvidenceSchema,
       }),
       outputSchema: readReceiptSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthSecurity },
-    }, async (input) => result(await runtime.deploymentStatus(input)));
+    }, async (input, extra) => result(await runtime.deploymentStatus(withBootstrapReadEvidence(input, extra) as any)));
 
     server.registerTool('deployment.logs', {
       title: 'Read deployment logs',
@@ -378,23 +455,24 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         project: projectSchema,
         deploymentId: z.string().min(3).max(256),
         limit: z.number().int().min(1).max(200).default(100),
+        bootstrapEvidence: bootstrapEvidenceSchema,
       }),
       outputSchema: readReceiptSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthSecurity },
-    }, async (input) => result(await runtime.deploymentLogs(input)));
+    }, async (input, extra) => result(await runtime.deploymentLogs(withBootstrapReadEvidence(input, extra) as any)));
   }
 
 
   if (runtime.deploymentReadEnabled) {
     const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
-    const readTool = (name: 'deployment.audit' | 'deployment.runtime-logs' | 'deployment.env.list' | 'deployment.vcr.get', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any) => Promise<object>) => {
+    const readTool = (name: 'deployment.audit' | 'deployment.runtime-logs' | 'deployment.env.list' | 'deployment.vcr.get', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any, extra: { authInfo?: AuthInfo }) => Promise<object>) => {
       server.registerTool(name, { title, description, inputSchema, outputSchema: readReceiptSchema, annotations: readOnly, _meta: { securitySchemes: oauthSecurity } },
-        async (input) => result(await run(input)));
+        async (input, extra) => result(await run(input, extra)));
     };
     readTool('deployment.audit', 'Audit Vercel project operations', 'Bounded project, domains, aliases, custom environments, deployment and environment metadata. Unsupported account usage and billing are explicit.', z.object({ project: projectSchema }), input => runtime.deploymentAudit(input));
-    readTool('deployment.runtime-logs', 'Read Vercel runtime logs', 'Read bounded redacted runtime logs for one exact bound deployment.', z.object({ project: projectSchema, deploymentId: z.string().min(3), limit: z.number().int().min(1).max(100).default(50) }), input => runtime.deploymentRuntimeLogs(input));
-    readTool('deployment.env.list', 'List Vercel variable metadata', 'List exact project variable metadata; values are never returned.', z.object({ project: projectSchema }), input => runtime.deploymentEnvironmentList(input));
+    readTool('deployment.runtime-logs', 'Read Vercel runtime logs', 'Read bounded redacted runtime logs for one exact bound deployment. A fresh work.bootstrap handle may reuse only the already-proven project identity.', z.object({ project: projectSchema, deploymentId: z.string().min(3), limit: z.number().int().min(1).max(100).default(50), bootstrapEvidence: bootstrapEvidenceSchema }), (input, extra) => runtime.deploymentRuntimeLogs(withBootstrapReadEvidence(input, extra) as any));
+    readTool('deployment.env.list', 'List Vercel variable metadata', 'List exact project variable metadata; values are never returned. A fresh work.bootstrap handle may reuse only the already-proven project identity.', z.object({ project: projectSchema, bootstrapEvidence: bootstrapEvidenceSchema }), (input, extra) => runtime.deploymentEnvironmentList(withBootstrapReadEvidence(input, extra) as any));
     readTool('deployment.vcr.get', 'Read exact Vercel Container Registry repository', 'Read one exact project-scoped VCR repository by name. No image contents or credentials are returned.', z.object({ project: projectSchema, name: z.string().min(1).max(128).regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u) }), input => runtime.deploymentVcrGet(input));
   }
 

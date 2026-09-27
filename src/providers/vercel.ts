@@ -9,7 +9,7 @@ import type {
   GetDeploymentStatusInput,
   OperationPreflightCheck,
   ProjectReference,
-  VercelProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput,
+  VercelProjectInput, VercelReadProjectInput, VercelReadEvidence, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput,
   RuntimeOperationName,
 } from '../runtime/types.js';
 import type { VercelOperationsProvider, OperationPreflightProvider } from './runtime.js';
@@ -144,7 +144,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   }
 
   async getDeploymentStatus(input: GetDeploymentStatusInput): Promise<DeploymentProjectStatus> {
-    const { binding, data: project } = await this.readProject(input.project);
+    const { binding, data: project } = await this.readProject(input.project, input.readEvidence);
     const limit = clamp(input.limit ?? 10, 1, 50);
     const projectId = stringField(project, 'id') ?? binding.project;
     const [deploymentPayload, domainPayload] = await Promise.all([
@@ -201,7 +201,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   }
 
   async getDeploymentLogs(input: GetDeploymentLogsInput): Promise<DeploymentLogs> {
-    const { binding, data: project } = await this.readProject(input.project);
+    const { binding, data: project } = await this.readProject(input.project, input.readEvidence);
     const limit = clamp(input.limit ?? 100, 1, 200);
     const projectId = stringField(project, 'id') ?? binding.project;
     const deployment = await this.getJson(
@@ -253,9 +253,43 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     return { binding, id, data };
   }
 
+  private projectFromReadEvidence(
+    project: ProjectReference,
+    evidence?: VercelReadEvidence,
+  ): { binding: VercelProjectBinding; id: string; data: JsonRecord } | null {
+    if (!evidence) return null;
+    const binding = this.bindings.get(project.id);
+    if (!binding) return null;
+    if (binding.project !== evidence.projectId) return null;
+    if ((binding.teamId ?? null) !== evidence.teamId) return null;
+
+    const requestedRepository = project.repository?.toLowerCase() ?? null;
+    const boundRepository = binding.repository?.toLowerCase() ?? requestedRepository;
+    if (!boundRepository || boundRepository !== evidence.repository.toLowerCase()) return null;
+    if (requestedRepository && requestedRepository !== evidence.repository.toLowerCase()) return null;
+
+    const [org, repo] = evidence.repository.split('/');
+    const data: JsonRecord = {
+      id: evidence.projectId,
+      name: evidence.projectName,
+      link: {
+        type: 'github',
+        org,
+        repo,
+        ...(evidence.productionBranch ? { productionBranch: evidence.productionBranch } : {}),
+      },
+      ...(evidence.productionDeploymentId ? {
+        targets: { production: { id: evidence.productionDeploymentId } },
+      } : {}),
+    };
+    return { binding, id: evidence.projectId, data };
+  }
+
   // Discovery is confined to one already configured installation and team. It
   // never creates a write binding and never falls back to a server-wide token.
-  private async readProject(project: ProjectReference): Promise<{ binding: VercelProjectBinding; id: string; data: JsonRecord }> {
+  private async readProject(project: ProjectReference, readEvidence?: VercelReadEvidence): Promise<{ binding: VercelProjectBinding; id: string; data: JsonRecord }> {
+    const reused = this.projectFromReadEvidence(project, readEvidence);
+    if (reused) return reused;
     if (this.bindings.has(project.id)) return this.boundProject(project);
     if (!project.repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(project.repository)) {
       throw { code: 'NOT_FOUND', source: 'vercel', message: 'Unbound Vercel reads require an exact Git repository' };
@@ -294,9 +328,9 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     throw { code: 'NOT_FOUND', source: 'vercel', message: 'No unique, fully verified Vercel project matches the requested repository in the connected installation' };
   }
 
-  private async exactDeployment(project: ProjectReference, deploymentId: string, readOnly = false) {
+  private async exactDeployment(project: ProjectReference, deploymentId: string, readOnly = false, readEvidence?: VercelReadEvidence) {
     if (!/^dpl_[A-Za-z0-9]+$/u.test(deploymentId)) throw { code: 'CONFLICT', source: 'vercel', message: 'An exact deployment ID is required' };
-    const bound = readOnly ? await this.readProject(project) : await this.boundProject(project);
+    const bound = readOnly ? await this.readProject(project, readEvidence) : await this.boundProject(project);
     const detail = await this.getJson(`/v13/deployments/${encodeURIComponent(deploymentId)}`, scopeQuery(bound.binding), bound.binding);
     if (stringField(detail, 'projectId') !== bound.id) {
       throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'Deployment is outside the bound project' };
@@ -409,8 +443,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     };
   }
 
-  async listEnvironment(input: VercelProjectInput): Promise<Record<string, unknown>> {
-    const bound = await this.readProject(input.project);
+  async listEnvironment(input: VercelReadProjectInput): Promise<Record<string, unknown>> {
+    const bound = await this.readProject(input.project, input.readEvidence);
     const payload = await this.getJson(`/v10/projects/${encodeURIComponent(bound.id)}/env`, { ...scopeQuery(bound.binding), decrypt: 'false' }, bound.binding);
     const raw = arrayField(payload, 'envs');
     return { provider: 'vercel', projectId: bound.id, variables: raw.slice(0, 200).map(item => envMetadata(record(item) ?? {})), truncated: raw.length > 200, observedAt: this.now().toISOString() };
@@ -515,7 +549,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   }
 
   async getRuntimeLogs(input: VercelRuntimeLogsInput): Promise<Record<string, unknown>> {
-    const bound = await this.exactDeployment(input.project, input.deploymentId, true);
+    const bound = await this.exactDeployment(input.project, input.deploymentId, true, input.readEvidence);
     const runtimeRoute = await this.runtimeCredentialRoute(bound.binding);
     if (runtimeRoute === 'none') {
       throw { code: 'TOOL_UNAVAILABLE', source: 'vercel', message: 'Vercel Integration API installation tokens do not authorize runtime request-log reads; deployment.logs remains available. Connect owner runtime-log access once in Conductor to use deployment.runtime-logs.' };

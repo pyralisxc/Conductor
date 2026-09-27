@@ -4,6 +4,7 @@ import {
   supportsOperationPreflight,
   type ToolRuntimeProvider,
   type RepositoryAcquisitionProvider,
+  type RepositoryBootstrapReadProvider,
   type SourceControlMutationProvider,
   type ProjectReferenceResolver,
   type PullRequestReadProvider,
@@ -17,6 +18,7 @@ import {
 import { normalizeToolError } from './errors.js';
 import {
   TOOL_RUNTIME_CONTRACT_VERSION,
+  TOOL_CATALOG_VERSION,
   type CapabilityAvailability,
   type CapabilityReport,
   type ExecutionReceipt,
@@ -36,6 +38,8 @@ import {
   type AcquireRepositoryInput,
   type RepositoryAcquisitionResult,
   type OperationPreflightCheck,
+  type GetWorkBootstrapInput,
+  type WorkBootstrapProjection,
   type GetDevelopmentStatusInput,
   type DevelopmentStatusProjection,
   type DevelopmentStatusWorkCounts,
@@ -70,7 +74,7 @@ import {
   type GetDeploymentLogsInput,
   type DeploymentProjectStatus,
   type DeploymentLogs,
-  type VercelProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput, type VercelVcrRepositoryInput, type VercelVcrCreateInput,
+  type VercelProjectInput, type VercelReadProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput, type VercelVcrRepositoryInput, type VercelVcrCreateInput,
 } from './types.js';
 import { IdempotentMutationExecutor } from './idempotency.js';
 
@@ -103,6 +107,13 @@ const REPOSITORY_ACQUISITION_MUTATION_DEFINITION: ToolDefinition = {
   name: 'repository.acquire',
   description: 'Import one exact public GitHub snapshot into an already-authorized empty destination without granting code-work authority.',
   mutates: true,
+};
+
+
+const WORK_BOOTSTRAP_READ_DEFINITION: ToolDefinition = {
+  name: 'work.bootstrap',
+  description: 'Return one compact client-bound development bootstrap snapshot with catalog freshness, repository topology, work/preflight state, DI posture, and deployment posture.',
+  mutates: false,
 };
 
 const DEVELOPMENT_STATUS_READ_DEFINITION: ToolDefinition = {
@@ -203,6 +214,7 @@ export interface ConductorToolRuntimeOptions {
   now?: () => Date;
   createOperationId?: () => string;
   repositoryAcquisitionProvider?: RepositoryAcquisitionProvider;
+  repositoryBootstrapProvider?: RepositoryBootstrapReadProvider;
   sourceControlMutationProvider?: SourceControlMutationProvider;
   mutationExecutor?: IdempotentMutationExecutor;
   projectResolver?: ProjectReferenceResolver;
@@ -222,6 +234,7 @@ export class ConductorToolRuntime {
   private readonly now: () => Date;
   private readonly createOperationId: () => string;
   private readonly repositoryAcquisitionProvider?: RepositoryAcquisitionProvider;
+  private readonly repositoryBootstrapProvider?: RepositoryBootstrapReadProvider;
   private readonly sourceControlMutationProvider?: SourceControlMutationProvider;
   private readonly mutationExecutor?: IdempotentMutationExecutor;
   private readonly projectResolver?: ProjectReferenceResolver;
@@ -238,6 +251,7 @@ export class ConductorToolRuntime {
     this.createOperationId =
       options.createOperationId ?? (() => randomUUID());
     this.repositoryAcquisitionProvider = options.repositoryAcquisitionProvider;
+    this.repositoryBootstrapProvider = options.repositoryBootstrapProvider;
     this.sourceControlMutationProvider = options.sourceControlMutationProvider;
     this.mutationExecutor = options.mutationExecutor;
     this.projectResolver = options.projectResolver;
@@ -277,6 +291,10 @@ export class ConductorToolRuntime {
   }
 
   get developmentStatusReadEnabled(): boolean {
+    return Boolean(this.workItemCandidateProvider);
+  }
+
+  get workBootstrapReadEnabled(): boolean {
     return Boolean(this.workItemCandidateProvider);
   }
 
@@ -353,6 +371,8 @@ export class ConductorToolRuntime {
         return {
           result: {
             contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+            catalogVersion: TOOL_CATALOG_VERSION,
+            catalogDigest: this.catalogDigest(),
             operations: this.operationDefinitions(),
             capabilities,
             providers,
@@ -445,6 +465,99 @@ export class ConductorToolRuntime {
             status,
             checks,
           },
+        };
+      },
+    );
+  }
+
+
+  catalogDigest(): string {
+    return createHash('sha256')
+      .update(JSON.stringify({
+        contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+        catalogVersion: TOOL_CATALOG_VERSION,
+        operations: this.operationDefinitions()
+          .map(({ name, mutates }) => ({ name, mutates }))
+          .sort((left, right) => left.name.localeCompare(right.name)),
+      }))
+      .digest('hex');
+  }
+
+  async workBootstrap(input: GetWorkBootstrapInput): Promise<ExecutionReceipt<WorkBootstrapProjection>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'work.bootstrap',
+      { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
+      async () => {
+        const development = await this.developmentStatus({ project: resolvedProject, limit: input.limit ?? 10 });
+        if (development.status === 'failed') throw development.error;
+
+        const catalogDigest = this.catalogDigest();
+        const suppliedDigest = input.clientCatalogDigest?.trim().toLowerCase() || null;
+        const freshness = suppliedDigest === null
+          ? 'unknown'
+          : suppliedDigest === catalogDigest
+            ? 'current'
+            : 'stale-client-schema';
+
+        let topology = null;
+        const diagnostics: ToolDiagnostic[] = [];
+        if (this.repositoryBootstrapProvider) {
+          try {
+            topology = await this.repositoryBootstrapProvider.getRepositoryBootstrap(resolvedProject);
+          } catch (error) {
+            const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', 'github');
+            diagnostics.push(...normalized.diagnostics);
+          }
+        }
+
+        let deployment: WorkBootstrapProjection['deployment'] = null;
+        if (this.deploymentProvider) {
+          try {
+            const status = await this.deploymentProvider.getDeploymentStatus({ project: resolvedProject, limit: 3 });
+            deployment = {
+              provider: status.provider,
+              projectId: status.project.id,
+              projectName: status.project.name,
+              teamId: status.project.teamId,
+              productionBranch: status.project.productionBranch,
+              production: status.production,
+              observedAt: status.observedAt,
+            };
+          } catch (error) {
+            const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', 'vercel');
+            diagnostics.push(...normalized.diagnostics);
+          }
+        }
+
+        const intelligenceCheck = development.result.preflight.checks.find((check) => check.check === 'development-intelligence.read');
+        const intelligence = intelligenceCheck
+          ? { status: intelligenceCheck.status, summary: intelligenceCheck.summary }
+          : { status: 'unavailable' as const, summary: 'Development Intelligence is not configured for this runtime' };
+
+        return {
+          result: {
+            contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+            catalogVersion: TOOL_CATALOG_VERSION,
+            catalogDigest,
+            clientCatalog: { suppliedDigest, freshness },
+            project: resolvedProject,
+            topology,
+            preflight: development.result.preflight,
+            work: development.result.work,
+            intelligence,
+            deployment,
+            observedAt: this.now().toISOString(),
+          },
+          diagnostics: [
+            ...diagnostics,
+            ...(freshness === 'stale-client-schema' ? [{
+              level: 'warning' as const,
+              source: 'conductor',
+              code: 'TOOL_UNAVAILABLE' as const,
+              message: 'The connected client catalog digest differs from the current runtime; refresh/reconnect the client before treating absent tools as unavailable.',
+            }] : []),
+          ],
         };
       },
     );
@@ -597,7 +710,7 @@ export class ConductorToolRuntime {
   }
   async deploymentAudit(input: VercelProjectInput) { return this.vercelRead('deployment.audit', input, (provider, project) => provider.getAudit({ project })); }
   async deploymentRuntimeLogs(input: VercelRuntimeLogsInput) { return this.vercelRead('deployment.runtime-logs', input, (provider, project) => provider.getRuntimeLogs({ ...input, project })); }
-  async deploymentEnvironmentList(input: VercelProjectInput) { return this.vercelRead('deployment.env.list', input, (provider, project) => provider.listEnvironment({ project })); }
+  async deploymentEnvironmentList(input: VercelReadProjectInput) { return this.vercelRead('deployment.env.list', input, (provider, project) => provider.listEnvironment({ ...input, project })); }
   async deploymentVcrGet(input: VercelVcrRepositoryInput) { return this.vercelRead('deployment.vcr.get', input, (provider, project) => provider.getVcrRepository({ ...input, project })); }
 
   private async vercelMutation<Result>(operation: import('./types.js').MutationOperationName, input: VercelProjectInput & { idempotencyKey: string }, mutate: (provider: VercelOperationsProvider, project: ProjectReference) => Promise<Result>): Promise<ExecutionReceipt<Result>> {
@@ -814,6 +927,7 @@ export class ConductorToolRuntime {
       ...(this.operationPreflightEnabled ? [OPERATION_PREFLIGHT_DEFINITION] : []),
       ...(this.repositoryAcquisitionReadEnabled ? [REPOSITORY_ACQUISITION_PREFLIGHT_DEFINITION] : []),
       ...(this.repositoryAcquisitionMutationEnabled ? [REPOSITORY_ACQUISITION_MUTATION_DEFINITION] : []),
+      ...(this.workBootstrapReadEnabled ? [WORK_BOOTSTRAP_READ_DEFINITION] : []),
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
       ...(this.sourceArtifactReadEnabled ? [EXECUTION_EVIDENCE_READ_DEFINITIONS[0]!] : []),

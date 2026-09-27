@@ -110,3 +110,15 @@ Ordinary technical understanding remains in Development Intelligence. A developm
 `source.artifact.read` exists only for the final exact handoff from DI evidence to a bounded edit. The caller supplies one exact immutable Git SHA and one repository-relative path. Conductor returns one complete UTF-8 artifact when it fits the configured bound; binary, non-file, incomplete, and too-large content are explicit results rather than partial source. This is not a repository browser, file search, code index, or architecture surface.
 
 `ci.run.read` is the provider-native drill-down after `pull-request.status` reports an actionable workflow failure. The caller supplies the exact PR, expected head SHA, and workflow run ID. Conductor verifies those identities before returning jobs and steps. It returns bounded redacted tail logs for an exact job when requested, otherwise for at most three failed jobs. Logs are not archived by Conductor and no workflow mutation is exposed through this read.
+
+
+## One-call development bootstrap
+
+A fresh or resumed development conversation should prefer `work.bootstrap` over separately calling `work-scope.begin`, `capabilities`, and `development.status` when the tool is present. The bootstrap call establishes a new client-bound work context for the exact resolved repository and returns a compact repository topology, inspect preflight/work projection, Development Intelligence posture, bounded deployment posture, and the current runtime tool-catalog digest.
+
+Clients should retain the returned `catalogDigest` only as ephemeral conversation context and echo it as `clientCatalogDigest` on a later bootstrap. A mismatch is reported as `stale-client-schema`; refresh or reconnect the client before concluding that a newly absent tool is not implemented. Exact `preflight_operation` remains authoritative for whether a visible operation can execute against one project.
+
+Bootstrap also returns a short-lived HMAC-signed evidence handle bound to the authenticated client, exact repository, project referent, catalog digest, and observation time. When a Vercel project was proven during bootstrap, the handle also carries only non-secret project/team/repository identity plus the observed production target. `deployment.status`, `deployment.logs`, `deployment.runtime-logs`, and `deployment.env.list` may accept this handle to skip only the repeated Vercel project-identity lookup. Deployment lists/details, domains, runtime logs, environment metadata, credentials, and all mutation preconditions remain live provider reads. A stale local binding causes fresh authoritative project resolution instead of trusting the proof; invalid/expired/client-mismatched handles fail closed.
+
+
+The runtime publishes both `catalogVersion` and `catalogDigest`. The digest includes the explicit catalog revision as well as exposed operation identities. Any MCP input/output schema change that matters to callers must bump `TOOL_CATALOG_VERSION`; this is deliberate so changing an existing tool schema cannot remain invisible merely because its operation name is unchanged.
