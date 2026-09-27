@@ -73,6 +73,16 @@ test('bootstrap evidence is short-lived, client-bound, repository-bound and cred
     projectId: 'Conductor',
     catalogDigest: 'a'.repeat(64),
     observedAt: '2026-09-27T00:00:00.000Z',
+    vercel: {
+      provider: 'vercel',
+      projectId: 'prj_conductor',
+      teamId: 'team_owner',
+      repository: 'pyralisxc/Conductor',
+      projectName: 'conductor',
+      productionBranch: 'main',
+      productionDeploymentId: 'dpl_production',
+      observedAt: '2026-09-27T00:00:00.000Z',
+    },
   });
   const value = verifyBootstrapEvidence(issued.handle, 'owner-approved-client', {
     repository: 'pyralisxc/Conductor',
@@ -81,6 +91,8 @@ test('bootstrap evidence is short-lived, client-bound, repository-bound and cred
   });
   assert.equal(value.repository, 'pyralisxc/conductor');
   assert.equal(value.projectId, 'Conductor');
+  assert.equal(value.vercel?.projectId, 'prj_conductor');
+  assert.equal(value.vercel?.repository, 'pyralisxc/conductor');
   assert.doesNotMatch(issued.handle, /token|secret|credential/iu);
   assert.throws(() => verifyBootstrapEvidence(issued.handle, 'different-client'), /mismatched/);
   assert.throws(() => verifyBootstrapEvidence(issued.handle, 'owner-approved-client', { repository: 'pyralisxc/Other' }), /repository mismatch/);

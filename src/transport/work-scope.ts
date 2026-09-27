@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { Redis } from '@upstash/redis';
-import type { ProjectReference } from '../runtime/types.js';
+import type { ProjectReference, VercelReadEvidence } from '../runtime/types.js';
 import { derivedSecret } from './owner-auth.js';
 
 export type WorkAction = 'route-work' | 'develop';
@@ -55,7 +55,7 @@ function contextRepository(token: string, clientId: string): string {
 
 const BOOTSTRAP_EVIDENCE_TTL_MS = 5 * 60 * 1000;
 
-interface BootstrapEvidence {
+export interface BootstrapEvidence {
   v: 1;
   clientFingerprint: string;
   repository: string;
@@ -64,6 +64,7 @@ interface BootstrapEvidence {
   observedAt: string;
   expiresAt: number;
   id: string;
+  vercel?: VercelReadEvidence;
 }
 
 function bootstrapEvidenceSignature(payload: string): string {
@@ -75,10 +76,22 @@ export function issueBootstrapEvidence(clientId: string, input: {
   projectId: string;
   catalogDigest: string;
   observedAt: string;
+  vercel?: VercelReadEvidence;
 }): { handle: string; expiresAt: number } {
   const repository = normalizeRepository(input.repository);
   if (!/^[0-9a-f]{64}$/u.test(input.catalogDigest)) throw new Error('Invalid catalog digest');
   const expiresAt = Date.now() + BOOTSTRAP_EVIDENCE_TTL_MS;
+  const vercel = input.vercel ? {
+    ...input.vercel,
+    repository: normalizeRepository(input.vercel.repository),
+  } : undefined;
+  if (vercel) {
+    if (vercel.provider !== 'vercel' || !/^prj_[A-Za-z0-9]+$/u.test(vercel.projectId)) throw new Error('Invalid Vercel bootstrap evidence');
+    if (vercel.teamId !== null && !/^team_[A-Za-z0-9]+$/u.test(vercel.teamId)) throw new Error('Invalid Vercel bootstrap team identity');
+    if (vercel.repository !== repository) throw new Error('Vercel bootstrap repository mismatch');
+    if (!vercel.projectName.trim() || Number.isNaN(Date.parse(vercel.observedAt))) throw new Error('Invalid Vercel bootstrap project metadata');
+    if (vercel.productionDeploymentId !== null && !/^dpl_[A-Za-z0-9]+$/u.test(vercel.productionDeploymentId)) throw new Error('Invalid Vercel bootstrap production deployment identity');
+  }
   const value: BootstrapEvidence = {
     v: 1,
     clientFingerprint: clientFingerprint(clientId),
@@ -88,6 +101,7 @@ export function issueBootstrapEvidence(clientId: string, input: {
     observedAt: input.observedAt,
     expiresAt,
     id: randomUUID(),
+    ...(vercel ? { vercel } : {}),
   };
   const payload = Buffer.from(JSON.stringify(value)).toString('base64url');
   return { handle: `${payload}.${bootstrapEvidenceSignature(payload)}`, expiresAt };

@@ -410,3 +410,106 @@ test('runtime request-log snapshot caps old deployments to the current CLI 24-ho
   assert.equal(u.searchParams.get('branch'), 'main');
   assert.deepEqual(logs.entries, []);
 });
+
+
+test('fresh bootstrap read evidence skips the repeated Vercel project identity fetch while live status remains current', async () => {
+  const paths: string[] = [];
+  const provider = new VercelDeploymentProvider({
+    token: 'direct-token',
+    bindings: [{ id: 'app', project: 'prj_app', repository: 'owner/app', teamId: 'team_1' }],
+    fetch: async input => {
+      const url = new URL(String(input));
+      paths.push(url.pathname);
+      if (url.pathname === '/v9/projects/prj_app') {
+        return Response.json({
+          id: 'prj_app',
+          name: 'app',
+          link: { type: 'github', org: 'owner', repo: 'app', productionBranch: 'main' },
+          targets: { production: { id: 'dpl_prod' } },
+        });
+      }
+      if (url.pathname === '/v6/deployments') {
+        return Response.json({ deployments: [
+          { id: 'dpl_prod', projectId: 'prj_app', readyState: 'READY', target: 'production', meta: { githubCommitSha: 'a'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/app' } },
+          { id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: null, meta: { githubCommitSha: 'b'.repeat(40), githubCommitRef: 'preview', githubCommitRepo: 'owner/app' } },
+        ] });
+      }
+      if (url.pathname === '/v9/projects/prj_app/domains') return Response.json({ domains: [{ name: 'app.example', verified: true }] });
+      return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
+    },
+  });
+
+  const fresh = await provider.getDeploymentStatus({ project: { id: 'app', repository: 'owner/app' }, limit: 5 });
+  assert.equal(fresh.production?.id, 'dpl_prod');
+  assert.equal(paths.filter(path => path === '/v9/projects/prj_app').length, 1);
+
+  paths.length = 0;
+  const reused = await provider.getDeploymentStatus({
+    project: { id: 'app', repository: 'owner/app' },
+    limit: 5,
+    readEvidence: {
+      provider: 'vercel',
+      projectId: 'prj_app',
+      teamId: 'team_1',
+      repository: 'owner/app',
+      projectName: 'app',
+      productionBranch: 'main',
+      productionDeploymentId: 'dpl_prod',
+      observedAt: '2026-09-27T00:00:00.000Z',
+    },
+  });
+  assert.equal(reused.production?.id, 'dpl_prod');
+  assert.equal(reused.project.productionBranch, 'main');
+  assert.equal(paths.filter(path => path === '/v9/projects/prj_app').length, 0);
+  assert.deepEqual(paths.sort(), ['/v6/deployments', '/v9/projects/prj_app/domains'].sort());
+});
+
+test('stale bootstrap project evidence falls back to a fresh authoritative Vercel project read', async () => {
+  const paths: string[] = [];
+  const provider = new VercelDeploymentProvider({
+    token: 'direct-token',
+    bindings: [{ id: 'app', project: 'prj_app', repository: 'owner/app', teamId: 'team_1' }],
+    fetch: async input => {
+      const url = new URL(String(input));
+      paths.push(url.pathname);
+      if (url.pathname === '/v9/projects/prj_app') return Response.json({ id: 'prj_app', name: 'app', link: { type: 'github', org: 'owner', repo: 'app', productionBranch: 'main' } });
+      if (url.pathname === '/v6/deployments') return Response.json({ deployments: [] });
+      if (url.pathname === '/v9/projects/prj_app/domains') return Response.json({ domains: [] });
+      return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
+    },
+  });
+  await provider.getDeploymentStatus({
+    project: { id: 'app', repository: 'owner/app' },
+    readEvidence: {
+      provider: 'vercel',
+      projectId: 'prj_old',
+      teamId: 'team_1',
+      repository: 'owner/app',
+      projectName: 'old',
+      productionBranch: 'main',
+      productionDeploymentId: null,
+      observedAt: '2026-09-27T00:00:00.000Z',
+    },
+  });
+  assert.equal(paths.includes('/v9/projects/prj_app'), true);
+});
+
+test('Vercel mutations still re-read project and deployment identity after bootstrap reuse exists', async () => {
+  const paths: string[] = [];
+  const provider = new VercelDeploymentProvider({
+    token: 'direct-token',
+    bindings: [{ id: 'app', project: 'prj_app', repository: 'owner/app', teamId: 'team_1' }],
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      paths.push(url.pathname);
+      if (url.pathname === '/v9/projects/prj_app') return Response.json({ id: 'prj_app', name: 'app', link: { type: 'github', org: 'owner', repo: 'app' } });
+      if (url.pathname === '/v13/deployments/dpl_source' && (!init?.method || init.method === 'GET')) return Response.json({ id: 'dpl_source', projectId: 'prj_app', readyState: 'READY', target: 'preview' });
+      if (url.pathname === '/v13/deployments' && init?.method === 'POST') return Response.json({ id: 'dpl_new', readyState: 'BUILDING' });
+      return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
+    },
+  });
+  const result = await provider.redeploy({ project: { id: 'app', repository: 'owner/app' }, deploymentId: 'dpl_source', idempotencyKey: 'mutation-fresh-read' });
+  assert.equal(result.deploymentId, 'dpl_new');
+  assert.equal(paths.includes('/v9/projects/prj_app'), true);
+  assert.equal(paths.includes('/v13/deployments/dpl_source'), true);
+});

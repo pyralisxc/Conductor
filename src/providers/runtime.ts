@@ -40,7 +40,7 @@ import type {
   GetDeploymentLogsInput,
   DeploymentProjectStatus,
   DeploymentLogs,
-  VercelProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput,
+  VercelProjectInput, VercelReadProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput,
 } from '../runtime/types.js';
 
 export interface RuntimeCapabilityProvider {
@@ -104,7 +104,7 @@ export interface DeploymentReadProvider extends RuntimeCapabilityProvider {
 export interface VercelOperationsProvider extends DeploymentReadProvider {
   getAudit(input: VercelProjectInput): Promise<Record<string, unknown>>;
   getRuntimeLogs(input: VercelRuntimeLogsInput): Promise<Record<string, unknown>>;
-  listEnvironment(input: VercelProjectInput): Promise<Record<string, unknown>>;
+  listEnvironment(input: VercelReadProjectInput): Promise<Record<string, unknown>>;
   getVcrRepository(input: VercelVcrRepositoryInput): Promise<Record<string, unknown>>;
   createVcrRepository(input: VercelVcrCreateInput): Promise<Record<string, unknown>>;
   redeploy(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
