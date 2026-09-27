@@ -177,7 +177,7 @@ test('runtime log preflight does not claim endpoint permission from a direct tok
   const { provider, project } = fixture();
   const preflight = (await provider.preflightOperation(project, 'deployment.runtime-logs'))?.[0];
   assert.equal(preflight?.status, 'degraded');
-  assert.match(preflight?.diagnostics[0]?.message ?? '', /runtime request-log access is unverified/u);
+  assert.match(preflight?.diagnostics[0]?.message ?? '', /authoritative for provider health/u);
 });
 
 test('connected Vercel integration reports the documented runtime-log scope boundary without calling the endpoint', async () => {
