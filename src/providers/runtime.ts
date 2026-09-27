@@ -5,6 +5,7 @@ import type {
   ProjectReference,
   RuntimeOperationName,
   CreateBranchInput,
+  BootstrapIntegrationBranchInput,
   DeleteBranchInput,
   CreateCommitInput,
   CreatePullRequestInput,
@@ -36,6 +37,8 @@ import type {
   AcquireRepositoryInput,
   RepositoryAcquisitionResult,
   RepositoryBootstrapTopology,
+  RepositoryProviderAudit,
+  GetRepositoryAuditInput,
   GetDeploymentStatusInput,
   GetDeploymentLogsInput,
   DeploymentProjectStatus,
@@ -66,6 +69,14 @@ export interface ProjectReferenceResolver {
 
 export interface RepositoryBootstrapReadProvider extends RuntimeCapabilityProvider {
   getRepositoryBootstrap(project: ProjectReference): Promise<RepositoryBootstrapTopology>;
+}
+
+export interface RepositoryAuditReadProvider extends RuntimeCapabilityProvider {
+  getRepositoryAudit(input: GetRepositoryAuditInput): Promise<RepositoryProviderAudit>;
+}
+
+export interface RepositorySemanticAuditProvider extends RuntimeCapabilityProvider {
+  auditRepository(project: ProjectReference, limit?: number): Promise<Record<string, unknown>>;
 }
 
 export interface PullRequestReadProvider extends RuntimeCapabilityProvider {
@@ -124,6 +135,14 @@ export interface RepositoryAcquisitionProvider extends RuntimeCapabilityProvider
 
 export interface SourceControlMutationProvider extends RuntimeCapabilityProvider {
   createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }>;
+  bootstrapIntegrationBranch(input: BootstrapIntegrationBranchInput): Promise<{
+    repository: string;
+    branch: 'preview' | 'vercel-preview';
+    commitSha: string;
+    defaultBranch: string;
+    created: boolean;
+    approvalReference: string;
+  }>;
   deleteBranch(input: DeleteBranchInput): Promise<{ repository: string; branch: string; commitSha: string; deleted: true; containedIn: string }>;
   createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }>;
   createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }>;

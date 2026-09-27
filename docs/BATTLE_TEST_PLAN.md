@@ -25,10 +25,15 @@ This document tests the **current bounded runtime**. Future automation experimen
 14. An exact issue in a second provider-accessible repository can receive a routed comment, lifecycle update, and classification change without granting code-work authority there.
 15. Replaying the same routed issue comment is idempotent, and issue-comment mutation refuses pull requests.
 16. A confirmed duplicate can be linked to its canonical issue before closure; title similarity alone never authorizes closing work.
+16a. `kind:audit` round-trips through issue creation/classification without replacing unrelated labels.
+16b. `repository.audit` succeeds with Development Intelligence disconnected and reports GitHub/work/Vercel provider facts with explicit availability boundaries.
+16c. When Development Intelligence is available, its `audit_repository` result is attached as a separate semantic evidence plane and never merged into Conductor provider facts or mutation authority.
 
 ## Current runtime — bounded development
 
-17. A work branch starts from an exact Preview SHA.
+17. A repository with no integration branch may bootstrap exactly `preview` or `vercel-preview` from the exact current default-branch SHA only through explicit owner-approved `git.integration.bootstrap`; arbitrary/stale/conflicting targets fail closed and ordinary `git.branch.create` remains `work/*`-only.
+17a. Repeating the exact same integration bootstrap is idempotent and does not create a second ref.
+17b. A work branch starts from an exact Preview SHA.
 18. Automatic Vercel Git builds are ignored for ordinary work/repair/audit branches; GitHub verification remains the work-branch gate, while exact ad-hoc Vercel canaries are explicitly requested.
 19. A bounded commit advances only the expected work-branch head.
 20. A pull request may target the project's explicit integration branch.

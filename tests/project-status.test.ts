@@ -305,3 +305,106 @@ test('capabilities publishes a stable catalog digest including work.bootstrap', 
   assert.match(a.result.catalogDigest, /^[0-9a-f]{64}$/u);
   assert.equal(a.result.operations.some(op => op.name === 'work.bootstrap'), true);
 });
+
+
+test('repository audit succeeds without DI and keeps semantic audit separate', async () => {
+  const workProvider: WorkItemCandidateReadProvider = {
+    id: 'github-work',
+    async getCapabilities() { return []; },
+    async getWorkItemStatus() { throw new Error('unused'); },
+    async listWorkItems() {
+      return {
+        repository: 'pyralisxc/Conductor',
+        truncated: false,
+        items: [{
+          repository: 'pyralisxc/Conductor', issueNumber: 1, url: 'https://github.test/issues/1',
+          title: 'Unclassified', body: '', state: 'open' as const, status: 'ready' as const,
+          statusSource: 'label' as const, kind: 'unknown' as const, kindSource: 'default' as const,
+          origin: 'unknown' as const, originSource: 'default' as const, labels: ['status:ready'],
+          createdAt: '2026-09-27T00:00:00Z', updatedAt: '2026-09-27T00:00:00Z',
+        }],
+      };
+    },
+    async listWorkItemPullRequests() { return []; },
+  };
+  const githubPreflight: ProjectPreflightProvider = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    async preflightProject() {
+      return [
+        { check: 'repository.access' as const, status: 'ready' as const, provider: 'github', summary: 'ready', diagnostics: [] },
+        { check: 'github.read' as const, status: 'ready' as const, provider: 'github', summary: 'ready', diagnostics: [] },
+      ];
+    },
+  };
+  const runtime = new ConductorToolRuntime({
+    providers: [githubPreflight],
+    workItemCandidateProvider: workProvider,
+    repositoryAuditProvider: {
+      id: 'github-audit',
+      async getCapabilities() { return []; },
+      async getRepositoryAudit() {
+        return {
+          provider: 'github' as const,
+          repository: 'pyralisxc/Conductor',
+          topology: {
+            provider: 'github' as const, repository: 'pyralisxc/Conductor',
+            defaultBranch: 'main', defaultHead: 'a'.repeat(40),
+            integrationBranch: 'preview' as const, integrationHead: 'b'.repeat(40),
+            observedAt: '2026-09-27T00:00:00Z',
+          },
+          developmentBranches: { items: [], truncated: false },
+          openPullRequests: { items: [], truncated: false },
+          observedAt: '2026-09-27T00:00:00Z',
+        };
+      },
+    },
+    now: () => new Date('2026-09-27T00:00:00Z'),
+  });
+  const receipt = await runtime.repositoryAudit({ project: { id: 'Conductor', repository: 'pyralisxc/Conductor' } });
+  assert.equal(receipt.status, 'succeeded');
+  if (receipt.status !== 'succeeded') return;
+  assert.equal(receipt.result.github?.repository, 'pyralisxc/Conductor');
+  assert.equal(receipt.result.intelligence.status, 'unavailable');
+  assert.equal(receipt.result.intelligence.audit, null);
+  assert.equal(receipt.result.work.hygiene.unknownKind, 1);
+  assert.equal(receipt.result.findings.some(item => item.code === 'work-item.classification-hygiene'), true);
+});
+
+test('repository audit attaches DI findings as a separate semantic plane', async () => {
+  const workProvider: WorkItemCandidateReadProvider = {
+    id: 'github-work',
+    async getCapabilities() { return []; },
+    async getWorkItemStatus() { throw new Error('unused'); },
+    async listWorkItems() { return { repository: 'pyralisxc/Conductor', items: [], truncated: false }; },
+    async listWorkItemPullRequests() { return []; },
+  };
+  const runtime = new ConductorToolRuntime({
+    providers: [],
+    workItemCandidateProvider: workProvider,
+    repositoryAuditProvider: {
+      id: 'github-audit',
+      async getCapabilities() { return []; },
+      async getRepositoryAudit() {
+        return {
+          provider: 'github' as const, repository: 'pyralisxc/Conductor',
+          topology: { provider: 'github' as const, repository: 'pyralisxc/Conductor', defaultBranch: 'main', defaultHead: 'a'.repeat(40), integrationBranch: 'preview' as const, integrationHead: 'b'.repeat(40), observedAt: '2026-09-27T00:00:00Z' },
+          developmentBranches: { items: [], truncated: false },
+          openPullRequests: { items: [], truncated: false },
+          observedAt: '2026-09-27T00:00:00Z',
+        };
+      },
+    },
+    intelligenceAuditProvider: {
+      id: 'development-intelligence',
+      async getCapabilities() { return []; },
+      async auditRepository() { return { findingSummary: { total: 2 }, findings: [{ category: 'relationship', status: 'candidate' }] }; },
+    },
+  });
+  const receipt = await runtime.repositoryAudit({ project: { id: 'Conductor', repository: 'pyralisxc/Conductor' } });
+  assert.equal(receipt.status, 'succeeded');
+  if (receipt.status !== 'succeeded') return;
+  assert.equal(receipt.result.intelligence.status, 'ready');
+  assert.deepEqual(receipt.result.intelligence.audit, { findingSummary: { total: 2 }, findings: [{ category: 'relationship', status: 'candidate' }] });
+  assert.equal(receipt.result.findings.some(item => item.source === 'development-intelligence'), false);
+});

@@ -392,6 +392,17 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
       creates += 1;
       return { repository: input.project.repository!, branch: input.branch, commitSha: input.fromSha };
     },
+    async bootstrapIntegrationBranch(input) {
+      creates += 1;
+      return {
+        repository: input.project.repository!,
+        branch: input.branch,
+        commitSha: input.fromSha,
+        defaultBranch: 'main',
+        created: true,
+        approvalReference: input.approvalReference,
+      };
+    },
     async deleteBranch(input) {
       creates += 1;
       return { repository: input.project.repository!, branch: input.branch, commitSha: input.expectedHeadSha, deleted: true as const, containedIn: 'preview' };
@@ -412,7 +423,7 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   assert.equal(capabilities.status, 'succeeded');
   if (capabilities.status === 'succeeded') {
     assert.deepEqual(capabilities.result.operations.filter((item) => item.mutates).map((item) => item.name), [
-      'git.branch.create', 'git.branch.delete', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
+      'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create', 'pull-request.create', 'pull-request.comment.create',
       'pull-request.labels.update', 'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
     ]);
   }
@@ -428,6 +439,19 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   assert.equal(replay.idempotency?.replayed, true);
   assert.equal(creates, 1);
 
+  const bootstrapInput = {
+    project: { id: 'cardforge', repository: 'pyralisxc/CardForge' },
+    branch: 'preview' as const,
+    fromSha: 'b'.repeat(40),
+    approvalReference: 'owner-approved:bootstrap-preview',
+    idempotencyKey: 'bootstrap:cardforge:preview',
+  };
+  const bootstrapped = await runtime.bootstrapIntegrationBranch(bootstrapInput);
+  const bootstrapReplay = await runtime.bootstrapIntegrationBranch(bootstrapInput);
+  assert.equal(bootstrapped.status, 'succeeded');
+  assert.equal(bootstrapReplay.idempotency?.replayed, true);
+  assert.equal(creates, 2);
+
   const deleteInput = {
     project: { id: 'cardforge', repository: 'pyralisxc/CardForge' },
     branch: 'work/cf-42',
@@ -438,7 +462,7 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   const deleteReplay = await runtime.deleteBranch(deleteInput);
   assert.equal(deleted.status, 'succeeded');
   assert.equal(deleteReplay.idempotency?.replayed, true);
-  assert.equal(creates, 2);
+  assert.equal(creates, 3);
 });
 
 test('runtime exposes exact source and CI evidence reads without enabling mutations', async () => {

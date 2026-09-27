@@ -1265,3 +1265,136 @@ test('GitHub repository acquisition imports exact bounded tree and preserves pro
   assert.equal(result.codeWorkGranted, false);
   assert.equal(requests.some((request) => request.url.includes('/git/blobs') && request.method === 'POST'), true);
 });
+
+
+test('Development Intelligence repository audit calls audit_repository without changing project authority', async () => {
+  const calls: any[] = [];
+  const provider = new DevelopmentIntelligenceProvider({
+    endpoint: 'https://di.test/mcp',
+    token: 'agent-token',
+    fetch: async (_input, init) => {
+      const request = JSON.parse(String(init?.body ?? '{}'));
+      calls.push(request);
+      return Response.json({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: {
+          isError: false,
+          structuredContent: { project: 'pyralisxc/Conductor', findingSummary: { total: 1 }, findings: [] },
+        },
+      });
+    },
+  });
+  const result = await provider.auditRepository({ id: 'Conductor', repository: 'pyralisxc/Conductor' }, 7);
+  assert.equal((result as any).project, 'pyralisxc/Conductor');
+  assert.equal(calls[0]?.params?.name, 'audit_repository');
+  assert.deepEqual(calls[0]?.params?.arguments, { project: 'pyralisxc/Conductor', limit: 7 });
+});
+
+
+test('GitHub integration bootstrap creates only exact Preview branch from current default head and reconciles same-SHA replay', async () => {
+  const mainSha = 'a'.repeat(40);
+  let previewSha: string | null = null;
+  let createCalls = 0;
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/repos/pyralisxc/ASC') {
+        return Response.json({ full_name: 'pyralisxc/ASC', default_branch: 'main' });
+      }
+      if (url.pathname === '/repos/pyralisxc/ASC/git/ref/heads/main') {
+        return Response.json({ object: { sha: mainSha } });
+      }
+      if (url.pathname === '/repos/pyralisxc/ASC/git/ref/heads/preview') {
+        return previewSha
+          ? Response.json({ object: { sha: previewSha } })
+          : Response.json({ message: 'Not Found' }, { status: 404 });
+      }
+      if (url.pathname === '/repos/pyralisxc/ASC/git/ref/heads/vercel-preview') {
+        return Response.json({ message: 'Not Found' }, { status: 404 });
+      }
+      if (url.pathname === '/repos/pyralisxc/ASC/git/refs' && method === 'POST') {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        createCalls += 1;
+        previewSha = body.sha;
+        return Response.json({ object: { sha: body.sha } });
+      }
+      return Response.json({ message: 'unexpected' }, { status: 404 });
+    },
+  });
+
+  const input = {
+    project: { id: 'ASC', repository: 'pyralisxc/ASC' },
+    branch: 'preview' as const,
+    fromSha: mainSha,
+    approvalReference: 'owner-approved:bootstrap-preview',
+    idempotencyKey: 'bootstrap-preview-asc',
+  };
+  const created = await provider.bootstrapIntegrationBranch(input);
+  const reconciled = await provider.bootstrapIntegrationBranch({ ...input, idempotencyKey: 'bootstrap-preview-asc-again' });
+  assert.equal(created.created, true);
+  assert.equal(reconciled.created, false);
+  assert.equal(created.commitSha, mainSha);
+  assert.equal(reconciled.commitSha, mainSha);
+  assert.equal(createCalls, 1);
+
+  await assert.rejects(
+    provider.bootstrapIntegrationBranch({ ...input, branch: 'release' as any }),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /exactly preview or vercel-preview/.test(error.message),
+  );
+  await assert.rejects(
+    provider.bootstrapIntegrationBranch({ ...input, fromSha: 'b'.repeat(40) }),
+    (error: any) => error?.code === 'CONFLICT' && /stale/.test(error.message),
+  );
+});
+
+test('GitHub integration bootstrap refuses conflicting existing or sibling integration branches', async () => {
+  const mainSha = 'a'.repeat(40);
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/repos/pyralisxc/ASC') return Response.json({ full_name: 'pyralisxc/ASC', default_branch: 'main' });
+      if (url.pathname.endsWith('/git/ref/heads/main')) return Response.json({ object: { sha: mainSha } });
+      if (url.pathname.endsWith('/git/ref/heads/preview')) return Response.json({ object: { sha: 'b'.repeat(40) } });
+      if (url.pathname.endsWith('/git/ref/heads/vercel-preview')) return Response.json({ message: 'Not Found' }, { status: 404 });
+      return Response.json({ message: 'unexpected' }, { status: 404 });
+    },
+  });
+  await assert.rejects(
+    provider.bootstrapIntegrationBranch({
+      project: { id: 'ASC', repository: 'pyralisxc/ASC' },
+      branch: 'preview',
+      fromSha: mainSha,
+      approvalReference: 'owner-approved:bootstrap-preview',
+      idempotencyKey: 'bootstrap-preview-conflict',
+    }),
+    (error: any) => error?.code === 'CONFLICT' && /already exists/.test(error.message),
+  );
+});

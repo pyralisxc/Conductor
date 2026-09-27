@@ -50,12 +50,13 @@ export function createRuntimeFromEnvironment(
     ),
     parseVercelRuntimeLogBindingOverlay(environment.CONDUCTOR_VERCEL_RUNTIME_LOG_BINDINGS_JSON),
   );
-  const providers: ToolRuntimeProvider[] = [environment.DEVINT_MCP_URL
+  const intelligenceProvider = environment.DEVINT_MCP_URL
     ? new DevelopmentIntelligenceProvider({
       endpoint: environment.DEVINT_MCP_URL,
       token: environment.DEVINT_AGENT_TOKEN,
     })
-    : new UnavailableDevelopmentIntelligenceProvider()];
+    : new UnavailableDevelopmentIntelligenceProvider();
+  const providers: ToolRuntimeProvider[] = [intelligenceProvider];
   const githubBindings = bindings.flatMap((binding) => binding.repository
     ? [{ id: binding.id, repository: binding.repository, write: binding.githubWrite }]
     : []);
@@ -103,7 +104,7 @@ export function createRuntimeFromEnvironment(
   }
 
   const sourceControlMutationsEnabled = environment.CONDUCTOR_ENABLE_GITHUB_MUTATIONS === '1';
-  if (!sourceControlMutationsEnabled) return new ConductorToolRuntime({ providers, repositoryAcquisitionProvider: githubProvider, repositoryBootstrapProvider: githubProvider, projectResolver: githubProvider, pullRequestProvider: githubProvider, sourceArtifactProvider: githubProvider, ciReadProvider: githubProvider, workItemProvider: githubProvider, workItemCandidateProvider: githubProvider, deploymentProvider: vercelProvider });
+  if (!sourceControlMutationsEnabled) return new ConductorToolRuntime({ providers, repositoryAcquisitionProvider: githubProvider, repositoryBootstrapProvider: githubProvider, repositoryAuditProvider: githubProvider, intelligenceAuditProvider: intelligenceProvider, projectResolver: githubProvider, pullRequestProvider: githubProvider, sourceArtifactProvider: githubProvider, ciReadProvider: githubProvider, workItemProvider: githubProvider, workItemCandidateProvider: githubProvider, deploymentProvider: vercelProvider });
   if (!githubProvider || (!environment.GITHUB_TOKEN && !githubApp)) {
     throw new Error('GitHub mutations require an authorized owner/project and GitHub authentication');
   }
@@ -114,6 +115,8 @@ export function createRuntimeFromEnvironment(
     providers,
     repositoryAcquisitionProvider: githubProvider,
     repositoryBootstrapProvider: githubProvider,
+    repositoryAuditProvider: githubProvider,
+    intelligenceAuditProvider: intelligenceProvider,
     sourceControlMutationProvider: githubProvider,
     mutationExecutor: new IdempotentMutationExecutor({
       store: new RedisIdempotencyStore({ url: redisUrl, token: redisToken }),
