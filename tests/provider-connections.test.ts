@@ -107,7 +107,10 @@ test('one shared Vercel runtime credential serves multiple exact project binding
       if (url.pathname === '/v9/projects/prj_b') return Response.json({ id: 'prj_b', name: 'b', link: { type: 'github', org: 'owner', repo: 'b' } });
       if (url.pathname === '/v13/deployments/dpl_a') return Response.json({ id: 'dpl_a', projectId: 'prj_a', target: 'preview', meta: { githubCommitSha: 'a'.repeat(40), githubCommitRef: 'preview', githubCommitRepo: 'owner/a' } });
       if (url.pathname === '/v13/deployments/dpl_b') return Response.json({ id: 'dpl_b', projectId: 'prj_b', target: 'production', meta: { githubCommitSha: 'b'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/b' } });
-      if (url.pathname.includes('/runtime-logs')) return new Response('{"message":"TOKEN=hidden","created":1}\n', { status: 200 });
+      if (url.pathname === '/api/logs/request-logs') {
+        const deploymentId = url.searchParams.get('deploymentId') ?? '';
+        return Response.json({ rows: [{ requestId: `req_${deploymentId}`, timestamp: '2026-09-27T00:00:00.000Z', deploymentId, requestMethod: 'GET', requestPath: '/api/test', statusCode: 200, logs: [{ level: 'info', message: 'TOKEN=hidden' }], events: [{ source: 'serverless' }] }], hasMoreRows: false });
+      }
       return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
     },
   });
@@ -119,8 +122,7 @@ test('one shared Vercel runtime credential serves multiple exact project binding
   }
   assert.equal(authorization.get('/v9/projects/prj_a'), 'Bearer installation-a');
   assert.equal(authorization.get('/v9/projects/prj_b'), 'Bearer installation-b');
-  assert.equal(authorization.get('/v1/projects/prj_a/deployments/dpl_a/runtime-logs'), 'Bearer runtime-direct-token');
-  assert.equal(authorization.get('/v1/projects/prj_b/deployments/dpl_b/runtime-logs'), 'Bearer runtime-direct-token');
+  assert.equal(authorization.get('/api/logs/request-logs'), 'Bearer runtime-direct-token');
   runtimeConnected = false;
   assert.equal((await provider.preflightOperation({ id: 'a', repository: 'owner/a' }, 'deployment.runtime-logs'))?.[0]?.status, 'unavailable');
 });
