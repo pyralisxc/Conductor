@@ -6,13 +6,13 @@ import type {
   ProjectReference,
   RuntimeOperationName,
 } from '../runtime/types.js';
-import type { OperationPreflightProvider, ProjectPreflightProvider } from './runtime.js';
+import type { OperationPreflightProvider, ProjectPreflightProvider, RepositorySemanticAuditProvider } from './runtime.js';
 
 /**
  * Truthful placeholder used until a deployed Development Intelligence API
  * adapter is configured. It never converts missing integration into evidence.
  */
-export class UnavailableDevelopmentIntelligenceProvider implements ProjectPreflightProvider, OperationPreflightProvider {
+export class UnavailableDevelopmentIntelligenceProvider implements ProjectPreflightProvider, OperationPreflightProvider, RepositorySemanticAuditProvider {
   readonly id = 'development-intelligence';
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
@@ -36,8 +36,12 @@ export class UnavailableDevelopmentIntelligenceProvider implements ProjectPrefli
     project: ProjectReference,
     operation: RuntimeOperationName,
   ): Promise<OperationPreflightCheck[] | undefined> {
-    if (operation !== 'development.status') return undefined;
+    if (!['development.status', 'repository.audit'].includes(operation)) return undefined;
     return operationChecks(await this.preflightProject(project));
+  }
+
+  async auditRepository(_project: ProjectReference, _limit = 12): Promise<Record<string, unknown>> {
+    throw { code: 'TOOL_UNAVAILABLE', message: 'No deployed Development Intelligence adapter is configured' };
   }
 
   async preflightProject(_project: ProjectReference): Promise<PreflightCheck[]> {
@@ -71,7 +75,7 @@ export interface DevelopmentIntelligenceProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export class DevelopmentIntelligenceProvider implements ProjectPreflightProvider, OperationPreflightProvider {
+export class DevelopmentIntelligenceProvider implements ProjectPreflightProvider, OperationPreflightProvider, RepositorySemanticAuditProvider {
   readonly id = 'development-intelligence';
   private readonly endpoint: string;
   private readonly token?: string;
@@ -110,8 +114,27 @@ export class DevelopmentIntelligenceProvider implements ProjectPreflightProvider
     project: ProjectReference,
     operation: RuntimeOperationName,
   ): Promise<OperationPreflightCheck[] | undefined> {
-    if (operation !== 'development.status') return undefined;
+    if (!['development.status', 'repository.audit'].includes(operation)) return undefined;
     return operationChecks(await this.preflightProject(project));
+  }
+
+  async auditRepository(project: ProjectReference, limit = 12): Promise<Record<string, unknown>> {
+    if (!this.token) throw { code: 'AUTH_REQUIRED', message: 'Development Intelligence authentication is not configured' };
+    const projectIdentity = project.repository ?? project.id;
+    const response = await this.rpc('tools/call', {
+      name: 'audit_repository',
+      arguments: { project: projectIdentity, limit: Math.min(Math.max(Math.trunc(limit), 1), 25) },
+    });
+    const result = response.result as DevelopmentIntelligenceRpcResponse['result'];
+    if (result?.isError) {
+      const message = result.content?.find((item) => item.type === 'text')?.text
+        ?? `Development Intelligence rejected audit_repository for ${projectIdentity}`;
+      throw { code: 'TOOL_UNAVAILABLE', message };
+    }
+    if (!result?.structuredContent) {
+      throw { code: 'TOOL_UNAVAILABLE', message: `Development Intelligence returned no audit result for ${projectIdentity}` };
+    }
+    return result.structuredContent;
   }
 
   async preflightProject(project: ProjectReference): Promise<PreflightCheck[]> {

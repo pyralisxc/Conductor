@@ -5,6 +5,8 @@ import {
   type ToolRuntimeProvider,
   type RepositoryAcquisitionProvider,
   type RepositoryBootstrapReadProvider,
+  type RepositoryAuditReadProvider,
+  type RepositorySemanticAuditProvider,
   type SourceControlMutationProvider,
   type ProjectReferenceResolver,
   type PullRequestReadProvider,
@@ -40,6 +42,9 @@ import {
   type OperationPreflightCheck,
   type GetWorkBootstrapInput,
   type WorkBootstrapProjection,
+  type GetRepositoryAuditInput,
+  type RepositoryAuditProjection,
+  type RepositoryAuditFinding,
   type GetDevelopmentStatusInput,
   type DevelopmentStatusProjection,
   type DevelopmentStatusWorkCounts,
@@ -113,6 +118,12 @@ const REPOSITORY_ACQUISITION_MUTATION_DEFINITION: ToolDefinition = {
 const WORK_BOOTSTRAP_READ_DEFINITION: ToolDefinition = {
   name: 'work.bootstrap',
   description: 'Return one compact client-bound development bootstrap snapshot with catalog freshness, repository topology, work/preflight state, DI posture, and deployment posture.',
+  mutates: false,
+};
+
+const REPOSITORY_AUDIT_READ_DEFINITION: ToolDefinition = {
+  name: 'repository.audit',
+  description: 'Return one bounded read-only provider-facts audit for repository topology, active PR/check state, durable-work hygiene, provider posture, deployment state, and optional separate Development Intelligence semantic findings.',
   mutates: false,
 };
 
@@ -215,6 +226,8 @@ export interface ConductorToolRuntimeOptions {
   createOperationId?: () => string;
   repositoryAcquisitionProvider?: RepositoryAcquisitionProvider;
   repositoryBootstrapProvider?: RepositoryBootstrapReadProvider;
+  repositoryAuditProvider?: RepositoryAuditReadProvider;
+  intelligenceAuditProvider?: RepositorySemanticAuditProvider;
   sourceControlMutationProvider?: SourceControlMutationProvider;
   mutationExecutor?: IdempotentMutationExecutor;
   projectResolver?: ProjectReferenceResolver;
@@ -235,6 +248,8 @@ export class ConductorToolRuntime {
   private readonly createOperationId: () => string;
   private readonly repositoryAcquisitionProvider?: RepositoryAcquisitionProvider;
   private readonly repositoryBootstrapProvider?: RepositoryBootstrapReadProvider;
+  private readonly repositoryAuditProvider?: RepositoryAuditReadProvider;
+  private readonly intelligenceAuditProvider?: RepositorySemanticAuditProvider;
   private readonly sourceControlMutationProvider?: SourceControlMutationProvider;
   private readonly mutationExecutor?: IdempotentMutationExecutor;
   private readonly projectResolver?: ProjectReferenceResolver;
@@ -252,6 +267,8 @@ export class ConductorToolRuntime {
       options.createOperationId ?? (() => randomUUID());
     this.repositoryAcquisitionProvider = options.repositoryAcquisitionProvider;
     this.repositoryBootstrapProvider = options.repositoryBootstrapProvider;
+    this.repositoryAuditProvider = options.repositoryAuditProvider;
+    this.intelligenceAuditProvider = options.intelligenceAuditProvider;
     this.sourceControlMutationProvider = options.sourceControlMutationProvider;
     this.mutationExecutor = options.mutationExecutor;
     this.projectResolver = options.projectResolver;
@@ -288,6 +305,10 @@ export class ConductorToolRuntime {
 
   get operationPreflightEnabled(): boolean {
     return this.providers.some((provider) => supportsOperationPreflight(provider));
+  }
+
+  get repositoryAuditReadEnabled(): boolean {
+    return Boolean(this.repositoryAuditProvider && this.workItemProvider);
   }
 
   get developmentStatusReadEnabled(): boolean {
@@ -558,6 +579,201 @@ export class ConductorToolRuntime {
               message: 'The connected client catalog digest differs from the current runtime; refresh/reconnect the client before treating absent tools as unavailable.',
             }] : []),
           ],
+        };
+      },
+    );
+  }
+
+
+  async repositoryAudit(input: GetRepositoryAuditInput): Promise<ExecutionReceipt<RepositoryAuditProjection>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    const limit = Math.min(Math.max(Math.trunc(input.limit ?? 12), 1), 20);
+    return await this.executeRead(
+      'repository.audit',
+      { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
+      async () => {
+        const tasks = await Promise.allSettled([
+          this.preflightProject(resolvedProject, 'inspect'),
+          this.repositoryAuditProvider!.getRepositoryAudit({ project: resolvedProject, limit }),
+          this.workItemProvider!.listWorkItems({ project: resolvedProject, limit: 100 }),
+          this.deploymentProvider
+            ? this.deploymentProvider.getDeploymentStatus({ project: resolvedProject, limit: Math.min(limit, 10) })
+            : Promise.reject({ code: 'TOOL_UNAVAILABLE', message: 'Deployment provider is not configured' }),
+          this.deploymentProvider
+            ? this.deploymentProvider.getAudit({ project: resolvedProject })
+            : Promise.reject({ code: 'TOOL_UNAVAILABLE', message: 'Deployment audit provider is not configured' }),
+          this.intelligenceAuditProvider
+            ? this.intelligenceAuditProvider.auditRepository(resolvedProject, limit)
+            : Promise.reject({ code: 'TOOL_UNAVAILABLE', message: 'Development Intelligence semantic audit is not configured' }),
+        ]);
+
+        const [preflightSettled, githubSettled, workSettled, deploymentStatusSettled, deploymentAuditSettled, intelligenceSettled] = tasks;
+        if (preflightSettled.status === 'rejected') throw preflightSettled.reason;
+        const preflightReceipt = preflightSettled.value;
+        if (preflightReceipt.status === 'failed') throw preflightReceipt.error;
+        const preflight = preflightReceipt.result;
+
+        const githubAudit = githubSettled.status === 'fulfilled' ? githubSettled.value : null;
+        const workList = workSettled.status === 'fulfilled'
+          ? workSettled.value
+          : { repository: resolvedProject.repository ?? resolvedProject.id, items: [], truncated: false };
+        const counts: DevelopmentStatusWorkCounts = {
+          backlog: 0, ready: 0, inProgress: 0, blocked: 0, review: 0, done: 0, unknown: 0,
+        };
+        for (const item of workList.items) {
+          if (item.status === 'in-progress') counts.inProgress += 1;
+          else counts[item.status] += 1;
+        }
+        const unknownItems = workList.items.filter((item) =>
+          item.status === 'unknown' || item.kind === 'unknown' || item.origin === 'unknown'
+        );
+        const hygiene = {
+          unknownStatus: workList.items.filter((item) => item.status === 'unknown').length,
+          unknownKind: workList.items.filter((item) => item.kind === 'unknown').length,
+          unknownOrigin: workList.items.filter((item) => item.origin === 'unknown').length,
+          sampleIssueNumbers: unknownItems.slice(0, 10).map((item) => item.issueNumber),
+        };
+
+        const findings: RepositoryAuditFinding[] = [];
+        for (const check of preflight.checks) {
+          if (check.status === 'ready') continue;
+          findings.push({
+            code: `capability.${check.check}`,
+            source: check.provider,
+            category: 'capability',
+            state: check.status === 'blocked' ? 'blocked' : check.status === 'unavailable' ? 'unavailable' : 'attention',
+            basis: 'provider-native',
+            summary: check.summary,
+            evidence: { check: check.check, status: check.status },
+          });
+        }
+
+        if (githubAudit) {
+          if (!githubAudit.topology.integrationBranch) {
+            findings.push({
+              code: 'topology.integration-branch-missing',
+              source: 'github',
+              category: 'topology',
+              state: 'attention',
+              basis: 'provider-native',
+              summary: 'No Preview integration branch is present in the repository topology.',
+              evidence: { defaultBranch: githubAudit.topology.defaultBranch },
+            });
+          }
+          for (const pull of githubAudit.openPullRequests.items) {
+            if (['verification-failed', 'action-required', 'merge-blocked'].includes(pull.orchestration.state)) {
+              findings.push({
+                code: 'pull-request.actionable',
+                source: 'github',
+                category: 'pull-request',
+                state: 'attention',
+                basis: 'conductor-derived',
+                summary: `PR #${pull.pullRequestNumber} requires attention: ${pull.orchestration.summary}`,
+                evidence: {
+                  pullRequestNumber: pull.pullRequestNumber,
+                  orchestrationState: pull.orchestration.state,
+                  failedChecks: pull.checks.failed,
+                },
+              });
+            }
+          }
+          const detached = githubAudit.developmentBranches.items.filter((branch) => !branch.hasOpenPullRequest);
+          if (detached.length) {
+            findings.push({
+              code: 'topology.development-branches-without-open-pr',
+              source: 'github',
+              category: 'topology',
+              state: 'observed',
+              basis: 'provider-native',
+              summary: `${detached.length} sampled development branch(es) have no open pull request.`,
+              evidence: { count: detached.length, truncated: githubAudit.developmentBranches.truncated },
+            });
+          }
+        } else {
+          const normalized = normalizeToolError(
+            githubSettled.status === 'rejected' ? githubSettled.reason : {},
+            'TOOL_UNAVAILABLE',
+            'github',
+          );
+          findings.push({
+            code: 'github.audit-unavailable',
+            source: 'github',
+            category: 'capability',
+            state: 'unavailable',
+            basis: 'provider-native',
+            summary: normalized.message,
+            evidence: {},
+          });
+        }
+
+        if (hygiene.unknownStatus || hygiene.unknownKind || hygiene.unknownOrigin) {
+          findings.push({
+            code: 'work-item.classification-hygiene',
+            source: 'github',
+            category: 'work-item',
+            state: 'attention',
+            basis: 'conductor-derived',
+            summary: 'One or more durable work items have unknown/conflicting normalized lifecycle or classification.',
+            evidence: {
+              unknownStatus: hygiene.unknownStatus,
+              unknownKind: hygiene.unknownKind,
+              unknownOrigin: hygiene.unknownOrigin,
+            },
+          });
+        }
+
+        const deploymentProject = deploymentStatusSettled.status === 'fulfilled' ? deploymentStatusSettled.value : null;
+        const deploymentAudit = deploymentAuditSettled.status === 'fulfilled' ? deploymentAuditSettled.value : null;
+        if (deploymentProject?.production && deploymentProject.production.state !== 'READY') {
+          findings.push({
+            code: 'deployment.production-not-ready',
+            source: 'vercel',
+            category: 'deployment',
+            state: 'attention',
+            basis: 'provider-native',
+            summary: `Current production deployment state is ${deploymentProject.production.state ?? 'unknown'}.`,
+            evidence: {
+              deploymentId: deploymentProject.production.id,
+              state: deploymentProject.production.state,
+            },
+          });
+        }
+
+        const intelligenceAudit = intelligenceSettled.status === 'fulfilled' ? intelligenceSettled.value : null;
+        let intelligenceStatus: RepositoryAuditProjection['intelligence']['status'] = intelligenceAudit ? 'ready' : 'unavailable';
+        let intelligenceSummary = intelligenceAudit
+          ? 'Development Intelligence semantic audit is available as a separate evidence plane.'
+          : 'Development Intelligence semantic audit is unavailable; provider-facts audit remains valid.';
+        if (!intelligenceAudit) {
+          const check = preflight.checks.find((item) => item.check === 'development-intelligence.read');
+          if (check?.status === 'degraded') intelligenceStatus = 'degraded';
+          if (check?.summary) intelligenceSummary = check.summary;
+        }
+
+        return {
+          result: {
+            contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+            project: resolvedProject,
+            preflight,
+            github: githubAudit,
+            work: { counts, hygiene, truncated: workList.truncated },
+            deployment: {
+              status: deploymentProject || deploymentAudit ? 'ready' : 'unavailable',
+              project: deploymentProject,
+              audit: deploymentAudit,
+              summary: deploymentProject || deploymentAudit
+                ? 'Deployment/provider posture was read from the configured Vercel adapter.'
+                : 'No deployment/provider audit evidence is available for this project.',
+            },
+            intelligence: {
+              status: intelligenceStatus,
+              audit: intelligenceAudit,
+              summary: intelligenceSummary,
+            },
+            findings,
+            observedAt: this.now().toISOString(),
+          },
+          diagnostics: [],
         };
       },
     );
@@ -928,6 +1144,7 @@ export class ConductorToolRuntime {
       ...(this.repositoryAcquisitionReadEnabled ? [REPOSITORY_ACQUISITION_PREFLIGHT_DEFINITION] : []),
       ...(this.repositoryAcquisitionMutationEnabled ? [REPOSITORY_ACQUISITION_MUTATION_DEFINITION] : []),
       ...(this.workBootstrapReadEnabled ? [WORK_BOOTSTRAP_READ_DEFINITION] : []),
+      ...(this.repositoryAuditReadEnabled ? [REPOSITORY_AUDIT_READ_DEFINITION] : []),
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
       ...(this.sourceArtifactReadEnabled ? [EXECUTION_EVIDENCE_READ_DEFINITIONS[0]!] : []),

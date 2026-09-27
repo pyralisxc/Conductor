@@ -223,3 +223,45 @@ test('runtime and MCP expose human-directed work routing and classification', as
   await client.close();
   await server.close();
 });
+
+
+test('audit is a first-class work kind and preserves unrelated labels', async () => {
+  let labels = ['customer-visible'];
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      if (url.pathname.endsWith('/issues/44') && method === 'GET') {
+        return Response.json({
+          number: 44,
+          html_url: 'https://github.test/issues/44',
+          title: 'Audit repository health',
+          body: '',
+          state: 'open',
+          labels: labels.map(name => ({ name })),
+          created_at: '2026-09-27T00:00:00Z',
+          updated_at: '2026-09-27T00:00:00Z',
+        });
+      }
+      if (url.pathname.endsWith('/issues/44/labels') && method === 'PUT') {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        labels = body.labels;
+        return Response.json(labels.map(name => ({ name })));
+      }
+      if (url.pathname.endsWith('/labels/kind%3Aaudit') && method === 'GET') return Response.json({ name: 'kind:audit' });
+      if (url.pathname.endsWith('/labels') && method === 'POST') return Response.json({ name: 'kind:audit' });
+      throw new Error(`Unexpected request ${method} ${url.pathname}`);
+    },
+  });
+  const updated = await provider.updateWorkItemClassification({
+    project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+    issueNumber: 44,
+    kind: 'audit',
+    idempotencyKey: 'audit-kind-test',
+  });
+  assert.equal(updated.kind, 'audit');
+  assert.equal(updated.labels.includes('customer-visible'), true);
+  assert.equal(updated.labels.includes('kind:audit'), true);
+});

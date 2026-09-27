@@ -36,6 +36,8 @@ import type {
   AcquireRepositoryInput,
   RepositoryAcquisitionResult,
   RepositoryBootstrapTopology,
+  RepositoryProviderAudit,
+  GetRepositoryAuditInput,
   GetDeploymentStatusInput,
   GetDeploymentLogsInput,
   DeploymentProjectStatus,
@@ -66,6 +68,14 @@ export interface ProjectReferenceResolver {
 
 export interface RepositoryBootstrapReadProvider extends RuntimeCapabilityProvider {
   getRepositoryBootstrap(project: ProjectReference): Promise<RepositoryBootstrapTopology>;
+}
+
+export interface RepositoryAuditReadProvider extends RuntimeCapabilityProvider {
+  getRepositoryAudit(input: GetRepositoryAuditInput): Promise<RepositoryProviderAudit>;
+}
+
+export interface RepositorySemanticAuditProvider extends RuntimeCapabilityProvider {
+  auditRepository(project: ProjectReference, limit?: number): Promise<Record<string, unknown>>;
 }
 
 export interface PullRequestReadProvider extends RuntimeCapabilityProvider {

@@ -1265,3 +1265,28 @@ test('GitHub repository acquisition imports exact bounded tree and preserves pro
   assert.equal(result.codeWorkGranted, false);
   assert.equal(requests.some((request) => request.url.includes('/git/blobs') && request.method === 'POST'), true);
 });
+
+
+test('Development Intelligence repository audit calls audit_repository without changing project authority', async () => {
+  const calls: any[] = [];
+  const provider = new DevelopmentIntelligenceProvider({
+    endpoint: 'https://di.test/mcp',
+    token: 'agent-token',
+    fetch: async (_input, init) => {
+      const request = JSON.parse(String(init?.body ?? '{}'));
+      calls.push(request);
+      return Response.json({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: {
+          isError: false,
+          structuredContent: { project: 'pyralisxc/Conductor', findingSummary: { total: 1 }, findings: [] },
+        },
+      });
+    },
+  });
+  const result = await provider.auditRepository({ id: 'Conductor', repository: 'pyralisxc/Conductor' }, 7);
+  assert.equal((result as any).project, 'pyralisxc/Conductor');
+  assert.equal(calls[0]?.params?.name, 'audit_repository');
+  assert.deepEqual(calls[0]?.params?.arguments, { project: 'pyralisxc/Conductor', limit: 7 });
+});
