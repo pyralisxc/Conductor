@@ -235,3 +235,36 @@ test('MCP exposes preflight_operation when an operation-evidence provider is con
   await client.close();
   await server.close();
 });
+
+
+test('integration bootstrap operation preflight is exposed separately from ordinary work branch creation', async () => {
+  const github = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+  });
+  const runtime = new ConductorToolRuntime({
+    providers: [github],
+    projectResolver: github,
+    sourceControlMutationProvider: github,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const receipt = await runtime.preflightOperation({
+    project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+    operation: 'git.integration.bootstrap',
+  });
+  assert.equal(receipt.status, 'succeeded');
+  if (receipt.status !== 'succeeded') return;
+  assert.equal(receipt.result.exposed, true);
+  assert.equal(receipt.result.checks.some(check => check.provider === 'github' && check.status === 'ready'), true);
+});
