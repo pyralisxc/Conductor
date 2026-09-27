@@ -48,6 +48,7 @@ import type {
   RepositoryAcquisitionPreflight,
   AcquireRepositoryInput,
   RepositoryAcquisitionResult,
+  RepositoryBootstrapTopology,
 } from '../runtime/types.js';
 import { normalizeToolError } from '../runtime/errors.js';
 import type { OperationPreflightProvider, RepositoryAcquisitionProvider, SourceControlMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';

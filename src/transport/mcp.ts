@@ -5,7 +5,7 @@ import { CONDUCTOR_WRITE_SCOPE } from './auth.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { ProjectReference } from '../runtime/types.js';
 import type { WorkAction, WorkScopeAuthorizer } from './work-scope.js';
-import { clientFingerprint } from './work-scope.js';
+import { clientFingerprint, issueBootstrapEvidence } from './work-scope.js';
 
 const diagnosticSchema = z.object({
   level: z.enum(['info', 'warning', 'error']),
@@ -221,7 +221,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
   });
 
 
-  if (runtime.workBootstrapReadEnabled) {
+  const bootstrapWorkScope = workScope;
+  if (runtime.workBootstrapReadEnabled && bootstrapWorkScope) {
     server.registerTool('work.bootstrap', {
       title: 'Bootstrap one development conversation',
       description: 'Use at the start/resume of a development conversation. In one call it establishes the exact active repository work context and returns compact Main/Preview topology, active work/preflight, DI posture, deployment posture, and server catalog freshness. Echo a previously observed catalogDigest as clientCatalogDigest; stale-client-schema means refresh/reconnect before treating absent tools as unavailable.',
@@ -239,8 +240,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       if (!clientId) throw new Error('Authenticated client identity is required');
       const project = runtime.resolveProjectReference(input.project);
       const repository = project.repository ?? project.id;
-      const workContext = workScope.begin(clientId, repository);
-      const ownerScope = await workScope.describe(clientId);
+      const workContext = bootstrapWorkScope.begin(clientId, repository);
+      const ownerScope = await bootstrapWorkScope.describe(clientId);
       const receipt = await runtime.workBootstrap({ ...input, project });
       if (receipt.status === 'succeeded') {
         const evidence = issueBootstrapEvidence(clientId, {
