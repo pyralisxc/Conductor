@@ -44,6 +44,17 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
       id: 'github',
       async getCapabilities() { return []; },
       async createBranch(input) { providerCalls++; return { repository: input.project.repository!, branch: input.branch, commitSha: input.fromSha }; },
+      async bootstrapIntegrationBranch(input) {
+        providerCalls++;
+        return {
+          repository: input.project.repository!,
+          branch: input.branch,
+          commitSha: input.fromSha,
+          defaultBranch: 'main',
+          created: true,
+          approvalReference: input.approvalReference,
+        };
+      },
       async deleteBranch(input) { providerCalls++; return { repository: input.project.repository!, branch: input.branch, commitSha: input.expectedHeadSha, deleted: true as const, containedIn: 'preview' }; },
       async createCommit() { throw new Error('unused'); },
       async createPullRequest() { throw new Error('unused'); },
