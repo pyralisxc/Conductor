@@ -31,9 +31,9 @@ interface VercelDeploymentProviderOptions {
   runtimeConnectionId?: string;
   bindings: VercelProjectBinding[];
   apiBaseUrl?: string;
+  logsBaseUrl?: string;
   fetch?: typeof globalThis.fetch;
   now?: () => Date;
-  runtimeLogIdleMs?: number;
   runtimeLogTotalMs?: number;
 }
 
@@ -47,9 +47,9 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   private readonly runtimeConnectionId?: string;
   private readonly bindings: ReadonlyMap<string, VercelProjectBinding>;
   private readonly apiBaseUrl: string;
+  private readonly logsBaseUrl: string;
   private readonly fetch: typeof globalThis.fetch;
   private readonly now: () => Date;
-  private readonly runtimeLogIdleMs: number;
   private readonly runtimeLogTotalMs: number;
 
   constructor(options: VercelDeploymentProviderOptions) {
@@ -59,10 +59,10 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     this.runtimeConnectionId = options.runtimeConnectionId?.trim() || undefined;
     this.bindings = new Map(options.bindings.map(binding => [binding.id, { ...binding }]));
     this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.vercel.com').replace(/\/$/u, '');
+    this.logsBaseUrl = (options.logsBaseUrl ?? (this.apiBaseUrl === 'https://api.vercel.com' ? 'https://vercel.com' : this.apiBaseUrl)).replace(/\/$/u, '');
     this.fetch = options.fetch ?? globalThis.fetch;
     this.now = options.now ?? (() => new Date());
-    this.runtimeLogIdleMs = clamp(options.runtimeLogIdleMs ?? 1_500, 10, 10_000);
-    this.runtimeLogTotalMs = clamp(options.runtimeLogTotalMs ?? 5_000, this.runtimeLogIdleMs, 20_000);
+    this.runtimeLogTotalMs = clamp(options.runtimeLogTotalMs ?? 8_000, 1_000, 20_000);
   }
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
@@ -115,11 +115,11 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
         summary: `Vercel project ${resolved.name} (${resolved.id}) is ${explicit ? 'bound' : 'uniquely linked for read access'} for ${operation}`,
         diagnostics: [{ level: 'info', source: 'vercel', message: operation === 'deployment.runtime-logs'
           ? runtimeRoute === 'shared-connection'
-            ? 'Project identity remains verified through the bound installation; runtime-log reads use the shared owner runtime connection and remain unverified until one exact deployment read succeeds.'
+            ? 'Project identity remains verified through the bound installation; runtime request-log reads use the shared owner connection and remain unverified until one exact deployment read succeeds.'
             : runtimeRoute === 'legacy-direct'
               ? 'Project identity remains verified through the bound installation; runtime-log reads use the legacy direct token compatibility path and remain unverified until one exact deployment read succeeds.'
               : runtimeRoute === 'direct-primary'
-                ? 'Project read uses a direct Vercel token; runtime-log endpoint access is unverified until one exact deployment read succeeds.'
+                ? 'Project read uses a direct Vercel token; runtime request-log access is unverified until one exact deployment read succeeds.'
                 : 'Vercel Integration API installation tokens do not authorize the documented runtime-log endpoint. Connect owner runtime-log access once in Conductor; deployment.logs remains available.'
           : environmentOperation
             ? operation === 'deployment.env.list'
@@ -518,53 +518,93 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     const bound = await this.exactDeployment(input.project, input.deploymentId, true);
     const runtimeRoute = await this.runtimeCredentialRoute(bound.binding);
     if (runtimeRoute === 'none') {
-      throw { code: 'TOOL_UNAVAILABLE', source: 'vercel', message: 'Vercel Integration API installation tokens do not authorize the runtime-log endpoint; deployment.logs remains available. Connect owner runtime-log access once in Conductor to use deployment.runtime-logs.' };
+      throw { code: 'TOOL_UNAVAILABLE', source: 'vercel', message: 'Vercel Integration API installation tokens do not authorize runtime request-log reads; deployment.logs remains available. Connect owner runtime-log access once in Conductor to use deployment.runtime-logs.' };
     }
+
     const limit = clamp(input.limit ?? 50, 1, 100);
+    const token = await this.runtimeTokenValue(bound.binding);
+    let ownerId = bound.binding.teamId;
+    if (!ownerId) {
+      const accountResponse = await this.fetch(`${this.apiBaseUrl}/v2/user`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'User-Agent': 'Conductor-Tool-Runtime' },
+      });
+      if (!accountResponse.ok) throw { status: accountResponse.status, source: 'vercel', message: 'Vercel owner identity is unavailable for runtime request-log reads' };
+      const accountPayload = await accountResponse.json().catch(() => null) as JsonRecord | null;
+      const user = accountPayload ? (recordField(accountPayload, 'user') ?? accountPayload) : null;
+      ownerId = user ? stringField(user, 'id') ?? undefined : undefined;
+      if (!ownerId) throw { code: 'NOT_FOUND', source: 'vercel', message: 'Vercel owner identity is unavailable for runtime request-log reads' };
+    }
+
+    const deployment = normalizeDeployment(bound.detail);
+    const nowMs = this.now().getTime();
+    const retentionStart = nowMs - 72 * 60 * 60 * 1_000;
+    const deploymentStart = deployment?.createdAt ? Date.parse(deployment.createdAt) : Number.NaN;
+    const startDate = Number.isFinite(deploymentStart) ? Math.max(retentionStart, deploymentStart) : retentionStart;
+
+    const url = new URL(`${this.logsBaseUrl}/api/logs/request-logs`);
+    url.searchParams.set('projectId', bound.id);
+    url.searchParams.set('ownerId', ownerId);
+    url.searchParams.set('deploymentId', input.deploymentId);
+    url.searchParams.set('page', '0');
+    url.searchParams.set('startDate', String(startDate));
+    url.searchParams.set('endDate', String(nowMs));
+
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort(), this.runtimeLogTotalMs);
     let response: Response;
     try {
-      response = await this.request(
-        `/v1/projects/${encodeURIComponent(bound.id)}/deployments/${encodeURIComponent(input.deploymentId)}/runtime-logs`,
-        { ...scopeQuery(bound.binding), limit: String(limit) },
-        bound.binding,
-        undefined,
-        'runtime',
-        controller.signal,
-      );
-    } catch (error) {
-      if (controller.signal.aborted) {
-        throw { code: 'TRANSIENT', source: 'vercel', message: 'Vercel runtime-log stream did not open before the bounded deadline' };
-      }
-      throw error;
-    }
-    try {
-      const stream = await readBoundedRuntimeLogStream(response, {
-        limit,
-        idleMs: this.runtimeLogIdleMs,
-        totalMs: this.runtimeLogTotalMs,
+      response = await this.fetch(url, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'User-Agent': 'Conductor-Tool-Runtime' },
         signal: controller.signal,
       });
-      const deployment = normalizeDeployment(bound.detail);
-      return {
-        provider: 'vercel',
-        projectId: bound.id,
-        deploymentId: input.deploymentId,
-        environment: deployment?.target ?? null,
-        sourceRevision: deployment?.sourceRevision ?? null,
-        sourceRef: deployment?.sourceRef ?? null,
-        sourceRepository: deployment?.sourceRepository ?? null,
-        entries: stream.entries.map(normalizeLogEntry).filter(Boolean),
-        truncated: stream.truncated,
-        streamEnded: stream.ended,
-        idleTimedOut: stream.idleTimedOut,
-        bytesRead: stream.bytesRead,
-        observedAt: this.now().toISOString(),
-      };
+    } catch (error) {
+      if (controller.signal.aborted) throw { code: 'TRANSIENT', source: 'vercel', message: 'Vercel request-log snapshot did not respond before the bounded deadline' };
+      throw error;
     } finally {
       clearTimeout(deadline);
     }
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      let message = `Vercel request-log snapshot failed with status ${response.status}`;
+      try {
+        const parsed = JSON.parse(body) as JsonRecord;
+        const error = recordField(parsed, 'error');
+        message = (error && stringField(error, 'message')) ?? stringField(parsed, 'message') ?? message;
+      } catch {}
+      throw { status: response.status, source: 'vercel', message };
+    }
+
+    const payload = await response.json().catch(() => null) as JsonRecord | null;
+    if (!payload) throw { code: 'COMMAND_FAILED', source: 'vercel', message: 'Vercel returned a non-JSON runtime request-log response' };
+    const rows = arrayField(payload, 'rows');
+    for (const rowValue of rows) {
+      const row = record(rowValue);
+      const deploymentId = row ? stringField(row, 'deploymentId') : null;
+      if (deploymentId && deploymentId !== input.deploymentId) {
+        throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'Vercel runtime request-log response crossed the exact deployment boundary' };
+      }
+    }
+
+    const entries = rows.slice(0, limit)
+      .map(value => normalizeRuntimeRequestLog(value, input.deploymentId))
+      .filter((value): value is Record<string, unknown> => Boolean(value));
+
+    return {
+      provider: 'vercel',
+      source: 'request-logs',
+      projectId: bound.id,
+      deploymentId: input.deploymentId,
+      environment: deployment?.target ?? null,
+      sourceRevision: deployment?.sourceRevision ?? null,
+      sourceRef: deployment?.sourceRef ?? null,
+      sourceRepository: deployment?.sourceRepository ?? null,
+      entries,
+      truncated: payload.hasMoreRows === true || rows.length > limit,
+      windowStart: new Date(startDate).toISOString(),
+      windowEnd: new Date(nowMs).toISOString(),
+      observedAt: this.now().toISOString(),
+    };
   }
 
   async getAudit(input: VercelProjectInput): Promise<Record<string, unknown>> {
@@ -784,113 +824,39 @@ function normalizeLogEntry(value: unknown): DeploymentLogEntry | null {
   };
 }
 
-type RuntimeLogStreamRead = {
-  entries: unknown[];
-  truncated: boolean;
-  ended: boolean;
-  idleTimedOut: boolean;
-  bytesRead: number;
-};
-
-const RUNTIME_LOG_MAX_BYTES = 512 * 1024;
-
-async function readBoundedRuntimeLogStream(
-  response: Response,
-  options: { limit: number; idleMs: number; totalMs: number; signal?: AbortSignal },
-): Promise<RuntimeLogStreamRead> {
-  if (!response.body) {
-    const entries = parseEventStream(await response.text());
-    return {
-      entries: entries.slice(0, options.limit),
-      truncated: entries.length > options.limit,
-      ended: true,
-      idleTimedOut: false,
-      bytesRead: 0,
-    };
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const entries: unknown[] = [];
-  let buffer = '';
-  let bytesRead = 0;
-  let truncated = false;
-  let ended = false;
-  let idleTimedOut = false;
-  const startedAt = Date.now();
-
-  const append = (value: unknown[]): boolean => {
-    for (const entry of value) {
-      entries.push(entry);
-      if (entries.length >= options.limit) {
-        truncated = true;
-        return false;
-      }
-    }
-    return true;
-  };
-
-  try {
-    for (;;) {
-      const elapsed = Date.now() - startedAt;
-      const remaining = options.totalMs - elapsed;
-      if (remaining <= 0 || options.signal?.aborted) {
-        truncated = entries.length > 0;
-        break;
-      }
-      const waitMs = Math.min(options.idleMs, remaining);
-      const next = await Promise.race([
-        reader.read().then(
-          value => ({ kind: 'read' as const, value }),
-          error => ({ kind: 'error' as const, error }),
-        ),
-        new Promise<{ kind: 'timeout' }>(resolve => setTimeout(() => resolve({ kind: 'timeout' }), waitMs)),
-      ]);
-      if (next.kind === 'timeout') {
-        idleTimedOut = true;
-        break;
-      }
-      if (next.kind === 'error') {
-        if (options.signal?.aborted) break;
-        throw next.error;
-      }
-      if (next.value.done) {
-        buffer += decoder.decode();
-        ended = true;
-        break;
-      }
-
-      bytesRead += next.value.value.byteLength;
-      if (bytesRead > RUNTIME_LOG_MAX_BYTES) {
-        truncated = true;
-        break;
-      }
-      buffer += decoder.decode(next.value.value, { stream: true });
-
-      for (;;) {
-        const newline = buffer.indexOf('\n');
-        if (newline < 0) break;
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        if (!line || line.startsWith(':') || /^(?:event|id|retry):/u.test(line)) continue;
-        const payload = line.startsWith('data:') ? line.slice(5).trim() : line;
-        if (payload && !append(parseEventStream(payload))) break;
-      }
-      if (entries.length >= options.limit) break;
-    }
-
-    if (entries.length < options.limit && buffer.trim()) append(parseEventStream(buffer));
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
-
+function normalizeRuntimeRequestLog(value: unknown, expectedDeploymentId: string): Record<string, unknown> | null {
+  const row = record(value);
+  if (!row) return null;
+  const deploymentId = stringField(row, 'deploymentId') ?? expectedDeploymentId;
+  if (deploymentId !== expectedDeploymentId) return null;
+  const rawLogs = arrayField(row, 'logs');
+  const messages = rawLogs.slice(0, 20).flatMap(item => {
+    const log = record(item);
+    if (!log) return [];
+    const message = stringField(log, 'message');
+    return [{ level: stringField(log, 'level') ?? 'info', message: message ? boundedRedactedText(message, 4_000) : '', truncated: log.messageTruncated === true }];
+  });
+  const firstEvent = arrayField(row, 'events').map(record).find(Boolean) ?? null;
   return {
-    entries: entries.slice(0, options.limit),
-    truncated: truncated || entries.length > options.limit,
-    ended,
-    idleTimedOut,
-    bytesRead,
+    requestId: stringField(row, 'requestId'),
+    createdAt: timestamp(row.timestamp),
+    deploymentId,
+    requestMethod: stringField(row, 'requestMethod'),
+    requestPath: boundedRedactedText(stringField(row, 'requestPath') ?? '', 2_000),
+    statusCode: typeof row.statusCode === 'number' ? row.statusCode : null,
+    environment: stringField(row, 'environment'),
+    branch: stringField(row, 'branch'),
+    domain: stringField(row, 'domain'),
+    source: firstEvent ? stringField(firstEvent, 'source') : null,
+    traceId: stringField(row, 'traceId'),
+    logs: messages,
+    logsTruncated: rawLogs.length > 20,
   };
+}
+
+function boundedRedactedText(value: string, maxChars: number): string {
+  const safe = redact(value);
+  return safe.length > maxChars ? `${safe.slice(0, maxChars)}…[truncated]` : safe;
 }
 
 function parseEventStream(body: string): unknown[] {
