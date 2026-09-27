@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v2' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v3' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -26,6 +26,7 @@ export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 export type MutationOperationName =
   | 'repository.acquire'
   | 'git.branch.create'
+  | 'git.integration.bootstrap'
   | 'git.branch.delete'
   | 'git.commit.create'
   | 'git.push'
@@ -482,6 +483,14 @@ export interface CreateBranchInput {
   project: ProjectReference;
   branch: string;
   fromSha: string;
+  idempotencyKey: string;
+}
+
+export interface BootstrapIntegrationBranchInput {
+  project: ProjectReference;
+  branch: 'preview' | 'vercel-preview';
+  fromSha: string;
+  approvalReference: string;
   idempotencyKey: string;
 }
 

@@ -6,6 +6,7 @@ import type {
   ProjectReference,
   RuntimeOperationName,
   CreateBranchInput,
+  BootstrapIntegrationBranchInput,
   DeleteBranchInput,
   CreateCommitInput,
   CreatePullRequestInput,
@@ -1219,6 +1220,100 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     return { repository, branch: input.branch, commitSha: created.object.sha };
   }
 
+
+  async bootstrapIntegrationBranch(input: BootstrapIntegrationBranchInput): Promise<{
+    repository: string;
+    branch: 'preview' | 'vercel-preview';
+    commitSha: string;
+    defaultBranch: string;
+    created: boolean;
+    approvalReference: string;
+  }> {
+    const approvalReference = input.approvalReference.trim();
+    if (!approvalReference.startsWith('owner-approved:')) {
+      throw { code: 'PERMISSION_DENIED', message: 'Integration branch bootstrap requires an owner-approved: approval reference' };
+    }
+    assertIntegrationBootstrapBranch(input.branch);
+    assertSha(input.fromSha, 'fromSha');
+
+    const { repository, credential } = await this.writableRepository(
+      input.project,
+      GITHUB_WRITE_OPERATION_PERMISSIONS['git.integration.bootstrap'],
+    );
+    const metadata = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+    const defaultBranch = metadata.default_branch?.trim();
+    if (!defaultBranch) throw { code: 'NOT_FOUND', message: 'Repository default branch is unavailable' };
+    if (defaultBranch.toLowerCase() === input.branch.toLowerCase()) {
+      throw { code: 'PERMISSION_DENIED', message: `Integration bootstrap cannot target repository default branch ${defaultBranch}` };
+    }
+
+    const defaultRef = await this.request<{ object: { sha: string } }>(
+      repository,
+      `/git/ref/heads/${encodePath(defaultBranch)}`,
+      {},
+      credential,
+    );
+    if (defaultRef.object.sha !== input.fromSha) {
+      throw {
+        code: 'CONFLICT',
+        message: `Integration bootstrap base ${input.fromSha} is stale; repository default branch ${defaultBranch} is at ${defaultRef.object.sha}`,
+      };
+    }
+
+    const readHead = async (branch: string): Promise<string | null> => {
+      try {
+        const ref = await this.request<{ object: { sha: string } }>(
+          repository,
+          `/git/ref/heads/${encodePath(branch)}`,
+          {},
+          credential,
+        );
+        return ref.object.sha;
+      } catch (error) {
+        if ((error as { status?: number }).status === 404 || (error as { code?: string }).code === 'NOT_FOUND') return null;
+        throw error;
+      }
+    };
+
+    const sibling = input.branch === 'preview' ? 'vercel-preview' : 'preview';
+    const [existing, siblingHead] = await Promise.all([readHead(input.branch), readHead(sibling)]);
+    if (siblingHead !== null) {
+      throw {
+        code: 'CONFLICT',
+        message: `Repository already has integration branch ${sibling} at ${siblingHead}; refusing to create a competing integration branch`,
+      };
+    }
+    if (existing !== null) {
+      if (existing !== input.fromSha) {
+        throw {
+          code: 'CONFLICT',
+          message: `Integration branch ${input.branch} already exists at ${existing}, not requested base ${input.fromSha}`,
+        };
+      }
+      return {
+        repository,
+        branch: input.branch,
+        commitSha: existing,
+        defaultBranch,
+        created: false,
+        approvalReference,
+      };
+    }
+
+    const created = await this.request<{ object: { sha: string } }>(repository, '/git/refs', {
+      method: 'POST',
+      body: JSON.stringify({ ref: `refs/heads/${input.branch}`, sha: input.fromSha }),
+    }, credential);
+    return {
+      repository,
+      branch: input.branch,
+      commitSha: created.object.sha,
+      defaultBranch,
+      created: true,
+      approvalReference,
+    };
+  }
+
   async deleteBranch(input: DeleteBranchInput): Promise<{ repository: string; branch: string; commitSha: string; deleted: true; containedIn: string }> {
     const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['git.branch.delete']);
     assertCleanupBranch(input.branch);
@@ -2094,6 +2189,7 @@ type GitHubReadOperation =
 
 type GitHubWriteOperation =
   | 'git.branch.create'
+  | 'git.integration.bootstrap'
   | 'git.branch.delete'
   | 'git.commit.create'
   | 'pull-request.create'
@@ -2145,6 +2241,7 @@ const GITHUB_WRITE_OPERATION_PERMISSIONS: Readonly<Record<
   Readonly<Record<string, 'write'>>
 >> = {
   'git.branch.create': { contents: 'write' },
+  'git.integration.bootstrap': { contents: 'write' },
   'git.branch.delete': { contents: 'write' },
   'git.commit.create': { contents: 'write' },
   'pull-request.create': { pull_requests: 'write' },
@@ -2600,6 +2697,12 @@ function safeMergeBranch(branch: string): boolean {
 function assertIntegrationSourceBranch(branch: string): void {
   if (!safeMergeBranch(branch) || !/^(?:work|repair|audit)\//.test(branch)) {
     throw { code: 'PERMISSION_DENIED', message: 'Integration merge sources must be work/*, repair/*, or audit/* branches' };
+  }
+}
+
+function assertIntegrationBootstrapBranch(branch: string): asserts branch is 'preview' | 'vercel-preview' {
+  if (branch !== 'preview' && branch !== 'vercel-preview') {
+    throw { code: 'PERMISSION_DENIED', message: 'Integration bootstrap branch must be exactly preview or vercel-preview' };
   }
 }
 

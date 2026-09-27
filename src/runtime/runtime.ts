@@ -50,6 +50,7 @@ import {
   type DevelopmentStatusWorkCounts,
   type DevelopmentStatusWorkItem,
   type CreateBranchInput,
+  type BootstrapIntegrationBranchInput,
   type DeleteBranchInput,
   type CreateCommitInput,
   type CreatePullRequestInput,
@@ -195,6 +196,7 @@ const PULL_REQUEST_LIFECYCLE_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
 
 const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'git.branch.create', description: 'Create a work/* branch from an exact Git SHA.', mutates: true },
+  { name: 'git.integration.bootstrap', description: 'Create one approved Preview integration branch from the exact current repository default-branch SHA.', mutates: true },
   { name: 'git.branch.delete', description: 'Delete one exact integrated development branch after proving its head is already contained in Preview or Main.', mutates: true },
   { name: 'git.commit.create', description: 'Create files in one commit and advance an existing work/* branch from an expected head SHA.', mutates: true },
   { name: 'pull-request.create', description: 'Open a work/* pull request or the bounded Preview-to-default promotion proposal lane.', mutates: true },
@@ -1050,6 +1052,16 @@ export class ConductorToolRuntime {
     return await this.executeMutation(input, 'git.branch.create', async (provider) => {
       const result = await provider.createBranch(input);
       return { result, identifiers: { branch: result.branch, commitSha: result.commitSha } };
+    });
+  }
+
+  async bootstrapIntegrationBranch(input: BootstrapIntegrationBranchInput) {
+    return await this.executeMutation(input, 'git.integration.bootstrap', async (provider) => {
+      const result = await provider.bootstrapIntegrationBranch(input);
+      return {
+        result,
+        identifiers: { branch: result.branch, commitSha: result.commitSha },
+      };
     });
   }
 
