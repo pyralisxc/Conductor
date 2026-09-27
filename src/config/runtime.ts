@@ -97,7 +97,7 @@ export function createRuntimeFromEnvironment(
       token: environment.CONDUCTOR_VERCEL_TOKEN ?? environment.VERCEL_TOKEN,
       credentialResolver: connectionCredentialResolver,
       runtimeConnectionId: VERCEL_RUNTIME_CONNECTION_ID,
-      bindings: vercelBindings;
+      bindings: vercelBindings,
     });
     providers.push(vercelProvider);
   }
