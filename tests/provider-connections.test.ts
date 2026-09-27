@@ -55,6 +55,7 @@ test('Vercel provider consumes opaque connection credentials without exposing th
 
 
 class MemoryRecordStore {
+  readonly url = 'https://incidental-field.example';
   readonly values = new Map<string, string>();
   async get<T>(key: string): Promise<T | null> { return (this.values.get(key) as T | undefined) ?? null; }
   async set(key: string, value: string): Promise<void> { this.values.set(key, value); }
@@ -122,4 +123,17 @@ test('one shared Vercel runtime credential serves multiple exact project binding
   assert.equal(authorization.get('/v1/projects/prj_b/deployments/dpl_b/runtime-logs'), 'Bearer runtime-direct-token');
   runtimeConnected = false;
   assert.equal((await provider.preflightOperation({ id: 'a', repository: 'owner/a' }, 'deployment.runtime-logs'))?.[0]?.status, 'unavailable');
+});
+
+
+test('provider connection store accepts explicit URL/token configuration without eager network access', async () => {
+  const previous = process.env.CONDUCTOR_SESSION_SECRET;
+  process.env.CONDUCTOR_SESSION_SECRET = 'provider-connection-config-test-secret-long-enough';
+  try {
+    const { RedisProviderConnectionCredentialStore } = await import('../src/transport/provider-connections.js');
+    assert.doesNotThrow(() => new RedisProviderConnectionCredentialStore({ url: 'https://example.invalid', token: 'test-token' }));
+  } finally {
+    if (previous === undefined) delete process.env.CONDUCTOR_SESSION_SECRET;
+    else process.env.CONDUCTOR_SESSION_SECRET = previous;
+  }
 });
