@@ -163,6 +163,26 @@ const mutationReceiptSchema = z.union([
 
 const mutationOutputSchema = z.object({ receipt: mutationReceiptSchema });
 
+export const compositeMutationOutputSchema = z.object({ receipt: z.union([
+  z.object({
+    ...receiptBase,
+    status: z.literal('succeeded'),
+    result: z.record(z.string(), z.unknown()),
+    identifiers: z.object({
+      branch: z.string().optional(),
+      commitSha: z.string().optional(),
+      pullRequestNumber: z.number().optional(),
+      issueNumber: z.number().optional(),
+      commentId: z.string().optional(),
+      workflowRunId: z.string().optional(),
+      deploymentId: z.string().optional(),
+      mergeCommitSha: z.string().optional(),
+    }).optional(),
+    idempotency: idempotencySchema.optional(),
+  }),
+  z.object({ ...failedReceiptSchema.shape, idempotency: idempotencySchema.optional() }),
+]) });
+
 const workItemReadStatusSchema = z.enum([
   'backlog', 'ready', 'in-progress', 'blocked', 'review', 'done', 'unknown',
 ]);
@@ -641,7 +661,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
           maxPolls: z.number().int().min(0).max(4).default(2), pollIntervalMs: z.number().int().min(0).max(1500).default(500),
           idempotencyKey: z.string().min(8).max(200), continuation: z.string().min(20).max(4096).optional(),
         }),
-        outputSchema: mutationOutputSchema,
+        outputSchema: compositeMutationOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {
@@ -669,7 +689,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
           project: projectSchema, workContext: workContextSchema, gate: z.string().min(20).max(4096),
           approvalReference: z.string().regex(/^owner-approved:/u).max(500), idempotencyKey: z.string().min(8).max(200),
         }),
-        outputSchema: mutationOutputSchema,
+        outputSchema: compositeMutationOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {

@@ -182,3 +182,40 @@ test('HTTP root redirects browsers to the owner Vercel connection entry point', 
     await once(server, 'close');
   }
 });
+
+
+test('composite lifecycle receipt schema accepts success without fabricated outer idempotency', () => {
+  const parsed = compositeMutationOutputSchema.safeParse({
+    receipt: {
+      contractVersion: 'conductor.tool-runtime.v0',
+      operationId: 'op-lifecycle',
+      operation: 'lifecycle.advance',
+      target: { kind: 'project', id: 'Conductor' },
+      startedAt: '2026-09-27T00:00:00Z',
+      finishedAt: '2026-09-27T00:00:01Z',
+      diagnostics: [],
+      status: 'succeeded',
+      result: {
+        contractVersion: 'conductor.tool-runtime.v0',
+        project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+        issueNumber: 170,
+        stage: 'external-wait',
+        summary: 'waiting',
+        transitions: [],
+        previewProof: null,
+        gate: {
+          kind: 'external-wait',
+          allowedNextOperation: 'lifecycle.advance',
+          issueNumber: 170,
+          summary: 'waiting',
+          resumeWhen: 'provider changes',
+          pullRequestNumber: 183,
+          expectedHeadSha: 'a'.repeat(40),
+          expectedBaseSha: 'b'.repeat(40),
+        },
+        continuation: { handle: 'signed-gate', expiresAt: 123, gateId: 'gate-1' },
+      },
+    },
+  });
+  assert.equal(parsed.success, true);
+});
