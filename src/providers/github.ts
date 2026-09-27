@@ -1977,7 +1977,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
 
   private async writableRepository(
     project: ProjectReference,
-    requiredPermissions: Record<string, 'write'>,
+    requiredPermissions: Record<string, 'read' | 'write'>,
   ): Promise<{ repository: string; credential: GitHubCredential }> {
     if (!this.credentials) throw { code: 'AUTH_REQUIRED', message: 'GitHub authentication is not configured' };
     const resolution = this.resolveBinding(project);
@@ -2188,6 +2188,8 @@ type GitHubReadOperation =
   | 'work-item.list';
 
 type GitHubWriteOperation =
+  | 'lifecycle.advance'
+  | 'lifecycle.resume'
   | 'git.branch.create'
   | 'git.integration.bootstrap'
   | 'git.branch.delete'
@@ -2238,8 +2240,10 @@ const GITHUB_READ_OPERATION_PERMISSIONS: Readonly<Record<
 
 const GITHUB_WRITE_OPERATION_PERMISSIONS: Readonly<Record<
   GitHubWriteOperation,
-  Readonly<Record<string, 'write'>>
+  Readonly<Record<string, 'read' | 'write'>>
 >> = {
+  'lifecycle.advance': { contents: 'write', pull_requests: 'write', checks: 'read', actions: 'read' },
+  'lifecycle.resume': { contents: 'write', pull_requests: 'read' },
   'git.branch.create': { contents: 'write' },
   'git.integration.bootstrap': { contents: 'write' },
   'git.branch.delete': { contents: 'write' },

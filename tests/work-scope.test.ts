@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clientFingerprint, issueBootstrapEvidence, parseWorkScopeGrant, verifyBootstrapEvidence, WorkScopeAuthorizer, type WorkScopeGrant, type WorkScopeStore } from '../src/transport/work-scope.js';
+import { clientFingerprint, issueBootstrapEvidence, issueLifecycleGate, parseWorkScopeGrant, verifyBootstrapEvidence, verifyLifecycleGate, WorkScopeAuthorizer, type WorkScopeGrant, type WorkScopeStore } from '../src/transport/work-scope.js';
 
 process.env.CONDUCTOR_SESSION_SECRET = 'test-work-context-secret-long-enough-for-hmac';
 
@@ -96,4 +96,15 @@ test('bootstrap evidence is short-lived, client-bound, repository-bound and cred
   assert.doesNotMatch(issued.handle, /token|secret|credential/iu);
   assert.throws(() => verifyBootstrapEvidence(issued.handle, 'different-client'), /mismatched/);
   assert.throws(() => verifyBootstrapEvidence(issued.handle, 'owner-approved-client', { repository: 'pyralisxc/Other' }), /repository mismatch/);
+});
+
+test('lifecycle gates are client/repository/issue bound and carry exact continuation identity', () => {
+  const issued = issueLifecycleGate('owner-client', {
+    repository: 'pyralisxc/Conductor', projectId: 'Conductor',
+    gate: { kind: 'human-approval', allowedNextOperation: 'lifecycle.resume', issueNumber: 169, summary: 'Ready for Main', resumeWhen: 'Owner approves exact candidate', pullRequestNumber: 200, expectedHeadSha: 'a'.repeat(40), expectedBaseSha: 'b'.repeat(40) },
+  });
+  const value = verifyLifecycleGate(issued.handle, 'owner-client', { repository: 'pyralisxc/Conductor', projectId: 'Conductor', issueNumber: 169, kind: 'human-approval', allowedNextOperation: 'lifecycle.resume' });
+  assert.equal(value.id, issued.gateId);
+  assert.equal(value.pullRequestNumber, 200);
+  assert.throws(() => verifyLifecycleGate(issued.handle, 'other-client', { repository: 'pyralisxc/Conductor', projectId: 'Conductor' }), /mismatched/);
 });

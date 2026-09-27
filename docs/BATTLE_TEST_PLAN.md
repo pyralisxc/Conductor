@@ -49,6 +49,9 @@ This document tests the **current bounded runtime**. Future automation experimen
 29a. Integration merge rejects the repository default branch as target.
 29b. Integration merge rejects unapproved source branch classes.
 29c. Duplicate mutation attempts replay the durable idempotent receipt instead of repeating the side effect.
+29d. `lifecycle.advance` can take one canonical issue from an exact verified integration PR through Preview merge, exact READY Preview deployment proof, and promotion-PR verification with fewer model-visible calls, but stops at a signed human gate before Main.
+29e. A bounded external wait returns a client/repository/issue-bound continuation gate instead of repeated chat polling; resuming it re-reads provider truth.
+29f. `lifecycle.resume` rejects stale/mismatched gates and cannot promote until the caller supplies a fresh `owner-approved:` reference; exact PR head/base and `promotion-ready` state are revalidated immediately before Main.
 
 ## Git branch cleanup boundary
 

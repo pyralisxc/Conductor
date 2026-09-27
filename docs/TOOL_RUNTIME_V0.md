@@ -127,3 +127,6 @@ The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the confi
 - Exceptional Main-only reconciliation accepts only the exact default branch → Preview lane and preserves ancestry with a merge commit.
 - Retrying the same mutation cannot repeat its side effect through the idempotency executor.
 - Existing orchestration policy and tests remain intact.
+
+- `lifecycle.advance(project, issueNumber, ...)` is a bounded composite over existing provider-native work/PR/deployment state. It may poll a small bounded number of times, integrate an already-verified work PR into Preview, prove the exact Preview deployment, and create/reuse a Preview-to-Main promotion PR. It stops on ambiguity, verification failure, external wait, completion, or a signed human gate. Every underlying mutation keeps its own durable idempotency key derived from the caller's lifecycle key.
+- `lifecycle.resume(project, gate, approvalReference, ...)` accepts only a client/repository/project-bound signed human gate, re-reads the exact promotion PR head/base and `promotion-ready` state, and requires a new `owner-approved:` reference before calling the existing Main promotion mutation. `lifecycle.advance` never promotes Main.
