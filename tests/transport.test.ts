@@ -15,6 +15,20 @@ import {
 import type { SourceControlMutationProvider, SourceArtifactReadProvider, CiReadProvider } from '../src/index.js';
 import { compositeMutationOutputSchema } from '../src/transport/mcp.js';
 
+async function within<T>(promise: Promise<T>, timeoutMs = 5000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`test operation exceeded ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 test('MCP adapter advertises only the core typed read-only runtime tools', async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createConductorMcpServer(new ConductorToolRuntime({
@@ -24,7 +38,7 @@ test('MCP adapter advertises only the core typed read-only runtime tools', async
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   try {
-    const listed = await client.listTools();
+    const listed = await within(client.listTools());
     assert.deepEqual(listed.tools.map((tool) => tool.name), [
       'capabilities',
       'preflight_project',
@@ -80,7 +94,7 @@ test('HTTP MCP boundary publishes OAuth metadata and fails closed', async () => 
     });
     try {
       await client.connect(transport);
-      const tools = await client.listTools();
+      const tools = await within(client.listTools());
       assert.equal(tools.tools.length, 3);
     } finally {
       await client.close().catch(() => undefined);
@@ -125,7 +139,7 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   try {
-    const listed = await client.listTools();
+    const listed = await within(client.listTools());
     assert.deepEqual(listed.tools.map((tool) => tool.name), [
       'capabilities', 'preflight_project', 'evidence.bundle', 'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create',
       'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
@@ -158,7 +172,7 @@ test('MCP publishes DI-first exact source and CI drill-down reads when their pro
   const client = new Client({ name: 'evidence-client', version: '1.0.0' });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  const listed = await client.listTools();
+  const listed = await within(client.listTools());
   const names = listed.tools.map(tool => tool.name);
   assert.equal(names.includes('source.artifact.read'), true);
   assert.equal(names.includes('ci.run.read'), true);
