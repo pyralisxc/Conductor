@@ -148,3 +148,26 @@ test('MCP publishes DI-first exact source and CI drill-down reads when their pro
   await client.close();
   await server.close();
 });
+
+
+test('HTTP root redirects browsers to the owner Vercel connection entry point', async () => {
+  const handler = createConductorHttpHandler({
+    runtime: new ConductorToolRuntime(),
+    publicUrl: 'http://127.0.0.1',
+    oauthIssuer: 'http://127.0.0.1',
+    verifier: { async verifyAccessToken(token) { return { token, clientId: 'test', scopes: ['conductor.read'], resource: new URL('http://127.0.0.1/mcp') }; } },
+  });
+  const server = createServer((request, response) => void handler(request, response));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/`, { redirect: 'manual' });
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get('location'), '/connections/vercel');
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
