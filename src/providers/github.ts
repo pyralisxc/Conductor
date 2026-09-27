@@ -1076,6 +1076,47 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     return await response.json() as Result;
   }
 
+
+  async getRepositoryBootstrap(project: ProjectReference): Promise<RepositoryBootstrapTopology> {
+    const { repository, credential } = await this.readableRepository(project, { contents: 'read' });
+    const metadata = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+    const defaultBranch = metadata.default_branch?.trim();
+    if (!defaultBranch) throw { code: 'NOT_FOUND', message: 'Repository default branch is unavailable' };
+
+    const readHead = async (branch: string): Promise<string | null> => {
+      try {
+        const ref = await this.request<{ object: { sha: string } }>(
+          repository,
+          `/git/ref/heads/${encodePath(branch)}`,
+          {},
+          credential,
+        );
+        return ref.object.sha;
+      } catch (error) {
+        if ((error as { status?: number }).status === 404 || (error as { code?: string }).code === 'NOT_FOUND') return null;
+        throw error;
+      }
+    };
+
+    const [defaultHead, previewHead, vercelPreviewHead] = await Promise.all([
+      readHead(defaultBranch),
+      readHead('preview'),
+      readHead('vercel-preview'),
+    ]);
+    if (!defaultHead) throw { code: 'NOT_FOUND', message: `Repository default branch ${defaultBranch} has no readable head` };
+
+    const integrationBranch = previewHead ? 'preview' : vercelPreviewHead ? 'vercel-preview' : null;
+    return {
+      provider: 'github',
+      repository,
+      defaultBranch,
+      defaultHead,
+      integrationBranch,
+      integrationHead: previewHead ?? vercelPreviewHead,
+      observedAt: new Date().toISOString(),
+    };
+  }
+
   async createBranch(input: CreateBranchInput): Promise<{ repository: string; branch: string; commitSha: string }> {
     const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['git.branch.create']);
     assertWorkBranch(input.branch);

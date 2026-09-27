@@ -219,3 +219,89 @@ test('MCP advertises development.status only when candidate reconstruction is co
   await client.close();
   await server.close();
 });
+
+
+test('work bootstrap composes catalog freshness, topology, work state and provider posture in one runtime read', async () => {
+  const workProvider: WorkItemCandidateReadProvider = {
+    id: 'github-work',
+    async getCapabilities() { return []; },
+    async getWorkItemStatus() { throw new Error('unused'); },
+    async listWorkItems() { return { repository: 'pyralisxc/Conductor', items: [], truncated: false }; },
+    async listWorkItemPullRequests() { return []; },
+  };
+  const githubPreflight: ProjectPreflightProvider = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    async preflightProject() {
+      return [
+        { check: 'repository.access' as const, status: 'ready' as const, provider: 'github', summary: 'ready', diagnostics: [] },
+        { check: 'github.read' as const, status: 'ready' as const, provider: 'github', summary: 'ready', diagnostics: [] },
+      ];
+    },
+  };
+  const intelligence: ProjectPreflightProvider = {
+    id: 'development-intelligence',
+    async getCapabilities() { return []; },
+    async preflightProject() {
+      return [{ check: 'development-intelligence.read' as const, status: 'degraded' as const, provider: 'development-intelligence', summary: 'canonical graph stale', diagnostics: [] }];
+    },
+  };
+  const topology = {
+    provider: 'github' as const,
+    repository: 'pyralisxc/Conductor',
+    defaultBranch: 'main',
+    defaultHead: 'a'.repeat(40),
+    integrationBranch: 'preview' as const,
+    integrationHead: 'b'.repeat(40),
+    observedAt: '2026-09-27T00:00:00.000Z',
+  };
+  const runtime = new ConductorToolRuntime({
+    providers: [githubPreflight, intelligence],
+    workItemProvider: workProvider as any,
+    workItemCandidateProvider: workProvider,
+    repositoryBootstrapProvider: {
+      id: 'github-bootstrap',
+      async getCapabilities() { return []; },
+      async getRepositoryBootstrap() { return topology; },
+    },
+    now: () => new Date('2026-09-27T00:00:00.000Z'),
+  });
+
+  const first = await runtime.workBootstrap({ project: { id: 'Conductor', repository: 'pyralisxc/Conductor' } });
+  assert.equal(first.status, 'succeeded');
+  if (first.status !== 'succeeded') return;
+  assert.match(first.result.catalogDigest, /^[0-9a-f]{64}$/u);
+  assert.equal(first.result.clientCatalog.freshness, 'unknown');
+  assert.deepEqual(first.result.topology, topology);
+  assert.equal(first.result.intelligence.status, 'degraded');
+
+  const current = await runtime.workBootstrap({ project: { id: 'Conductor', repository: 'pyralisxc/Conductor' }, clientCatalogDigest: first.result.catalogDigest });
+  assert.equal(current.status, 'succeeded');
+  if (current.status === 'succeeded') assert.equal(current.result.clientCatalog.freshness, 'current');
+
+  const stale = await runtime.workBootstrap({ project: { id: 'Conductor', repository: 'pyralisxc/Conductor' }, clientCatalogDigest: '0'.repeat(64) });
+  assert.equal(stale.status, 'succeeded');
+  if (stale.status === 'succeeded') {
+    assert.equal(stale.result.clientCatalog.freshness, 'stale-client-schema');
+    assert.equal(stale.diagnostics.some(item => /refresh\/reconnect/u.test(item.message)), true);
+  }
+});
+
+test('capabilities publishes a stable catalog digest including work.bootstrap', async () => {
+  const provider: WorkItemCandidateReadProvider = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    async getWorkItemStatus() { throw new Error('unused'); },
+    async listWorkItems() { return { repository: 'pyralisxc/Conductor', items: [], truncated: false }; },
+    async listWorkItemPullRequests() { return []; },
+  };
+  const runtime = new ConductorToolRuntime({ workItemProvider: provider as any, workItemCandidateProvider: provider });
+  const a = await runtime.capabilities();
+  const b = await runtime.capabilities();
+  assert.equal(a.status, 'succeeded');
+  assert.equal(b.status, 'succeeded');
+  if (a.status !== 'succeeded' || b.status !== 'succeeded') return;
+  assert.equal(a.result.catalogDigest, b.result.catalogDigest);
+  assert.match(a.result.catalogDigest, /^[0-9a-f]{64}$/u);
+  assert.equal(a.result.operations.some(op => op.name === 'work.bootstrap'), true);
+});

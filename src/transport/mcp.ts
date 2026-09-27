@@ -31,7 +31,7 @@ const errorSchema = z.object({
 
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
-  'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
+  'work.bootstrap', 'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
   'repository.acquire',
   'git.branch.create', 'git.branch.delete', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
@@ -78,6 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
+      catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
         description: z.string(),
@@ -218,6 +219,49 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     if (!clientId) throw new Error('Authenticated client identity is required');
     return { content: [{ type: 'text', text: JSON.stringify(workScope.begin(clientId, repository)) }] };
   });
+
+
+  if (runtime.workBootstrapReadEnabled) {
+    server.registerTool('work.bootstrap', {
+      title: 'Bootstrap one development conversation',
+      description: 'Use at the start/resume of a development conversation. In one call it establishes the exact active repository work context and returns compact Main/Preview topology, active work/preflight, DI posture, deployment posture, and server catalog freshness. Echo a previously observed catalogDigest as clientCatalogDigest; stale-client-schema means refresh/reconnect before treating absent tools as unavailable.',
+      inputSchema: z.object({
+        project: projectSchema,
+        limit: z.number().int().min(1).max(25).default(10),
+        clientCatalogDigest: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      requireWriteScope(extra.authInfo?.scopes);
+      const clientId = extra.authInfo?.clientId;
+      if (!clientId) throw new Error('Authenticated client identity is required');
+      const project = runtime.resolveProjectReference(input.project);
+      const repository = project.repository ?? project.id;
+      const workContext = workScope.begin(clientId, repository);
+      const ownerScope = await workScope.describe(clientId);
+      const receipt = await runtime.workBootstrap({ ...input, project });
+      if (receipt.status === 'succeeded') {
+        const evidence = issueBootstrapEvidence(clientId, {
+          repository: workContext.repository,
+          projectId: project.id,
+          catalogDigest: receipt.result.catalogDigest,
+          observedAt: receipt.result.observedAt,
+        });
+        Object.assign(receipt.result, {
+          workScope: { ...workContext, ownerScope },
+          evidence: {
+            handle: evidence.handle,
+            expiresAt: evidence.expiresAt,
+            reusableFor: ['bounded-read-proof'],
+            note: 'Short-lived client/repository/catalog-bound proof only. Mutations still re-read TOCTOU-sensitive provider truth.',
+          },
+        });
+      }
+      return result(receipt);
+    });
+  }
 
   server.registerTool('capabilities', {
     title: 'Report Conductor capabilities',
