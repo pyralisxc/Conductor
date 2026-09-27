@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v4' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v5' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -8,6 +8,7 @@ export type ToolOperationName =
   | 'repository.acquire.preflight'
   | 'work.bootstrap'
   | 'repository.audit'
+  | 'evidence.bundle'
   | 'development.status'
   | 'pull-request.status'
   | 'source.artifact.read'
@@ -314,6 +315,55 @@ export interface RepositoryProviderAudit {
     truncated: boolean;
   };
   observedAt: string;
+}
+
+
+export type EvidenceBundleOperation =
+  | 'preflight_project'
+  | 'deployment.status'
+  | 'deployment.runtime-logs'
+  | 'pull-request.status'
+  | 'repository.audit';
+
+export type EvidenceBundleItemInput =
+  | { key: string; operation: 'preflight_project'; project: ProjectReference; intent?: PreflightIntent }
+  | { key: string; operation: 'deployment.status'; project: ProjectReference; limit?: number }
+  | { key: string; operation: 'deployment.runtime-logs'; project: ProjectReference; deploymentId: string; limit?: number }
+  | { key: string; operation: 'pull-request.status'; project: ProjectReference; pullRequestNumber: number }
+  | { key: string; operation: 'repository.audit'; project: ProjectReference; limit?: number };
+
+export interface GetEvidenceBundleInput {
+  items: EvidenceBundleItemInput[];
+  concurrency?: number;
+}
+
+export interface EvidenceBundleItemResult {
+  key: string;
+  operation: EvidenceBundleOperation;
+  project: ProjectReference;
+  status: 'succeeded' | 'failed';
+  elapsedMs: number;
+  summary: string;
+  identifiers: {
+    repository?: string;
+    projectId?: string;
+    deploymentId?: string;
+    pullRequestNumber?: number;
+    revision?: string;
+  };
+  evidence?: Record<string, unknown>;
+  error?: NormalizedToolError;
+}
+
+export interface EvidenceBundleProjection {
+  contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
+  concurrency: number;
+  itemCount: number;
+  succeeded: number;
+  failed: number;
+  elapsedMs: number;
+  items: EvidenceBundleItemResult[];
+  note: string;
 }
 
 export interface GetRepositoryAuditInput {

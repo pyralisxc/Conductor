@@ -212,11 +212,14 @@ test('self-hosted OAuth supports ChatGPT DCR, PKCE, refresh, and exact MCP acces
       requestInit: { headers: { authorization: `Bearer ${tokens.access_token}` } },
     });
     await client.connect(transport);
-    const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ['capabilities', 'preflight_project']);
-    const capabilities = await client.callTool({ name: 'capabilities', arguments: {} });
-    assert.equal((capabilities.structuredContent as { receipt: { operationId: string } }).receipt.operationId, 'op-oauth');
-    await client.close();
+    try {
+      const tools = await client.listTools();
+      assert.deepEqual(tools.tools.map((tool) => tool.name), ['capabilities', 'preflight_project', 'evidence.bundle']);
+      const capabilities = await client.callTool({ name: 'capabilities', arguments: {} });
+      assert.equal((capabilities.structuredContent as { receipt: { operationId: string } }).receipt.operationId, 'op-oauth');
+    } finally {
+      await client.close().catch(() => undefined);
+    }
 
     const refreshResponse = await fetch(`${origin}/oauth/token`, {
       method: 'POST',

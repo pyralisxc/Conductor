@@ -13,6 +13,21 @@ import {
   InMemoryIdempotencyStore,
 } from '../src/index.js';
 import type { SourceControlMutationProvider, SourceArtifactReadProvider, CiReadProvider } from '../src/index.js';
+import { compositeMutationOutputSchema } from '../src/transport/mcp.js';
+
+async function within<T>(promise: Promise<T>, timeoutMs = 5000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`test operation exceeded ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 test('MCP adapter advertises only the core typed read-only runtime tools', async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -22,20 +37,22 @@ test('MCP adapter advertises only the core typed read-only runtime tools', async
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
+  try {
+    const listed = await within(client.listTools());
+    assert.deepEqual(listed.tools.map((tool) => tool.name), [
+      'capabilities',
+      'preflight_project',
+      'evidence.bundle',
+    ]);
+    assert.equal(listed.tools.every((tool) => tool.annotations?.readOnlyHint), true);
 
-  const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name), [
-    'capabilities',
-    'preflight_project',
-  ]);
-  assert.equal(listed.tools.every((tool) => tool.annotations?.readOnlyHint), true);
-
-  const called = await client.callTool({ name: 'capabilities', arguments: {} });
-  const content = called.structuredContent as { receipt: { operationId: string } };
-  assert.equal(content.receipt.operationId, 'op-mcp');
-
-  await client.close();
-  await server.close();
+    const called = await client.callTool({ name: 'capabilities', arguments: {} });
+    const result = called.structuredContent as { receipt: { operationId: string } };
+    assert.equal(result.receipt.operationId, 'op-mcp');
+  } finally {
+    await client.close().catch(() => undefined);
+    await server.close().catch(() => undefined);
+  }
 });
 
 test('HTTP MCP boundary publishes OAuth metadata and fails closed', async () => {
@@ -75,10 +92,13 @@ test('HTTP MCP boundary publishes OAuth metadata and fails closed', async () => 
     const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
       requestInit: { headers: { Authorization: 'Bearer valid-token' } },
     });
-    await client.connect(transport);
-    const tools = await client.listTools();
-    assert.equal(tools.tools.length, 2);
-    await client.close();
+    try {
+      await client.connect(transport);
+      const tools = await within(client.listTools());
+      assert.equal(tools.tools.length, 3);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
   } finally {
     httpServer.close();
     await once(httpServer, 'close');
@@ -118,15 +138,18 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name), [
-    'capabilities', 'preflight_project', 'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create',
-    'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
-    'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
-  ]);
-  assert.equal(listed.tools.find((tool) => tool.name === 'git.branch.create')?.annotations?.readOnlyHint, false);
-  await client.close();
-  await server.close();
+  try {
+    const listed = await within(client.listTools());
+    assert.deepEqual(listed.tools.map((tool) => tool.name), [
+      'capabilities', 'preflight_project', 'evidence.bundle', 'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create',
+      'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
+      'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
+    ]);
+    assert.equal(listed.tools.find((tool) => tool.name === 'git.branch.create')?.annotations?.readOnlyHint, false);
+  } finally {
+    await client.close().catch(() => undefined);
+    await server.close().catch(() => undefined);
+  }
 });
 
 test('MCP publishes DI-first exact source and CI drill-down reads when their providers are configured', async () => {
@@ -149,7 +172,7 @@ test('MCP publishes DI-first exact source and CI drill-down reads when their pro
   const client = new Client({ name: 'evidence-client', version: '1.0.0' });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  const listed = await client.listTools();
+  const listed = await within(client.listTools());
   const names = listed.tools.map(tool => tool.name);
   assert.equal(names.includes('source.artifact.read'), true);
   assert.equal(names.includes('ci.run.read'), true);
@@ -180,4 +203,41 @@ test('HTTP root redirects browsers to the owner Vercel connection entry point', 
     server.close();
     await once(server, 'close');
   }
+});
+
+
+test('composite lifecycle receipt schema accepts success without fabricated outer idempotency', () => {
+  const parsed = compositeMutationOutputSchema.safeParse({
+    receipt: {
+      contractVersion: 'conductor.tool-runtime.v0',
+      operationId: 'op-lifecycle',
+      operation: 'lifecycle.advance',
+      target: { kind: 'project', id: 'Conductor' },
+      startedAt: '2026-09-27T00:00:00Z',
+      finishedAt: '2026-09-27T00:00:01Z',
+      diagnostics: [],
+      status: 'succeeded',
+      result: {
+        contractVersion: 'conductor.tool-runtime.v0',
+        project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+        issueNumber: 170,
+        stage: 'external-wait',
+        summary: 'waiting',
+        transitions: [],
+        previewProof: null,
+        gate: {
+          kind: 'external-wait',
+          allowedNextOperation: 'lifecycle.advance',
+          issueNumber: 170,
+          summary: 'waiting',
+          resumeWhen: 'provider changes',
+          pullRequestNumber: 183,
+          expectedHeadSha: 'a'.repeat(40),
+          expectedBaseSha: 'b'.repeat(40),
+        },
+        continuation: { handle: 'signed-gate', expiresAt: 123, gateId: 'gate-1' },
+      },
+    },
+  });
+  assert.equal(parsed.success, true);
 });
