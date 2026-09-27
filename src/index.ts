@@ -17,5 +17,6 @@ export * from './transport/oauth.js';
 export * from './transport/oauth-http.js';
 export * from './transport/oauth-code-store.js';
 export * from './transport/owner-auth.js';
+export * from './transport/provider-connections.js';
 export * from './transport/mcp.js';
 export * from './transport/http.js';

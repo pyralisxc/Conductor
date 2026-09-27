@@ -3,12 +3,14 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Redis } from '@upstash/redis';
 import { derivedSecret, ownerSessionValid } from './owner-auth.js';
 import { oauthPublicBaseUrl } from './oauth.js';
+import { RedisProviderConnectionCredentialStore } from './provider-connections.js';
 
 type Installation = { configurationId: string; teamId: string | null; connectedAt: string; token: string };
 const prefix = 'conductor:vercel:connection:v1';
 const stateTtl = 600;
 const csrfTtlSeconds = 15 * 60;
-type ConnectionAction = 'start' | 'disconnect';
+export const VERCEL_RUNTIME_CONNECTION_ID = 'vercel-runtime-primary';
+type ConnectionAction = 'start' | 'disconnect' | 'runtime-connect' | 'runtime-disconnect';
 
 function csrfSignature(action: ConnectionAction, expiresAt: number): string {
   return createHmac('sha256', derivedSecret('vercel-connection-csrf'))
@@ -117,9 +119,14 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
       const ids = await redis.smembers<string[]>(`${prefix}:ids`);
       const records = await Promise.all(ids.map(id => redis.get<string>(`${prefix}:installation:${id}`)));
       const installations = records.flatMap(record => record ? [decrypt(record)] : []);
+      const credentialStore = new RedisProviderConnectionCredentialStore(redis);
+      const runtimeCredential = await credentialStore.resolve({ provider: 'vercel', connectionId: VERCEL_RUNTIME_CONNECTION_ID });
       const disconnectCsrf = vercelConnectionCsrfToken('disconnect');
       const list = installations.length ? `<ul>${installations.map(item => `<li>${escapeHtml(item.teamId ?? 'Personal account')} <small>(${escapeHtml(item.configurationId)})</small><form method="post" action="/connections/vercel/disconnect"><input type="hidden" name="csrf" value="${disconnectCsrf}"><input type="hidden" name="configurationId" value="${escapeHtml(item.configurationId)}"><button>Disconnect locally</button></form></li>`).join('')}</ul>` : '<p>No Vercel account is connected.</p>';
-      respond(res, 200, page(`${list}<p>Authorize an account or team in Vercel. Access remains scoped to the chosen installation.</p><form method="post" action="/connections/vercel/start"><input type="hidden" name="csrf" value="${vercelConnectionCsrfToken('start')}"><button>Connect Vercel</button></form>`));
+      const runtime = runtimeCredential
+        ? `<p>Runtime-log direct access: connected.</p><form method="post" action="/connections/vercel/runtime/disconnect"><input type="hidden" name="csrf" value="${vercelConnectionCsrfToken('runtime-disconnect')}"><button>Disconnect runtime-log access</button></form>`
+        : `<p>Runtime-log direct access: not connected.</p><form method="post" action="/connections/vercel/runtime"><input type="hidden" name="csrf" value="${vercelConnectionCsrfToken('runtime-connect')}"><label>Vercel access token <input type="password" name="token" autocomplete="off" required></label> <button>Connect runtime-log access</button></form>`;
+      respond(res, 200, page(`${list}<p>Authorize an account or team in Vercel. Access remains scoped to the chosen installation.</p><form method="post" action="/connections/vercel/start"><input type="hidden" name="csrf" value="${vercelConnectionCsrfToken('start')}"><button>Connect Vercel</button></form><hr>${runtime}`));
       return true;
     }
     if (url.pathname === '/connections/vercel/start' && req.method === 'POST') {
@@ -139,6 +146,22 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
       if (!/^icfg_[\w-]+$/u.test(id)) { respond(res, 400, page('<p>Invalid connection.</p>')); return true; }
       await redis.del(`${prefix}:installation:${id}`);
       await redis.srem(`${prefix}:ids`, id);
+      redirect(res, '/connections/vercel');
+      return true;
+    }
+    if (url.pathname === '/connections/vercel/runtime' && req.method === 'POST') {
+      const form = await formBody(req);
+      if (!vercelConnectionCsrfValid('runtime-connect', form.get('csrf') ?? '')) { respond(res, 403, page('<p>Connection form expired. Return to connections and try again.</p>')); return true; }
+      const runtimeToken = form.get('token')?.trim() ?? '';
+      if (runtimeToken.length < 20 || runtimeToken.length > 1024 || /[\u0000-\u001f\u007f]/u.test(runtimeToken)) { respond(res, 400, page('<p>Invalid Vercel access token.</p>')); return true; }
+      await new RedisProviderConnectionCredentialStore(redis).put({ provider: 'vercel', connectionId: VERCEL_RUNTIME_CONNECTION_ID, token: runtimeToken });
+      redirect(res, '/connections/vercel');
+      return true;
+    }
+    if (url.pathname === '/connections/vercel/runtime/disconnect' && req.method === 'POST') {
+      const form = await formBody(req);
+      if (!vercelConnectionCsrfValid('runtime-disconnect', form.get('csrf') ?? '')) { respond(res, 403, page('<p>Connection form expired. Return to connections and try again.</p>')); return true; }
+      await new RedisProviderConnectionCredentialStore(redis).delete('vercel', VERCEL_RUNTIME_CONNECTION_ID);
       redirect(res, '/connections/vercel');
       return true;
     }
@@ -167,7 +190,7 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
       redirect(res, '/connections/vercel');
       return true;
     }
-    res.writeHead(405, { allow: url.pathname === '/connections/vercel/start' || url.pathname === '/connections/vercel/disconnect' ? 'POST' : 'GET' });
+    res.writeHead(405, { allow: url.pathname === '/connections/vercel/start' || url.pathname === '/connections/vercel/disconnect' || url.pathname === '/connections/vercel/runtime' || url.pathname === '/connections/vercel/runtime/disconnect' ? 'POST' : 'GET' });
     res.end();
   } catch (error) {
     const status = (error as { status?: number }).status ?? 502;
