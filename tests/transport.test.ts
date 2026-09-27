@@ -13,6 +13,7 @@ import {
   InMemoryIdempotencyStore,
 } from '../src/index.js';
 import type { SourceControlMutationProvider, SourceArtifactReadProvider, CiReadProvider } from '../src/index.js';
+import { compositeMutationOutputSchema } from '../src/transport/mcp.js';
 
 test('MCP adapter advertises only the core typed read-only runtime tools', async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
