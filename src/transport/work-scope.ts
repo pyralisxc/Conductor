@@ -27,7 +27,6 @@ interface WorkContext {
   repository: string;
   expiresAt: number;
   id: string;
-  vercel?: VercelReadEvidence;
 }
 
 function contextSignature(payload: string): string {
@@ -65,6 +64,7 @@ export interface BootstrapEvidence {
   observedAt: string;
   expiresAt: number;
   id: string;
+  vercel?: VercelReadEvidence;
 }
 
 function bootstrapEvidenceSignature(payload: string): string {

@@ -371,6 +371,7 @@ export class ConductorToolRuntime {
         return {
           result: {
             contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+            catalogVersion: TOOL_CATALOG_VERSION,
             catalogDigest: this.catalogDigest(),
             operations: this.operationDefinitions(),
             capabilities,
