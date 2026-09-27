@@ -23,21 +23,22 @@ test('MCP adapter advertises only the core typed read-only runtime tools', async
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
+  try {
+    const listed = await client.listTools();
+    assert.deepEqual(listed.tools.map((tool) => tool.name), [
+      'capabilities',
+      'preflight_project',
+      'evidence.bundle',
+    ]);
+    assert.equal(listed.tools.every((tool) => tool.annotations?.readOnlyHint), true);
 
-  const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name), [
-    'capabilities',
-    'preflight_project',
-    'evidence.bundle',
-  ]);
-  assert.equal(listed.tools.every((tool) => tool.annotations?.readOnlyHint), true);
-
-  const called = await client.callTool({ name: 'capabilities', arguments: {} });
-  const content = called.structuredContent as { receipt: { operationId: string } };
-  assert.equal(content.receipt.operationId, 'op-mcp');
-
-  await client.close();
-  await server.close();
+    const called = await client.callTool({ name: 'capabilities', arguments: {} });
+    const result = called.structuredContent as { receipt: { operationId: string } };
+    assert.equal(result.receipt.operationId, 'op-mcp');
+  } finally {
+    await client.close().catch(() => undefined);
+    await server.close().catch(() => undefined);
+  }
 });
 
 test('HTTP MCP boundary publishes OAuth metadata and fails closed', async () => {
@@ -77,10 +78,13 @@ test('HTTP MCP boundary publishes OAuth metadata and fails closed', async () => 
     const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
       requestInit: { headers: { Authorization: 'Bearer valid-token' } },
     });
-    await client.connect(transport);
-    const tools = await client.listTools();
-    assert.equal(tools.tools.length, 3);
-    await client.close();
+    try {
+      await client.connect(transport);
+      const tools = await client.listTools();
+      assert.equal(tools.tools.length, 3);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
   } finally {
     httpServer.close();
     await once(httpServer, 'close');
@@ -120,15 +124,18 @@ test('MCP advertises bounded mutations only when durable mutation infrastructure
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name), [
-    'capabilities', 'preflight_project', 'evidence.bundle', 'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create',
-    'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
-    'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
-  ]);
-  assert.equal(listed.tools.find((tool) => tool.name === 'git.branch.create')?.annotations?.readOnlyHint, false);
-  await client.close();
-  await server.close();
+  try {
+    const listed = await client.listTools();
+    assert.deepEqual(listed.tools.map((tool) => tool.name), [
+      'capabilities', 'preflight_project', 'evidence.bundle', 'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create',
+      'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
+      'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
+    ]);
+    assert.equal(listed.tools.find((tool) => tool.name === 'git.branch.create')?.annotations?.readOnlyHint, false);
+  } finally {
+    await client.close().catch(() => undefined);
+    await server.close().catch(() => undefined);
+  }
 });
 
 test('MCP publishes DI-first exact source and CI drill-down reads when their providers are configured', async () => {
