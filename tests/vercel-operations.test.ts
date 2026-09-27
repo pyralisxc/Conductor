@@ -47,7 +47,7 @@ function fixture() {
       if (url.pathname === '/v9/projects/prj_app/custom-environments') return Response.json({ environments: [] });
       if (url.pathname === '/v4/aliases') return Response.json({ aliases: [] });
       if (url.pathname === '/v6/deployments') return Response.json({ deployments: [] });
-      if (url.pathname === '/v1/projects/prj_app/deployments/dpl_preview/runtime-logs') return Response.json({ logs: [{ message: 'TOKEN=hidden', created: 1 }] });
+      if (url.pathname === '/api/logs/request-logs') return Response.json({ rows: [{ requestId: 'req_1', timestamp: '2026-09-27T00:00:00.000Z', deploymentId: 'dpl_preview', requestMethod: 'GET', requestPath: '/api/test', statusCode: 200, environment: 'preview', branch: 'preview', logs: [{ level: 'info', message: 'TOKEN=hidden' }], events: [{ source: 'serverless' }] }], hasMoreRows: false });
       return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
     },
   });
@@ -177,7 +177,7 @@ test('runtime log preflight does not claim endpoint permission from a direct tok
   const { provider, project } = fixture();
   const preflight = (await provider.preflightOperation(project, 'deployment.runtime-logs'))?.[0];
   assert.equal(preflight?.status, 'degraded');
-  assert.match(preflight?.diagnostics[0]?.message ?? '', /runtime-log endpoint access is unverified/u);
+  assert.match(preflight?.diagnostics[0]?.message ?? '', /runtime request-log access is unverified/u);
 });
 
 test('connected Vercel integration reports the documented runtime-log scope boundary without calling the endpoint', async () => {
@@ -207,7 +207,7 @@ test('connected Vercel integration reports the documented runtime-log scope boun
       return true;
     },
   );
-  assert.equal(calls.some(path => path.includes('/runtime-logs')), false);
+  assert.equal(calls.some(path => path.includes('/runtime-logs') || path === '/api/logs/request-logs'), false);
 });
 
 test('runtime logs stay bound and redact secrets', async () => {
@@ -304,6 +304,7 @@ test('runtime-log direct opt-in preserves installation identity checks and uses 
   const authorization = new Map<string, string>();
   const provider = new VercelDeploymentProvider({
     token: 'direct-token',
+    logsBaseUrl: 'https://vercel.test',
     bindings: [{ id: 'app', project: 'app', teamId: 'team_1', connectionId: 'icfg_1', runtimeLogsDirect: true }],
     tokenResolver: async () => 'installation-token',
     fetch: async (input, init) => {
@@ -311,7 +312,7 @@ test('runtime-log direct opt-in preserves installation identity checks and uses 
       authorization.set(url.pathname, (init?.headers as Record<string, string> | undefined)?.Authorization ?? '');
       if (url.pathname === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app' });
       if (url.pathname === '/v13/deployments/dpl_preview') return Response.json({ id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: 'preview' });
-      if (url.pathname === '/v1/projects/prj_app/deployments/dpl_preview/runtime-logs') return Response.json({ logs: [{ message: 'TOKEN=hidden', created: 1 }] });
+      if (url.pathname === '/api/logs/request-logs') return Response.json({ rows: [{ requestId: 'req_direct', timestamp: '2026-09-27T00:00:00.000Z', deploymentId: 'dpl_preview', requestMethod: 'GET', requestPath: '/api/direct', statusCode: 200, environment: 'preview', logs: [{ level: 'info', message: 'TOKEN=hidden' }], events: [{ source: 'serverless' }] }], hasMoreRows: false });
       return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
     },
   });
@@ -322,66 +323,52 @@ test('runtime-log direct opt-in preserves installation identity checks and uses 
   const logs = await provider.getRuntimeLogs({ project, deploymentId: 'dpl_preview', limit: 10 });
   assert.equal(authorization.get('/v9/projects/app'), 'Bearer installation-token');
   assert.equal(authorization.get('/v13/deployments/dpl_preview'), 'Bearer installation-token');
-  assert.equal(authorization.get('/v1/projects/prj_app/deployments/dpl_preview/runtime-logs'), 'Bearer direct-token');
+  assert.equal(authorization.get('/api/logs/request-logs'), 'Bearer direct-token');
   assert.doesNotMatch(JSON.stringify(logs), /TOKEN=hidden/);
   assert.match(JSON.stringify(logs), /redacted/);
 });
 
-
-test('runtime log reader returns from a live stream without waiting for EOF', async () => {
-  const encoder = new TextEncoder();
+test('runtime request-log snapshot is exact and uses current CLI query shape', async () => {
+  const seen: URL[] = [];
   const provider = new VercelDeploymentProvider({
     token: 'direct-token',
-    runtimeLogIdleMs: 20,
-    runtimeLogTotalMs: 100,
-    bindings: [{ id: 'app', project: 'app', repository: 'owner/app' }],
-    fetch: async (input) => {
+    logsBaseUrl: 'https://vercel.test',
+    now: () => new Date('2026-09-27T05:00:00.000Z'),
+    bindings: [{ id: 'app', project: 'app', teamId: 'team_1', repository: 'owner/app' }],
+    fetch: async input => {
       const url = new URL(String(input));
-      if (url.pathname === '/v9/projects/app') {
-        return Response.json({ id: 'prj_app', name: 'app', link: { type: 'github', org: 'owner', repo: 'app' } });
-      }
-      if (url.pathname === '/v13/deployments/dpl_live') {
-        return Response.json({ id: 'dpl_live', projectId: 'prj_app', readyState: 'READY', target: 'production', meta: { githubCommitSha: 'a'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/app' } });
-      }
-      if (url.pathname === '/v1/projects/prj_app/deployments/dpl_live/runtime-logs') {
-        return new Response(new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(encoder.encode('data: {"message":"TOKEN=hidden","created":1}\n\n'));
-          },
-        }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
-      }
-      return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
-    },
-  });
-
-  const started = Date.now();
-  const logs = await provider.getRuntimeLogs({ project: { id: 'app', repository: 'owner/app' }, deploymentId: 'dpl_live', limit: 10 });
-  assert.ok(Date.now() - started < 500);
-  assert.equal(logs.idleTimedOut, true);
-  assert.equal(logs.streamEnded, false);
-  assert.equal((logs.entries as unknown[]).length, 1);
-  assert.doesNotMatch(JSON.stringify(logs), /TOKEN=hidden/);
-  assert.match(JSON.stringify(logs), /redacted/);
-});
-
-test('runtime log reader returns bounded empty evidence when a live stream is idle', async () => {
-  const provider = new VercelDeploymentProvider({
-    token: 'direct-token',
-    runtimeLogIdleMs: 20,
-    runtimeLogTotalMs: 100,
-    bindings: [{ id: 'app', project: 'app', repository: 'owner/app' }],
-    fetch: async (input) => {
-      const url = new URL(String(input));
+      seen.push(url);
       if (url.pathname === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app', link: { type: 'github', org: 'owner', repo: 'app' } });
-      if (url.pathname === '/v13/deployments/dpl_idle') return Response.json({ id: 'dpl_idle', projectId: 'prj_app', readyState: 'READY', target: 'production' });
-      if (url.pathname === '/v1/projects/prj_app/deployments/dpl_idle/runtime-logs') {
-        return new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
-      }
+      if (url.pathname === '/v13/deployments/dpl_snapshot') return Response.json({ id: 'dpl_snapshot', projectId: 'prj_app', createdAt: Date.parse('2026-09-27T04:00:00.000Z'), readyState: 'READY', target: 'production', meta: { githubCommitSha: 'a'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/app' } });
+      if (url.pathname === '/api/logs/request-logs') return Response.json({ rows: [{ requestId: 'req_snapshot', timestamp: '2026-09-27T04:59:00.000Z', deploymentId: 'dpl_snapshot', requestMethod: 'POST', requestPath: '/api/example?token=hidden', statusCode: 500, environment: 'production', branch: 'main', logs: [{ level: 'error', message: 'api_key=super-secret-value' }], events: [{ source: 'serverless' }] }], hasMoreRows: false });
       return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
     },
   });
+  const logs = await provider.getRuntimeLogs({ project: { id: 'app', repository: 'owner/app' }, deploymentId: 'dpl_snapshot', limit: 10 });
+  const u = seen.find(url => url.pathname === '/api/logs/request-logs');
+  assert.ok(u);
+  assert.equal(u.searchParams.get('projectId'), 'prj_app');
+  assert.equal(u.searchParams.get('ownerId'), 'team_1');
+  assert.equal(u.searchParams.get('deploymentId'), 'dpl_snapshot');
+  assert.equal(u.searchParams.get('page'), '0');
+  assert.equal(logs.source, 'request-logs');
+  assert.equal(logs.sourceRevision, 'a'.repeat(40));
+  assert.doesNotMatch(JSON.stringify(logs), /super-secret-value/);
+  assert.match(JSON.stringify(logs), /redacted/);
+});
 
-  const logs = await provider.getRuntimeLogs({ project: { id: 'app', repository: 'owner/app' }, deploymentId: 'dpl_idle', limit: 10 });
-  assert.equal(logs.idleTimedOut, true);
-  assert.deepEqual(logs.entries, []);
+test('runtime request-log snapshot fails closed on crossed deployment evidence', async () => {
+  const provider = new VercelDeploymentProvider({
+    token: 'direct-token',
+    logsBaseUrl: 'https://vercel.test',
+    bindings: [{ id: 'app', project: 'app', teamId: 'team_1' }],
+    fetch: async input => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app' });
+      if (url.pathname === '/v13/deployments/dpl_expected') return Response.json({ id: 'dpl_expected', projectId: 'prj_app', readyState: 'READY', target: 'production' });
+      if (url.pathname === '/api/logs/request-logs') return Response.json({ rows: [{ deploymentId: 'dpl_other' }] });
+      return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
+    },
+  });
+  await assert.rejects(provider.getRuntimeLogs({ project: { id: 'app' }, deploymentId: 'dpl_expected', limit: 10 }), (error: unknown) => (error as { code?: string }).code === 'PERMISSION_DENIED');
 });
