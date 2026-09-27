@@ -339,7 +339,6 @@ test('repository audit succeeds without DI and keeps semantic audit separate', a
   };
   const runtime = new ConductorToolRuntime({
     providers: [githubPreflight],
-    workItemProvider: workProvider,
     workItemCandidateProvider: workProvider,
     repositoryAuditProvider: {
       id: 'github-audit',
@@ -382,7 +381,6 @@ test('repository audit attaches DI findings as a separate semantic plane', async
   };
   const runtime = new ConductorToolRuntime({
     providers: [],
-    workItemProvider: workProvider,
     workItemCandidateProvider: workProvider,
     repositoryAuditProvider: {
       id: 'github-audit',
