@@ -44,6 +44,10 @@ import {
   type WorkBootstrapProjection,
   type GetRepositoryAuditInput,
   type RepositoryAuditProjection,
+  type GetEvidenceBundleInput,
+  type EvidenceBundleProjection,
+  type EvidenceBundleItemInput,
+  type EvidenceBundleItemResult,
   type RepositoryAuditFinding,
   type GetDevelopmentStatusInput,
   type DevelopmentStatusProjection,
@@ -124,6 +128,13 @@ const REPOSITORY_ACQUISITION_MUTATION_DEFINITION: ToolDefinition = {
 const WORK_BOOTSTRAP_READ_DEFINITION: ToolDefinition = {
   name: 'work.bootstrap',
   description: 'Return one compact client-bound development bootstrap snapshot with catalog freshness, repository topology, work/preflight state, DI posture, and deployment posture.',
+  mutates: false,
+};
+
+
+const EVIDENCE_BUNDLE_READ_DEFINITION: ToolDefinition = {
+  name: 'evidence.bundle',
+  description: 'Run a bounded read-only evidence matrix with explicit per-item identity, failure isolation, and a small concurrency ceiling.',
   mutates: false,
 };
 
@@ -611,6 +622,166 @@ export class ConductorToolRuntime {
     );
   }
 
+
+
+  async evidenceBundle(input: GetEvidenceBundleInput): Promise<ExecutionReceipt<EvidenceBundleProjection>> {
+    const items = input.items ?? [];
+    const concurrency = Math.min(Math.max(Math.trunc(input.concurrency ?? 3), 1), 4);
+    return await this.executeRead(
+      'evidence.bundle',
+      { kind: 'runtime', id: 'conductor' },
+      async () => {
+        if (items.length < 1 || items.length > 12) {
+          throw { code: 'CONFLICT', message: 'Evidence bundle requires between 1 and 12 items' };
+        }
+        const keys = new Set<string>();
+        for (const item of items) {
+          const key = item.key.trim();
+          if (!/^[A-Za-z0-9._:/-]{1,100}$/u.test(key)) {
+            throw { code: 'CONFLICT', message: `Invalid evidence bundle key: ${item.key}` };
+          }
+          if (keys.has(key)) throw { code: 'CONFLICT', message: `Duplicate evidence bundle key: ${key}` };
+          keys.add(key);
+        }
+
+        const startedAt = Date.now();
+        const results = await boundedEvidenceMap(items, concurrency, async (item) =>
+          await this.runEvidenceBundleItem(item)
+        );
+        const succeeded = results.filter((item) => item.status === 'succeeded').length;
+        return {
+          result: {
+            contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+            concurrency,
+            itemCount: results.length,
+            succeeded,
+            failed: results.length - succeeded,
+            elapsedMs: Math.max(0, Date.now() - startedAt),
+            items: results,
+            note: 'Read-only bundle execution preserves input order, limits concurrency, performs no hidden retries, and keeps per-item failures explicit.',
+          },
+        };
+      },
+    );
+  }
+
+  private async runEvidenceBundleItem(item: EvidenceBundleItemInput): Promise<EvidenceBundleItemResult> {
+    const startedAt = Date.now();
+    const project = this.resolveProjectReference(item.project);
+    try {
+      if (item.operation === 'preflight_project') {
+        const receipt = await this.preflightProject(project, item.intent ?? 'inspect');
+        if (receipt.status === 'failed') return failedEvidenceBundleItem(item, project, receipt.error, startedAt);
+        const result = receipt.result;
+        return succeededEvidenceBundleItem(item, project, startedAt,
+          `Project preflight is ${result.status} for ${project.repository ?? project.id}.`,
+          { repository: project.repository },
+          {
+            intent: result.intent,
+            status: result.status,
+            checks: result.checks.map((check) => ({
+              check: check.check,
+              status: check.status,
+              provider: check.provider,
+              summary: check.summary,
+            })),
+          },
+        );
+      }
+      if (item.operation === 'deployment.status') {
+        const receipt = await this.deploymentStatus({ project, limit: Math.min(Math.max(item.limit ?? 5, 1), 10) });
+        if (receipt.status === 'failed') return failedEvidenceBundleItem(item, project, receipt.error, startedAt);
+        const result = receipt.result;
+        return succeededEvidenceBundleItem(item, project, startedAt,
+          `Deployment posture read for ${result.project.name}.`,
+          { projectId: result.project.id, deploymentId: result.production?.id },
+          {
+            project: result.project,
+            production: result.production ? compactDeployment(result.production) : null,
+            latestProductionAttempt: result.latestProductionAttempt ? compactDeployment(result.latestProductionAttempt) : null,
+            recent: result.recent.slice(0, Math.min(Math.max(item.limit ?? 5, 1), 10)).map(compactDeployment),
+            observedAt: result.observedAt,
+          },
+        );
+      }
+      if (item.operation === 'deployment.runtime-logs') {
+        const receipt = await this.deploymentRuntimeLogs({
+          project,
+          deploymentId: item.deploymentId,
+          limit: Math.min(Math.max(item.limit ?? 20, 1), 20),
+        });
+        if (receipt.status === 'failed') return failedEvidenceBundleItem(item, project, receipt.error, startedAt);
+        const result = receipt.result as Record<string, unknown>;
+        const entries = Array.isArray(result.entries) ? result.entries.slice(0, 20) : [];
+        return succeededEvidenceBundleItem(item, project, startedAt,
+          `Runtime evidence read for deployment ${item.deploymentId}.`,
+          { deploymentId: item.deploymentId, projectId: typeof result.projectId === 'string' ? result.projectId : undefined },
+          {
+            entries,
+            truncated: result.truncated ?? false,
+            source: result.source ?? null,
+            observedAt: result.observedAt ?? null,
+            coverage: result.coverage ?? null,
+            note: result.note ?? null,
+          },
+        );
+      }
+      if (item.operation === 'pull-request.status') {
+        const receipt = await this.pullRequestStatus({ project, pullRequestNumber: item.pullRequestNumber });
+        if (receipt.status === 'failed') return failedEvidenceBundleItem(item, project, receipt.error, startedAt);
+        const result = receipt.result;
+        return succeededEvidenceBundleItem(item, project, startedAt,
+          `PR #${result.pullRequestNumber} is ${result.orchestration.state}.`,
+          { repository: result.repository, pullRequestNumber: result.pullRequestNumber, revision: result.head.sha },
+          {
+            state: result.state,
+            draft: result.draft,
+            merged: result.merged,
+            head: result.head,
+            base: result.base,
+            checks: {
+              total: result.checks.total,
+              pending: result.checks.pending,
+              successful: result.checks.successful,
+              failed: result.checks.failed,
+            },
+            workflowRuns: result.workflowRuns.slice(0, 10).map((run) => ({
+              id: run.id,
+              name: run.name,
+              status: run.status,
+              conclusion: run.conclusion,
+              historical: run.historical ?? false,
+            })),
+            orchestration: result.orchestration,
+          },
+        );
+      }
+      const receipt = await this.repositoryAudit({ project, limit: Math.min(Math.max(item.limit ?? 8, 1), 12) });
+      if (receipt.status === 'failed') return failedEvidenceBundleItem(item, project, receipt.error, startedAt);
+      const result = receipt.result;
+      return succeededEvidenceBundleItem(item, project, startedAt,
+        `Repository audit returned ${result.findings.length} provider-facts finding(s).`,
+        { repository: result.github?.repository },
+        {
+          topology: result.github?.topology ?? null,
+          work: result.work,
+          deployment: {
+            status: result.deployment.status,
+            project: result.deployment.project?.project ?? null,
+            production: result.deployment.project?.production ? compactDeployment(result.deployment.project.production) : null,
+          },
+          intelligence: {
+            status: result.intelligence.status,
+            summary: result.intelligence.summary,
+          },
+          findings: result.findings.slice(0, 12),
+          observedAt: result.observedAt,
+        },
+      );
+    } catch (error) {
+      return failedEvidenceBundleItem(item, project, normalizeToolError(error), startedAt);
+    }
+  }
 
   async repositoryAudit(input: GetRepositoryAuditInput): Promise<ExecutionReceipt<RepositoryAuditProjection>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
@@ -1347,6 +1518,7 @@ export class ConductorToolRuntime {
       ...(this.repositoryAcquisitionReadEnabled ? [REPOSITORY_ACQUISITION_PREFLIGHT_DEFINITION] : []),
       ...(this.repositoryAcquisitionMutationEnabled ? [REPOSITORY_ACQUISITION_MUTATION_DEFINITION] : []),
       ...(this.workBootstrapReadEnabled ? [WORK_BOOTSTRAP_READ_DEFINITION] : []),
+      EVIDENCE_BUNDLE_READ_DEFINITION,
       ...(this.repositoryAuditReadEnabled ? [REPOSITORY_AUDIT_READ_DEFINITION] : []),
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
@@ -1593,4 +1765,74 @@ function lifecycleProjection(
   gate: LifecycleGateSpec | null = null,
 ): LifecycleAdvanceProjection {
   return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, project, issueNumber, stage, summary, transitions, previewProof, gate };
+}
+
+
+async function boundedEvidenceMap<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function succeededEvidenceBundleItem(
+  item: EvidenceBundleItemInput,
+  project: ProjectReference,
+  startedAt: number,
+  summary: string,
+  identifiers: EvidenceBundleItemResult['identifiers'],
+  evidence: Record<string, unknown>,
+): EvidenceBundleItemResult {
+  return {
+    key: item.key,
+    operation: item.operation,
+    project,
+    status: 'succeeded',
+    elapsedMs: Math.max(0, Date.now() - startedAt),
+    summary,
+    identifiers,
+    evidence,
+  };
+}
+
+function failedEvidenceBundleItem(
+  item: EvidenceBundleItemInput,
+  project: ProjectReference,
+  error: import('./types.js').NormalizedToolError,
+  startedAt: number,
+): EvidenceBundleItemResult {
+  return {
+    key: item.key,
+    operation: item.operation,
+    project,
+    status: 'failed',
+    elapsedMs: Math.max(0, Date.now() - startedAt),
+    summary: error.message,
+    identifiers: {},
+    error,
+  };
+}
+
+function compactDeployment(deployment: import('./types.js').DeploymentRecord): Record<string, unknown> {
+  return {
+    id: deployment.id,
+    state: deployment.state,
+    target: deployment.target,
+    sourceRevision: deployment.sourceRevision,
+    sourceRef: deployment.sourceRef,
+    sourceRepository: deployment.sourceRepository,
+    createdAt: deployment.createdAt,
+    errorCode: deployment.errorCode,
+  };
 }

@@ -14,6 +14,8 @@ This document tests the **current bounded runtime**. Future automation experimen
 6. Development Intelligence outage is explicit and fails the required preflight lane closed.
 7. OAuth read tokens cannot call mutation tools; write scope is explicit.
 8. `work.bootstrap` returns the current runtime catalog version/digest; echoing an older digest reports `stale-client-schema` instead of generic provider unavailability. A fresh bootstrap Vercel proof can remove the repeated project-identity read from adjacent read-only operations, while stale proof falls back to a fresh project read and mutations always re-read authoritative provider identity.
+8a. `evidence.bundle` executes 1–12 declared-safe reads with a concurrency ceiling of 1–4, preserves input order and exact project/resource identity, isolates partial failures, and performs no mutation or hidden retry.
+8b. A five-project runtime acceptance matrix can be represented in one model-visible `evidence.bundle` call while each deployment/runtime source remains independently attributable and actionable.
 
 ## Current runtime — durable work and routing
 
