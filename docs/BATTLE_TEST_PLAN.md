@@ -13,7 +13,7 @@ This document tests the **current bounded runtime**. Future automation experimen
 5. GitHub App operation preflight proves the exact permissions used by execution; static-token fallback is reported as degraded where operation-specific proof is unavailable.
 6. Development Intelligence outage is explicit and fails the required preflight lane closed.
 7. OAuth read tokens cannot call mutation tools; write scope is explicit.
-8. `work.bootstrap` returns the current runtime catalog digest; echoing an older digest reports `stale-client-schema` instead of generic provider unavailability. The connected MCP/client schema must still expose the operations advertised by the deployed runtime.
+8. `work.bootstrap` returns the current runtime catalog version/digest; echoing an older digest reports `stale-client-schema` instead of generic provider unavailability. A fresh bootstrap Vercel proof can remove the repeated project-identity read from adjacent read-only operations, while stale proof falls back to a fresh project read and mutations always re-read authoritative provider identity.
 
 ## Current runtime — durable work and routing
 

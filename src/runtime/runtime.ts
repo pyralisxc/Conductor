@@ -18,6 +18,7 @@ import {
 import { normalizeToolError } from './errors.js';
 import {
   TOOL_RUNTIME_CONTRACT_VERSION,
+  TOOL_CATALOG_VERSION,
   type CapabilityAvailability,
   type CapabilityReport,
   type ExecutionReceipt,
@@ -73,7 +74,7 @@ import {
   type GetDeploymentLogsInput,
   type DeploymentProjectStatus,
   type DeploymentLogs,
-  type VercelProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput, type VercelVcrRepositoryInput, type VercelVcrCreateInput,
+  type VercelProjectInput, type VercelReadProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput, type VercelVcrRepositoryInput, type VercelVcrCreateInput,
 } from './types.js';
 import { IdempotentMutationExecutor } from './idempotency.js';
 
@@ -473,6 +474,7 @@ export class ConductorToolRuntime {
     return createHash('sha256')
       .update(JSON.stringify({
         contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+        catalogVersion: TOOL_CATALOG_VERSION,
         operations: this.operationDefinitions()
           .map(({ name, mutates }) => ({ name, mutates }))
           .sort((left, right) => left.name.localeCompare(right.name)),
@@ -515,6 +517,9 @@ export class ConductorToolRuntime {
             deployment = {
               provider: status.provider,
               projectId: status.project.id,
+              projectName: status.project.name,
+              teamId: status.project.teamId,
+              productionBranch: status.project.productionBranch,
               production: status.production,
               observedAt: status.observedAt,
             };
@@ -532,6 +537,7 @@ export class ConductorToolRuntime {
         return {
           result: {
             contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
+            catalogVersion: TOOL_CATALOG_VERSION,
             catalogDigest,
             clientCatalog: { suppliedDigest, freshness },
             project: resolvedProject,
@@ -703,7 +709,7 @@ export class ConductorToolRuntime {
   }
   async deploymentAudit(input: VercelProjectInput) { return this.vercelRead('deployment.audit', input, (provider, project) => provider.getAudit({ project })); }
   async deploymentRuntimeLogs(input: VercelRuntimeLogsInput) { return this.vercelRead('deployment.runtime-logs', input, (provider, project) => provider.getRuntimeLogs({ ...input, project })); }
-  async deploymentEnvironmentList(input: VercelProjectInput) { return this.vercelRead('deployment.env.list', input, (provider, project) => provider.listEnvironment({ project })); }
+  async deploymentEnvironmentList(input: VercelReadProjectInput) { return this.vercelRead('deployment.env.list', input, (provider, project) => provider.listEnvironment({ ...input, project })); }
   async deploymentVcrGet(input: VercelVcrRepositoryInput) { return this.vercelRead('deployment.vcr.get', input, (provider, project) => provider.getVcrRepository({ ...input, project })); }
 
   private async vercelMutation<Result>(operation: import('./types.js').MutationOperationName, input: VercelProjectInput & { idempotencyKey: string }, mutate: (provider: VercelOperationsProvider, project: ProjectReference) => Promise<Result>): Promise<ExecutionReceipt<Result>> {
