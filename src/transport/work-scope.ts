@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { Redis } from '@upstash/redis';
-import type { ProjectReference, VercelReadEvidence } from '../runtime/types.js';
+import type { ProjectReference, VercelReadEvidence, LifecycleGateSpec, LifecycleGateKind } from '../runtime/types.js';
 import { derivedSecret } from './owner-auth.js';
 
 export type WorkAction = 'route-work' | 'develop';
@@ -52,6 +52,44 @@ function contextRepository(token: string, clientId: string): string {
   catch { throw new Error('Invalid work context'); }
 }
 
+
+
+const LIFECYCLE_GATE_TTL_MS = 2 * 60 * 60 * 1000;
+export interface LifecycleGateEvidence extends LifecycleGateSpec {
+  v: 1;
+  clientFingerprint: string;
+  repository: string;
+  projectId: string;
+  expiresAt: number;
+  id: string;
+}
+function lifecycleGateSignature(payload: string): string {
+  return createHmac('sha256', derivedSecret('lifecycle-gate')).update(payload).digest('base64url');
+}
+export function issueLifecycleGate(clientId: string, input: { repository: string; projectId: string; gate: LifecycleGateSpec }): { handle: string; expiresAt: number; gateId: string } {
+  const repository = normalizeRepository(input.repository);
+  if (!Number.isSafeInteger(input.gate.issueNumber) || input.gate.issueNumber < 1) throw new Error('Invalid lifecycle gate issue');
+  const expiresAt = Date.now() + LIFECYCLE_GATE_TTL_MS;
+  const id = randomUUID();
+  const value: LifecycleGateEvidence = { ...input.gate, v: 1, clientFingerprint: clientFingerprint(clientId), repository, projectId: input.projectId, expiresAt, id };
+  const payload = Buffer.from(JSON.stringify(value)).toString('base64url');
+  return { handle: `${payload}.${lifecycleGateSignature(payload)}`, expiresAt, gateId: id };
+}
+export function verifyLifecycleGate(handle: string, clientId: string, expected: { repository: string; projectId: string; issueNumber?: number; kind?: LifecycleGateKind; allowedNextOperation?: 'lifecycle.advance' | 'lifecycle.resume' }): LifecycleGateEvidence {
+  if (handle.length > 4096) throw new Error('Invalid lifecycle gate');
+  const parts = handle.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error('Invalid lifecycle gate');
+  const expectedSignature = Buffer.from(lifecycleGateSignature(parts[0]));
+  const received = Buffer.from(parts[1]);
+  if (expectedSignature.length !== received.length || !timingSafeEqual(expectedSignature, received)) throw new Error('Invalid lifecycle gate');
+  let value: LifecycleGateEvidence;
+  try { value = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as LifecycleGateEvidence; } catch { throw new Error('Invalid lifecycle gate'); }
+  if (!value || value.v !== 1 || value.clientFingerprint !== clientFingerprint(clientId) || value.repository !== normalizeRepository(expected.repository) || value.projectId !== expected.projectId || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= Date.now() || value.expiresAt > Date.now() + LIFECYCLE_GATE_TTL_MS || typeof value.id !== 'string') throw new Error('Expired or mismatched lifecycle gate');
+  if (expected.issueNumber !== undefined && value.issueNumber !== expected.issueNumber) throw new Error('Lifecycle gate issue mismatch');
+  if (expected.kind !== undefined && value.kind !== expected.kind) throw new Error('Lifecycle gate kind mismatch');
+  if (expected.allowedNextOperation !== undefined && value.allowedNextOperation !== expected.allowedNextOperation) throw new Error('Lifecycle gate operation mismatch');
+  return value;
+}
 
 const BOOTSTRAP_EVIDENCE_TTL_MS = 5 * 60 * 1000;
 
