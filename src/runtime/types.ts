@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v1' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v2' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -7,6 +7,7 @@ export type ToolOperationName =
   | 'preflight_operation'
   | 'repository.acquire.preflight'
   | 'work.bootstrap'
+  | 'repository.audit'
   | 'development.status'
   | 'pull-request.status'
   | 'source.artifact.read'
@@ -289,6 +290,73 @@ export interface WorkBootstrapProjection {
     production: DeploymentRecord | null;
     observedAt: string;
   } | null;
+  observedAt: string;
+}
+
+export interface RepositoryProviderAudit {
+  provider: 'github';
+  repository: string;
+  topology: RepositoryBootstrapTopology;
+  developmentBranches: {
+    items: Array<{
+      name: string;
+      sha: string;
+      protected: boolean;
+      hasOpenPullRequest: boolean | null;
+    }>;
+    truncated: boolean;
+  };
+  openPullRequests: {
+    items: PullRequestStatus[];
+    truncated: boolean;
+  };
+  observedAt: string;
+}
+
+export interface GetRepositoryAuditInput {
+  project: ProjectReference;
+  limit?: number;
+}
+
+export type RepositoryAuditFindingState = 'observed' | 'attention' | 'blocked' | 'unavailable';
+
+export interface RepositoryAuditFinding {
+  code: string;
+  source: string;
+  category: 'capability' | 'topology' | 'pull-request' | 'work-item' | 'deployment';
+  state: RepositoryAuditFindingState;
+  basis: 'provider-native' | 'conductor-derived';
+  summary: string;
+  evidence: Record<string, DiagnosticValue>;
+}
+
+export interface RepositoryAuditProjection {
+  contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
+  project: ProjectReference;
+  preflight: ProjectPreflight;
+  github: RepositoryProviderAudit | null;
+  work: {
+    counts: DevelopmentStatusWorkCounts;
+    hygiene: {
+      unknownStatus: number;
+      unknownKind: number;
+      unknownOrigin: number;
+      sampleIssueNumbers: number[];
+    };
+    truncated: boolean;
+  };
+  deployment: {
+    status: 'ready' | 'unavailable';
+    project: DeploymentProjectStatus | null;
+    audit: Record<string, unknown> | null;
+    summary: string;
+  };
+  intelligence: {
+    status: 'ready' | 'degraded' | 'unavailable';
+    audit: Record<string, unknown> | null;
+    summary: string;
+  };
+  findings: RepositoryAuditFinding[];
   observedAt: string;
 }
 
@@ -662,6 +730,7 @@ export type WorkItemKind =
   | 'improvement'
   | 'maintenance'
   | 'operations'
+  | 'audit'
   | 'unknown';
 
 export type MutableWorkItemKind = Exclude<WorkItemKind, 'unknown'>;

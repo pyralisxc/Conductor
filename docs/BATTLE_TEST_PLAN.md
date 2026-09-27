@@ -25,6 +25,9 @@ This document tests the **current bounded runtime**. Future automation experimen
 14. An exact issue in a second provider-accessible repository can receive a routed comment, lifecycle update, and classification change without granting code-work authority there.
 15. Replaying the same routed issue comment is idempotent, and issue-comment mutation refuses pull requests.
 16. A confirmed duplicate can be linked to its canonical issue before closure; title similarity alone never authorizes closing work.
+16a. `kind:audit` round-trips through issue creation/classification without replacing unrelated labels.
+16b. `repository.audit` succeeds with Development Intelligence disconnected and reports GitHub/work/Vercel provider facts with explicit availability boundaries.
+16c. When Development Intelligence is available, its `audit_repository` result is attached as a separate semantic evidence plane and never merged into Conductor provider facts or mutation authority.
 
 ## Current runtime — bounded development
 

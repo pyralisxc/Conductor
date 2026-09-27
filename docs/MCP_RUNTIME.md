@@ -122,3 +122,12 @@ Bootstrap also returns a short-lived HMAC-signed evidence handle bound to the au
 
 
 The runtime publishes both `catalogVersion` and `catalogDigest`. The digest includes the explicit catalog revision as well as exposed operation identities. Any MCP input/output schema change that matters to callers must bump `TOOL_CATALOG_VERSION`; this is deliberate so changing an existing tool schema cannot remain invisible merely because its operation name is unchanged.
+
+
+## Repository audit and Slack Stewardship baseline
+
+`repository.audit` is the read-only provider-facts audit surface used by Slack Stewardship and no-DI baseline development. It composes bounded GitHub topology, sampled active PR/check/workflow state, durable-work classification hygiene, inspect preflight, and configured Vercel posture in one model-visible call. Independent read lanes are executed concurrently where safe and partial provider gaps stay explicit.
+
+Development Intelligence `audit_repository` is attached only as a separate semantic evidence plane when available. Conductor never converts DI findings into provider facts, rankings, mutation authority, or automatic implementation. Without DI, `repository.audit` still succeeds with the provider/source-control baseline when GitHub/work evidence is available.
+
+The audit operation is strictly read-only. It does not create issues, mutate source, select work, or change the active Development OS referent. Routing a warranted audit finding remains a separate `route-work` mutation.
