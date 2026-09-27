@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v3' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v4' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -25,6 +25,8 @@ export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
 export type MutationOperationName =
   | 'repository.acquire'
+  | 'lifecycle.advance'
+  | 'lifecycle.resume'
   | 'git.branch.create'
   | 'git.integration.bootstrap'
   | 'git.branch.delete'
@@ -405,6 +407,68 @@ export interface DevelopmentStatusProjection {
   };
 }
 
+
+
+export type LifecycleGateKind = 'external-wait' | 'human-approval';
+
+export interface LifecycleGateSpec {
+  kind: LifecycleGateKind;
+  allowedNextOperation: 'lifecycle.advance' | 'lifecycle.resume';
+  issueNumber: number;
+  summary: string;
+  resumeWhen: string;
+  pullRequestNumber?: number;
+  expectedHeadSha?: string;
+  expectedBaseSha?: string;
+  integrationBranch?: 'preview' | 'vercel-preview';
+  integrationHead?: string;
+  deploymentId?: string;
+}
+
+export interface LifecycleTransitionRecord {
+  operation: RuntimeOperationName;
+  status: 'observed' | 'performed' | 'replayed';
+  summary: string;
+  pullRequestNumber?: number;
+  commitSha?: string;
+  mergeCommitSha?: string;
+  deploymentId?: string;
+}
+
+export interface AdvanceLifecycleInput {
+  project: ProjectReference;
+  issueNumber: number;
+  maxPolls?: number;
+  pollIntervalMs?: number;
+  idempotencyKey: string;
+}
+
+export interface ResumeLifecycleInput {
+  project: ProjectReference;
+  issueNumber: number;
+  gateId: string;
+  pullRequestNumber: number;
+  expectedHeadSha: string;
+  expectedBaseSha: string;
+  approvalReference: string;
+  idempotencyKey: string;
+}
+
+export interface LifecycleAdvanceProjection {
+  contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
+  project: ProjectReference;
+  issueNumber: number;
+  stage: 'action-required' | 'external-wait' | 'verification-failed' | 'human-gate' | 'complete';
+  summary: string;
+  transitions: LifecycleTransitionRecord[];
+  previewProof: {
+    branch: 'preview' | 'vercel-preview';
+    commitSha: string;
+    deploymentId: string;
+    state: string;
+  } | null;
+  gate: LifecycleGateSpec | null;
+}
 
 export interface DeploymentRecord {
   id: string;

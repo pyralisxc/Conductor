@@ -49,6 +49,11 @@ import {
   type DevelopmentStatusProjection,
   type DevelopmentStatusWorkCounts,
   type DevelopmentStatusWorkItem,
+  type AdvanceLifecycleInput,
+  type ResumeLifecycleInput,
+  type LifecycleAdvanceProjection,
+  type LifecycleGateSpec,
+  type LifecycleTransitionRecord,
   type CreateBranchInput,
   type BootstrapIntegrationBranchInput,
   type DeleteBranchInput,
@@ -194,6 +199,12 @@ const PULL_REQUEST_LIFECYCLE_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'pull-request.verify.rerun', description: 'Rerun one exact verify workflow run after proving it belongs to the expected pull-request head.', mutates: true },
 ];
 
+
+const LIFECYCLE_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
+  { name: 'lifecycle.advance', description: 'Advance one canonical work item through deterministic already-authorized lifecycle mechanics until an external, failure, ambiguity, completion, or human Main gate.', mutates: true },
+  { name: 'lifecycle.resume', description: 'Resume one exact signed human continuation gate and perform only the bound Main promotion after fresh explicit owner approval.', mutates: true },
+];
+
 const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'git.branch.create', description: 'Create a work/* branch from an exact Git SHA.', mutates: true },
   { name: 'git.integration.bootstrap', description: 'Create one approved Preview integration branch from the exact current repository default-branch SHA.', mutates: true },
@@ -311,6 +322,20 @@ export class ConductorToolRuntime {
 
   get repositoryAuditReadEnabled(): boolean {
     return Boolean(this.repositoryAuditProvider && this.workItemCandidateProvider);
+  }
+
+  get lifecycleAdvanceEnabled(): boolean {
+    return Boolean(
+      this.sourceControlMutationsEnabled
+      && this.workItemCandidateProvider
+      && this.pullRequestProvider
+      && this.repositoryBootstrapProvider
+      && this.deploymentProvider
+    );
+  }
+
+  get lifecycleResumeEnabled(): boolean {
+    return Boolean(this.sourceControlMutationsEnabled && this.pullRequestProvider);
   }
 
   get developmentStatusReadEnabled(): boolean {
@@ -812,11 +837,7 @@ export class ConductorToolRuntime {
             issueNumber: workItem.issueNumber,
           });
           const artifacts = candidates.map((pullRequest) => ({
-            role: ['preview', 'vercel-preview'].includes(pullRequest.head.ref.toLowerCase())
-              ? 'main-promotion' as const
-              : ['preview', 'vercel-preview'].includes(pullRequest.base.ref.toLowerCase())
-                ? 'preview-integration' as const
-                : 'other' as const,
+            role: lifecycleTransportRole(pullRequest),
             pullRequest,
           }));
           const promotion = artifacts.find((artifact) => artifact.role === 'main-promotion');
@@ -1048,6 +1069,176 @@ export class ConductorToolRuntime {
     });
   }
 
+
+  async advanceLifecycle(input: AdvanceLifecycleInput): Promise<ExecutionReceipt<LifecycleAdvanceProjection>> {
+    const project = this.resolveProjectReference(input.project);
+    const maxPolls = Math.min(Math.max(Math.trunc(input.maxPolls ?? 2), 0), 4);
+    const pollIntervalMs = Math.min(Math.max(Math.trunc(input.pollIntervalMs ?? 500), 0), 1500);
+    return await this.executeCompositeMutation('lifecycle.advance', project, async () => {
+      if (!this.lifecycleAdvanceEnabled) throw { code: 'TOOL_UNAVAILABLE', message: 'Lifecycle advance requires GitHub work/PR mutation, topology, and deployment providers' };
+      if (!Number.isSafeInteger(input.issueNumber) || input.issueNumber < 1) throw { code: 'CONFLICT', message: 'issueNumber must be a positive integer' };
+      if (!/^[A-Za-z0-9._:/-]{8,200}$/u.test(input.idempotencyKey)) throw { code: 'CONFLICT', message: 'idempotencyKey must be 8-200 stable URL-safe characters' };
+
+      const transitions: LifecycleTransitionRecord[] = [];
+      const work = await this.workItemCandidateProvider!.getWorkItemStatus({ project, issueNumber: input.issueNumber });
+      if (work.status === 'done' || work.state === 'closed') return lifecycleProjection(project, input.issueNumber, 'complete', 'Canonical work item is already complete.', transitions);
+
+      const candidates = await this.workItemCandidateProvider!.listWorkItemPullRequests({ project, issueNumber: input.issueNumber });
+      const artifacts = candidates.map((pullRequest) => ({ role: lifecycleTransportRole(pullRequest), pullRequest }));
+      const openPromotions = artifacts.filter((item) => item.role === 'main-promotion' && item.pullRequest.state === 'open' && !item.pullRequest.merged);
+      if (openPromotions.length > 1) throw { code: 'CONFLICT', message: 'Multiple open Preview-to-Main promotion pull requests are linked to the same canonical work item' };
+
+      const pollPull = async (initial: PullRequestStatus): Promise<PullRequestStatus> => {
+        let current = initial;
+        for (let attempt = 0; attempt < maxPolls && current.orchestration.state === 'external-gate-pending'; attempt++) {
+          if (pollIntervalMs > 0) await lifecycleDelay(pollIntervalMs);
+          current = await this.pullRequestProvider!.getPullRequestStatus({
+            project,
+            pullRequestNumber: current.pullRequestNumber,
+            previous: { headSha: current.head.sha, orchestrationState: current.orchestration.state },
+          });
+        }
+        return current;
+      };
+
+      const stopForPull = (pull: PullRequestStatus, humanPromotion = false): LifecycleAdvanceProjection | null => {
+        if (pull.merged || pull.orchestration.state === 'merged') {
+          return humanPromotion ? lifecycleProjection(project, input.issueNumber, 'complete', 'Promotion pull request is already merged.', transitions) : null;
+        }
+        if (humanPromotion && pull.orchestration.state === 'promotion-ready') {
+          const gate: LifecycleGateSpec = {
+            kind: 'human-approval', allowedNextOperation: 'lifecycle.resume', issueNumber: input.issueNumber,
+            summary: `Preview candidate PR #${pull.pullRequestNumber} is technically verified and requires explicit owner approval before Main promotion.`,
+            resumeWhen: 'The owner explicitly approves this exact promotion candidate.',
+            pullRequestNumber: pull.pullRequestNumber, expectedHeadSha: pull.head.sha, expectedBaseSha: pull.base.sha,
+          };
+          return lifecycleProjection(project, input.issueNumber, 'human-gate', gate.summary, transitions, null, gate);
+        }
+        if (pull.orchestration.state === 'external-gate-pending') {
+          const gate: LifecycleGateSpec = {
+            kind: 'external-wait', allowedNextOperation: 'lifecycle.advance', issueNumber: input.issueNumber,
+            summary: pull.orchestration.summary, resumeWhen: pull.orchestration.resumeWhen ?? 'The provider gate changes.',
+            pullRequestNumber: pull.pullRequestNumber, expectedHeadSha: pull.head.sha, expectedBaseSha: pull.base.sha,
+          };
+          return lifecycleProjection(project, input.issueNumber, 'external-wait', gate.summary, transitions, null, gate);
+        }
+        if (['verification-failed', 'action-required', 'merge-blocked', 'sealed-head-verification-required', 'pre-seal-checkpoint', 'draft'].includes(pull.orchestration.state)) {
+          return lifecycleProjection(project, input.issueNumber, 'verification-failed', `PR #${pull.pullRequestNumber} stopped at ${pull.orchestration.state}: ${pull.orchestration.summary}`, transitions);
+        }
+        return null;
+      };
+
+      if (openPromotions.length === 1) {
+        const promotion = await pollPull(openPromotions[0]!.pullRequest);
+        const stop = stopForPull(promotion, true);
+        if (stop) return stop;
+      }
+
+      const openIntegrations = artifacts.filter((item) => item.role === 'preview-integration' && item.pullRequest.state === 'open' && !item.pullRequest.merged);
+      if (openIntegrations.length > 1) throw { code: 'CONFLICT', message: 'Multiple open work-to-Preview pull requests are linked to the same canonical work item' };
+
+      let integrationMergeSha: string | null = null;
+      if (openIntegrations.length === 1) {
+        const integration = await pollPull(openIntegrations[0]!.pullRequest);
+        const stop = stopForPull(integration, false);
+        if (stop) return stop;
+        if (integration.orchestration.state !== 'integration-ready') return lifecycleProjection(project, input.issueNumber, 'action-required', `Integration PR #${integration.pullRequestNumber} is not in a deterministic integration-ready state.`, transitions);
+        const merged = await this.mergeIntegrationPullRequest({
+          project, pullRequestNumber: integration.pullRequestNumber, expectedHeadSha: integration.head.sha, expectedBaseSha: integration.base.sha,
+          idempotencyKey: lifecycleSubkey(input.idempotencyKey, `integrate:${integration.pullRequestNumber}:${integration.head.sha}`),
+        });
+        if (merged.status === 'failed') throw merged.error;
+        integrationMergeSha = merged.result.mergeCommitSha;
+        transitions.push({ operation: 'pull-request.merge.integration', status: merged.idempotency?.replayed ? 'replayed' : 'performed', summary: `Integrated PR #${integration.pullRequestNumber} into ${integration.base.ref}.`, pullRequestNumber: integration.pullRequestNumber, mergeCommitSha: merged.result.mergeCommitSha });
+      } else {
+        const mergedIntegrations = artifacts.filter((item) => item.role === 'preview-integration' && item.pullRequest.merged);
+        if (mergedIntegrations.length === 0) return lifecycleProjection(project, input.issueNumber, 'action-required', 'No linked work-to-Preview pull request exists for this canonical work item.', transitions);
+        if (mergedIntegrations.length > 1) throw { code: 'CONFLICT', message: 'Multiple merged integration pull requests are linked to this work item; exact continuation is ambiguous' };
+        transitions.push({ operation: 'pull-request.status', status: 'observed', summary: `Integration PR #${mergedIntegrations[0]!.pullRequest.pullRequestNumber} is already merged.`, pullRequestNumber: mergedIntegrations[0]!.pullRequest.pullRequestNumber });
+      }
+
+      const topology = await this.repositoryBootstrapProvider!.getRepositoryBootstrap(project);
+      if (!topology.integrationBranch || !topology.integrationHead) throw { code: 'CONFLICT', message: 'Repository has no exact Preview integration branch after integration' };
+      if (integrationMergeSha && topology.integrationHead !== integrationMergeSha) throw { code: 'CONFLICT', message: `Preview moved from expected integration merge ${integrationMergeSha} to ${topology.integrationHead}; refusing to infer the promotion candidate` };
+
+      let previewDeployment: import('./types.js').DeploymentRecord | null = null;
+      for (let attempt = 0; attempt <= maxPolls; attempt++) {
+        const status = await this.deploymentProvider!.getDeploymentStatus({ project, limit: 20 });
+        const matching = status.recent.find((deployment) => deployment.sourceRevision === topology.integrationHead && deployment.sourceRef?.toLowerCase() === topology.integrationBranch!.toLowerCase()) ?? null;
+        if (matching?.state === 'READY') { previewDeployment = matching; break; }
+        if (matching && lifecycleDeploymentFailed(matching.state)) {
+          return lifecycleProjection(project, input.issueNumber, 'verification-failed', `Preview deployment ${matching.id} settled in ${matching.state ?? 'unknown'} state.`, transitions, { branch: topology.integrationBranch, commitSha: topology.integrationHead, deploymentId: matching.id, state: matching.state ?? 'unknown' });
+        }
+        if (attempt < maxPolls && pollIntervalMs > 0) await lifecycleDelay(pollIntervalMs);
+        if (attempt === maxPolls) {
+          const gate: LifecycleGateSpec = {
+            kind: 'external-wait', allowedNextOperation: 'lifecycle.advance', issueNumber: input.issueNumber,
+            summary: `Preview deployment for ${topology.integrationBranch}@${topology.integrationHead} has not reached READY within the bounded wait budget.`,
+            resumeWhen: 'A deployment for the exact Preview head appears or changes state.',
+            integrationBranch: topology.integrationBranch, integrationHead: topology.integrationHead, ...(matching ? { deploymentId: matching.id } : {}),
+          };
+          return lifecycleProjection(project, input.issueNumber, 'external-wait', gate.summary, transitions, null, gate);
+        }
+      }
+
+      transitions.push({ operation: 'deployment.status', status: 'observed', summary: `Preview deployment ${previewDeployment!.id} is READY for exact head ${topology.integrationHead}.`, commitSha: topology.integrationHead, deploymentId: previewDeployment!.id });
+      const previewProof = { branch: topology.integrationBranch, commitSha: topology.integrationHead, deploymentId: previewDeployment!.id, state: previewDeployment!.state ?? 'READY' };
+
+      let promotion = openPromotions[0]?.pullRequest ?? null;
+      if (!promotion) {
+        const created = await this.createPullRequest({
+          project, head: topology.integrationBranch, base: topology.defaultBranch,
+          title: `Promote ${topology.integrationBranch} for #${input.issueNumber}`,
+          body: `Prepared by lifecycle.advance after exact Preview proof for canonical work #${input.issueNumber}.`,
+          workItemNumbers: [input.issueNumber],
+          idempotencyKey: lifecycleSubkey(input.idempotencyKey, `promotion-pr:${topology.integrationHead}`),
+        });
+        if (created.status === 'failed') throw created.error;
+        transitions.push({ operation: 'pull-request.create', status: created.idempotency?.replayed ? 'replayed' : 'performed', summary: `Prepared Preview-to-Main promotion PR #${created.result.pullRequestNumber}.`, pullRequestNumber: created.result.pullRequestNumber });
+        promotion = await this.pullRequestProvider!.getPullRequestStatus({ project, pullRequestNumber: created.result.pullRequestNumber });
+      }
+      promotion = await pollPull(promotion);
+      const promotionStop = stopForPull(promotion, true);
+      if (promotionStop) return { ...promotionStop, previewProof };
+      return lifecycleProjection(project, input.issueNumber, 'action-required', `Promotion PR #${promotion.pullRequestNumber} reached unsupported orchestration state ${promotion.orchestration.state}.`, transitions, previewProof);
+    });
+  }
+
+  async resumeLifecycle(input: ResumeLifecycleInput): Promise<ExecutionReceipt<LifecycleAdvanceProjection>> {
+    const project = this.resolveProjectReference(input.project);
+    return await this.executeCompositeMutation('lifecycle.resume', project, async () => {
+      if (!this.lifecycleResumeEnabled) throw { code: 'TOOL_UNAVAILABLE', message: 'Lifecycle resume requires GitHub PR mutation/read providers' };
+      if (!input.approvalReference.startsWith('owner-approved:')) throw { code: 'PERMISSION_DENIED', message: 'Lifecycle resume requires a fresh owner-approved: approval reference' };
+      const current = await this.pullRequestProvider!.getPullRequestStatus({ project, pullRequestNumber: input.pullRequestNumber });
+      if (current.head.sha !== input.expectedHeadSha || current.base.sha !== input.expectedBaseSha) throw { code: 'CONFLICT', message: 'Signed lifecycle gate candidate no longer matches the current pull-request head/base' };
+      if (current.orchestration.state !== 'promotion-ready') throw { code: 'CONFLICT', message: `Promotion candidate is no longer promotion-ready; current state is ${current.orchestration.state}` };
+      const promoted = await this.promotePullRequest({
+        project, pullRequestNumber: input.pullRequestNumber, expectedHeadSha: input.expectedHeadSha, expectedBaseSha: input.expectedBaseSha,
+        approvalReference: input.approvalReference, mergeMethod: 'merge',
+        idempotencyKey: lifecycleSubkey(input.idempotencyKey, `promote:${input.gateId}:${input.pullRequestNumber}`),
+      });
+      if (promoted.status === 'failed') throw promoted.error;
+      const transitions: LifecycleTransitionRecord[] = [{ operation: 'pull-request.merge.promote', status: promoted.idempotency?.replayed ? 'replayed' : 'performed', summary: `Promoted exact approved PR #${input.pullRequestNumber} to Main.`, pullRequestNumber: input.pullRequestNumber, mergeCommitSha: promoted.result.mergeCommitSha }];
+      return lifecycleProjection(project, input.issueNumber, 'complete', `Exact approved promotion completed as ${promoted.result.mergeCommitSha}.`, transitions);
+    });
+  }
+
+  private async executeCompositeMutation<Result>(
+    operation: 'lifecycle.advance' | 'lifecycle.resume',
+    project: ProjectReference,
+    run: () => Promise<Result>,
+  ): Promise<ExecutionReceipt<Result>> {
+    const operationId = this.createOperationId();
+    const startedAt = this.now().toISOString();
+    try {
+      const result = await run();
+      return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, operationId, operation, target: { kind: 'project', id: project.id, ref: project.ref }, status: 'succeeded', startedAt, finishedAt: this.now().toISOString(), result, diagnostics: [{ level: 'info', source: 'conductor', message: 'Composite lifecycle effects retain durable idempotency in each underlying mutation substep; the composite re-reads provider state on retry.' }] };
+    } catch (error) {
+      const normalized = normalizeToolError(error);
+      return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, operationId, operation, target: { kind: 'project', id: project.id, ref: project.ref }, status: 'failed', startedAt, finishedAt: this.now().toISOString(), error: normalized, diagnostics: normalized.diagnostics };
+    }
+  }
+
   async createBranch(input: CreateBranchInput) {
     return await this.executeMutation(input, 'git.branch.create', async (provider) => {
       const result = await provider.createBranch(input);
@@ -1165,6 +1356,7 @@ export class ConductorToolRuntime {
       ...(this.vercelMutationEnabled ? VERCEL_MUTATION_DEFINITIONS : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
       ...(this.sourceControlMutationsEnabled ? MUTATION_DEFINITIONS : []),
+      ...(this.lifecycleAdvanceEnabled || this.lifecycleResumeEnabled ? LIFECYCLE_MUTATION_DEFINITIONS.filter((item) => item.name === 'lifecycle.advance' ? this.lifecycleAdvanceEnabled : this.lifecycleResumeEnabled) : []),
       ...(this.pullRequestLifecycleMutationsEnabled ? PULL_REQUEST_LIFECYCLE_MUTATION_DEFINITIONS : []),
       ...(this.workItemMutationsEnabled ? WORK_ITEM_MUTATION_DEFINITIONS : []),
     ];
@@ -1373,4 +1565,32 @@ export class ConductorToolRuntime {
 
 function mutationFingerprint(operation: string, input: unknown): string {
   return `sha256:${createHash('sha256').update(JSON.stringify({ operation, input })).digest('hex')}`;
+}
+
+
+function lifecycleTransportRole(pullRequest: PullRequestStatus): 'preview-integration' | 'main-promotion' | 'other' {
+  if (['preview', 'vercel-preview'].includes(pullRequest.head.ref.toLowerCase())) return 'main-promotion';
+  if (['preview', 'vercel-preview'].includes(pullRequest.base.ref.toLowerCase())) return 'preview-integration';
+  return 'other';
+}
+function lifecycleSubkey(base: string, suffix: string): string {
+  return `lifecycle:${createHash('sha256').update(`${base}:${suffix}`).digest('hex').slice(0, 48)}`;
+}
+function lifecycleDeploymentFailed(state: string | null): boolean {
+  return ['ERROR', 'FAILED', 'CANCELED', 'CANCELLED'].includes((state ?? '').toUpperCase());
+}
+async function lifecycleDelay(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+function lifecycleProjection(
+  project: ProjectReference,
+  issueNumber: number,
+  stage: LifecycleAdvanceProjection['stage'],
+  summary: string,
+  transitions: LifecycleTransitionRecord[],
+  previewProof: LifecycleAdvanceProjection['previewProof'] = null,
+  gate: LifecycleGateSpec | null = null,
+): LifecycleAdvanceProjection {
+  return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, project, issueNumber, stage, summary, transitions, previewProof, gate };
 }

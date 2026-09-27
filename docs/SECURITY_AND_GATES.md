@@ -69,3 +69,9 @@ Environment values are write-only. Variable list and audit responses project met
 ## Integration-branch bootstrap
 
 Establishing the first Preview integration branch is a separate consequential setup mutation, not an exception to ordinary work-branch rules. `git.integration.bootstrap` requires the active repository work scope, exact `preview` or `vercel-preview` name, the exact current provider-native default-branch SHA, durable idempotency, and an explicit `owner-approved:` reference. It never changes the repository default branch, never accepts arbitrary branch names or historical base SHAs, and refuses competing/conflicting integration branches. Ordinary `git.branch.create` remains restricted to `work/*`.
+
+## Lifecycle continuation gates
+
+Lifecycle automation may combine deterministic mechanics but never combine authority. `lifecycle.advance` stops before Main and returns a short-lived HMAC-signed continuation gate bound to the authenticated client, exact repository/project, canonical issue, and exact resource identity. External-wait gates may only resume `lifecycle.advance`; human-approval gates may only resume `lifecycle.resume`.
+
+A human gate is not approval. `lifecycle.resume` additionally requires a fresh caller-supplied `owner-approved:` reference and re-reads the exact promotion PR head/base and technical readiness before invoking the existing promotion operation. Replaying the same gate cannot create a second Main effect because the underlying promotion uses durable idempotency derived from the gate identity.

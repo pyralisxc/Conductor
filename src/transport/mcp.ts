@@ -5,7 +5,7 @@ import { CONDUCTOR_WRITE_SCOPE } from './auth.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { ProjectReference } from '../runtime/types.js';
 import type { WorkAction, WorkScopeAuthorizer } from './work-scope.js';
-import { clientFingerprint, issueBootstrapEvidence, verifyBootstrapEvidence } from './work-scope.js';
+import { clientFingerprint, issueBootstrapEvidence, verifyBootstrapEvidence, issueLifecycleGate, verifyLifecycleGate } from './work-scope.js';
 
 const diagnosticSchema = z.object({
   level: z.enum(['info', 'warning', 'error']),
@@ -32,7 +32,7 @@ const errorSchema = z.object({
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
   'work.bootstrap', 'repository.audit', 'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
-  'repository.acquire',
+  'repository.acquire', 'lifecycle.advance', 'lifecycle.resume',
   'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.close', 'pull-request.ready-for-review', 'pull-request.verify.rerun',
@@ -78,7 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v3'),
+      catalogVersion: z.literal('conductor.catalog.v4'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -583,6 +583,63 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
   }
 
   if (runtime.sourceControlMutationsEnabled) {
+
+    if (runtime.lifecycleAdvanceEnabled) {
+      server.registerTool('lifecycle.advance', {
+        title: 'Advance work until the next gate',
+        description: 'Advance one canonical issue through deterministic already-authorized PR verification, Preview integration, bounded Preview deployment proof, and promotion-candidate preparation. Stops on external wait, failure, ambiguity, completion, or a signed human Main gate. Never promotes Main.',
+        inputSchema: z.object({
+          project: projectSchema, workContext: workContextSchema, issueNumber: z.number().int().positive(),
+          maxPolls: z.number().int().min(0).max(4).default(2), pollIntervalMs: z.number().int().min(0).max(1500).default(500),
+          idempotencyKey: z.string().min(8).max(200), continuation: z.string().min(20).max(4096).optional(),
+        }),
+        outputSchema: mutationOutputSchema,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        _meta: { securitySchemes: oauthWriteSecurity },
+      }, async (input, extra) => {
+        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        const clientId = extra.authInfo?.clientId;
+        if (!clientId) throw new Error('Authenticated client identity is required');
+        const resolved = runtime.resolveProjectReference(input.project);
+        const repository = resolved.repository ?? resolved.id;
+        if (input.continuation) verifyLifecycleGate(input.continuation, clientId, { repository, projectId: resolved.id, issueNumber: input.issueNumber, kind: 'external-wait', allowedNextOperation: 'lifecycle.advance' });
+        const { workContext: _scope, continuation: _continuation, ...runtimeInput } = input;
+        const receipt = await runtime.advanceLifecycle({ ...runtimeInput, project: resolved });
+        if (receipt.status === 'succeeded' && receipt.result.gate) {
+          const issued = issueLifecycleGate(clientId, { repository, projectId: resolved.id, gate: receipt.result.gate });
+          Object.assign(receipt.result, { continuation: { handle: issued.handle, expiresAt: issued.expiresAt, gateId: issued.gateId } });
+        }
+        return result(receipt);
+      });
+    }
+
+    if (runtime.lifecycleResumeEnabled) {
+      server.registerTool('lifecycle.resume', {
+        title: 'Resume exact approved Main gate',
+        description: 'Resume only a signed human-approval lifecycle gate. Revalidates exact promotion PR head/base and requires a new owner-approved: reference before merging Main.',
+        inputSchema: z.object({
+          project: projectSchema, workContext: workContextSchema, gate: z.string().min(20).max(4096),
+          approvalReference: z.string().regex(/^owner-approved:/u).max(500), idempotencyKey: z.string().min(8).max(200),
+        }),
+        outputSchema: mutationOutputSchema,
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+        _meta: { securitySchemes: oauthWriteSecurity },
+      }, async (input, extra) => {
+        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        const clientId = extra.authInfo?.clientId;
+        if (!clientId) throw new Error('Authenticated client identity is required');
+        const resolved = runtime.resolveProjectReference(input.project);
+        const repository = resolved.repository ?? resolved.id;
+        const gate = verifyLifecycleGate(input.gate, clientId, { repository, projectId: resolved.id, kind: 'human-approval', allowedNextOperation: 'lifecycle.resume' });
+        if (!gate.pullRequestNumber || !gate.expectedHeadSha || !gate.expectedBaseSha) throw new Error('Lifecycle promotion gate is missing exact pull-request identity');
+        return result(await runtime.resumeLifecycle({
+          project: resolved, issueNumber: gate.issueNumber, gateId: gate.id, pullRequestNumber: gate.pullRequestNumber,
+          expectedHeadSha: gate.expectedHeadSha, expectedBaseSha: gate.expectedBaseSha,
+          approvalReference: input.approvalReference, idempotencyKey: input.idempotencyKey,
+        }));
+      });
+    }
+
     server.registerTool('git.branch.create', {
       title: 'Create a work branch',
       description: 'Create one work/* branch from an exact full Git SHA. Requires durable idempotency and conductor.write.',
@@ -917,6 +974,7 @@ function writeAction(operation: string): WorkAction | undefined {
   if (operation.startsWith('work-item.')) return ['work-item.status', 'work-item.list'].includes(operation) ? undefined : 'route-work';
   if (operation === 'pull-request.status') return undefined;
   if (operation.startsWith('deployment.') && !['deployment.status','deployment.logs','deployment.audit','deployment.runtime-logs','deployment.env.list','deployment.vcr.get'].includes(operation)) return 'develop';
+  if (operation.startsWith('lifecycle.')) return 'develop';
   if (operation.startsWith('git.') || operation.startsWith('pull-request.')) return 'develop';
   return undefined;
 }
