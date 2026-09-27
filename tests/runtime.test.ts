@@ -94,7 +94,7 @@ test('capabilities reports only the configured runtime operations and provider f
 
   assert.deepEqual(
     receipt.result.operations.map((operation) => operation.name),
-    ['capabilities', 'preflight_project'],
+    ['capabilities', 'preflight_project', 'evidence.bundle'],
   );
   assert.deepEqual(
     receipt.result.capabilities.map((capability) => [
