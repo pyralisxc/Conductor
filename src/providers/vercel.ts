@@ -13,6 +13,7 @@ import type {
   RuntimeOperationName,
 } from '../runtime/types.js';
 import type { VercelOperationsProvider, OperationPreflightProvider } from './runtime.js';
+import type { ProviderConnectionCredentialResolver } from '../transport/provider-connections.js';
 
 interface VercelProjectBinding {
   id: string;
@@ -26,6 +27,7 @@ interface VercelProjectBinding {
 interface VercelDeploymentProviderOptions {
   token?: string;
   tokenResolver?: (binding: VercelProjectBinding) => Promise<string | undefined>;
+  credentialResolver?: ProviderConnectionCredentialResolver;
   bindings: VercelProjectBinding[];
   apiBaseUrl?: string;
   fetch?: typeof globalThis.fetch;
@@ -38,6 +40,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   readonly id = 'vercel';
   private readonly token?: string;
   private readonly tokenResolver?: (binding: VercelProjectBinding) => Promise<string | undefined>;
+  private readonly credentialResolver?: ProviderConnectionCredentialResolver;
   private readonly bindings: ReadonlyMap<string, VercelProjectBinding>;
   private readonly apiBaseUrl: string;
   private readonly fetch: typeof globalThis.fetch;
@@ -46,6 +49,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   constructor(options: VercelDeploymentProviderOptions) {
     this.token = options.token?.trim() || undefined;
     this.tokenResolver = options.tokenResolver;
+    this.credentialResolver = options.credentialResolver;
     this.bindings = new Map(options.bindings.map(binding => [binding.id, { ...binding }]));
     this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.vercel.com').replace(/\/$/u, '');
     this.fetch = options.fetch ?? globalThis.fetch;
@@ -54,8 +58,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
     const configured = this.bindings.size > 0;
-    const authenticated = Boolean(this.token) || Boolean(this.tokenResolver && (await Promise.all(
-      [...this.bindings.values()].filter(binding => binding.connectionId).map(binding => this.tokenResolver!(binding).catch(() => undefined)),
+    const authenticated = Boolean(this.token) || Boolean((this.credentialResolver || this.tokenResolver) && (await Promise.all(
+      [...this.bindings.values()].filter(binding => binding.connectionId).map(binding => this.connectionToken(binding).catch(() => undefined)),
     )).some(Boolean));
     return [
       capability('deployment.read', configured, authenticated),
@@ -556,8 +560,21 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     return binding;
   }
 
+  private async connectionToken(binding: VercelProjectBinding): Promise<string | undefined> {
+    if (!binding.connectionId) return undefined;
+    if (this.credentialResolver) {
+      const credential = await this.credentialResolver.resolve({
+        provider: 'vercel',
+        connectionId: binding.connectionId,
+        accountId: binding.teamId,
+      });
+      return credential?.token;
+    }
+    return this.tokenResolver ? await this.tokenResolver(binding) : undefined;
+  }
+
   private async tokenValue(binding: VercelProjectBinding): Promise<string> {
-    const token = binding.connectionId && this.tokenResolver ? await this.tokenResolver(binding) : this.token;
+    const token = binding.connectionId ? await this.connectionToken(binding) : this.token;
     if (!token) throw { code: 'AUTH_REQUIRED', source: 'vercel', message: 'Vercel deployment access requires an active account connection or CONDUCTOR_VERCEL_TOKEN' };
     return token;
   }

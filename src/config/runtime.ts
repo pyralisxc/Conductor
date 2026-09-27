@@ -6,6 +6,7 @@ import type { ToolRuntimeProvider } from '../providers/runtime.js';
 import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
 import { VercelDeploymentProvider } from '../providers/vercel.js';
 import { vercelInstallationToken } from '../transport/vercel-connections.js';
+import { RoutedProviderConnectionCredentialResolver } from '../transport/provider-connections.js';
 import { IdempotentMutationExecutor } from '../runtime/idempotency.js';
 import { RedisIdempotencyStore } from '../runtime/redis-idempotency.js';
 
@@ -78,6 +79,10 @@ export function createRuntimeFromEnvironment(
     providers.push(new WorkspaceRuntimeProvider({ projects: workspaceBindings }));
   }
 
+  const connectionCredentialResolver = new RoutedProviderConnectionCredentialResolver({
+    vercel: ({ connectionId, accountId }) => vercelInstallationToken(connectionId, accountId),
+  });
+
   const vercelBindings = bindings.flatMap((binding) => binding.vercelProject
     ? [{ id: binding.id, project: binding.vercelProject, repository: binding.repository, teamId: binding.vercelTeamId, connectionId: binding.vercelConnectionId, runtimeLogsDirect: binding.vercelRuntimeLogsDirect }]
     : []);
@@ -85,7 +90,7 @@ export function createRuntimeFromEnvironment(
   if (vercelBindings.length > 0) {
     vercelProvider = new VercelDeploymentProvider({
       token: environment.CONDUCTOR_VERCEL_TOKEN ?? environment.VERCEL_TOKEN,
-      tokenResolver: (binding) => binding.connectionId ? vercelInstallationToken(binding.connectionId, binding.teamId) : Promise.resolve(undefined),
+      credentialResolver: connectionCredentialResolver,
       bindings: vercelBindings,
     });
     providers.push(vercelProvider);
