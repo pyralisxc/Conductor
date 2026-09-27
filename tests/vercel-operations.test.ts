@@ -326,3 +326,62 @@ test('runtime-log direct opt-in preserves installation identity checks and uses 
   assert.doesNotMatch(JSON.stringify(logs), /TOKEN=hidden/);
   assert.match(JSON.stringify(logs), /redacted/);
 });
+
+
+test('runtime log reader returns from a live stream without waiting for EOF', async () => {
+  const encoder = new TextEncoder();
+  const provider = new VercelDeploymentProvider({
+    token: 'direct-token',
+    runtimeLogIdleMs: 20,
+    runtimeLogTotalMs: 100,
+    bindings: [{ id: 'app', project: 'app', repository: 'owner/app' }],
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v9/projects/app') {
+        return Response.json({ id: 'prj_app', name: 'app', link: { type: 'github', org: 'owner', repo: 'app' } });
+      }
+      if (url.pathname === '/v13/deployments/dpl_live') {
+        return Response.json({ id: 'dpl_live', projectId: 'prj_app', readyState: 'READY', target: 'production', meta: { githubCommitSha: 'a'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/app' } });
+      }
+      if (url.pathname === '/v1/projects/prj_app/deployments/dpl_live/runtime-logs') {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode('data: {"message":"TOKEN=hidden","created":1}\n\n'));
+          },
+        }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
+    },
+  });
+
+  const started = Date.now();
+  const logs = await provider.getRuntimeLogs({ project: { id: 'app', repository: 'owner/app' }, deploymentId: 'dpl_live', limit: 10 });
+  assert.ok(Date.now() - started < 500);
+  assert.equal(logs.idleTimedOut, true);
+  assert.equal(logs.streamEnded, false);
+  assert.equal((logs.entries as unknown[]).length, 1);
+  assert.doesNotMatch(JSON.stringify(logs), /TOKEN=hidden/);
+  assert.match(JSON.stringify(logs), /redacted/);
+});
+
+test('runtime log reader returns bounded empty evidence when a live stream is idle', async () => {
+  const provider = new VercelDeploymentProvider({
+    token: 'direct-token',
+    runtimeLogIdleMs: 20,
+    runtimeLogTotalMs: 100,
+    bindings: [{ id: 'app', project: 'app', repository: 'owner/app' }],
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app', link: { type: 'github', org: 'owner', repo: 'app' } });
+      if (url.pathname === '/v13/deployments/dpl_idle') return Response.json({ id: 'dpl_idle', projectId: 'prj_app', readyState: 'READY', target: 'production' });
+      if (url.pathname === '/v1/projects/prj_app/deployments/dpl_idle/runtime-logs') {
+        return new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
+    },
+  });
+
+  const logs = await provider.getRuntimeLogs({ project: { id: 'app', repository: 'owner/app' }, deploymentId: 'dpl_idle', limit: 10 });
+  assert.equal(logs.idleTimedOut, true);
+  assert.deepEqual(logs.entries, []);
+});
