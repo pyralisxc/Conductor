@@ -571,3 +571,66 @@ test('lifecycle advance integrates verified work, proves Preview, prepares promo
   assert.equal(receipt.status,'succeeded'); if(receipt.status!=='succeeded')return;
   assert.equal(receipt.result.stage,'human-gate'); assert.equal(receipt.result.gate?.kind,'human-approval'); assert.equal(receipt.result.gate?.pullRequestNumber,20); assert.equal(receipt.result.previewProof?.deploymentId,'dpl_preview'); assert.equal(promotionCreated,1);
 });
+
+
+test('evidence bundle enforces concurrency, preserves order, and isolates partial failure', async () => {
+  let active = 0;
+  let peak = 0;
+  const provider: any = {
+    id: 'vercel',
+    async getCapabilities() { return []; },
+    async getDeploymentStatus(input: any) {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      active -= 1;
+      if (input.project.id === 'fail') throw { code: 'TRANSIENT', message: 'provider throttled' };
+      return {
+        provider: 'vercel' as const,
+        project: { id: `prj_${input.project.id}`, name: input.project.id, productionBranch: 'main', teamId: 'team' },
+        production: { id: `dpl_${input.project.id}`, url: null, state: 'READY', target: 'production', createdAt: null, readyAt: null, sourceRevision: 'a'.repeat(40), sourceRef: 'main', sourceRepository: input.project.id, aliases: [], errorCode: null, errorMessage: null },
+        latestProductionAttempt: null,
+        recent: [],
+        domains: [],
+        observedAt: '2026-09-27T00:00:00Z',
+      };
+    },
+  };
+  const runtime = new ConductorToolRuntime({ deploymentProvider: provider });
+  const receipt = await runtime.evidenceBundle({
+    concurrency: 2,
+    items: [
+      { key: 'one', operation: 'deployment.status', project: { id: 'one' } },
+      { key: 'fail', operation: 'deployment.status', project: { id: 'fail' } },
+      { key: 'three', operation: 'deployment.status', project: { id: 'three' } },
+      { key: 'four', operation: 'deployment.status', project: { id: 'four' } },
+    ],
+  });
+  assert.equal(receipt.status, 'succeeded');
+  if (receipt.status !== 'succeeded') return;
+  assert.equal(peak, 2);
+  assert.deepEqual(receipt.result.items.map(item => item.key), ['one', 'fail', 'three', 'four']);
+  assert.deepEqual(receipt.result.items.map(item => item.status), ['succeeded', 'failed', 'succeeded', 'succeeded']);
+  assert.equal(receipt.result.items[1]?.error?.code, 'TRANSIENT');
+  assert.equal(receipt.result.succeeded, 3);
+  assert.equal(receipt.result.failed, 1);
+});
+
+test('evidence bundle refuses duplicate keys before provider work', async () => {
+  let calls = 0;
+  const runtime = new ConductorToolRuntime({
+    deploymentProvider: {
+      id: 'vercel',
+      async getCapabilities() { return []; },
+      async getDeploymentStatus() { calls += 1; throw new Error('should not execute'); },
+    } as any,
+  });
+  const receipt = await runtime.evidenceBundle({
+    items: [
+      { key: 'same', operation: 'deployment.status', project: { id: 'one' } },
+      { key: 'same', operation: 'deployment.status', project: { id: 'two' } },
+    ],
+  });
+  assert.equal(receipt.status, 'failed');
+  assert.equal(calls, 0);
+});

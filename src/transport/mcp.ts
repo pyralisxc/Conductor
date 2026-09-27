@@ -31,7 +31,7 @@ const errorSchema = z.object({
 
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
-  'work.bootstrap', 'repository.audit', 'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
+  'work.bootstrap', 'repository.audit', 'evidence.bundle', 'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
   'repository.acquire', 'lifecycle.advance', 'lifecycle.resume',
   'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
@@ -78,7 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v4'),
+      catalogVersion: z.literal('conductor.catalog.v5'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -358,6 +358,54 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       return result(receipt);
     });
   }
+
+
+  const evidenceBundleItemSchema = z.discriminatedUnion('operation', [
+    z.object({
+      key: z.string().regex(/^[A-Za-z0-9._:/-]{1,100}$/u),
+      operation: z.literal('preflight_project'),
+      project: projectSchema,
+      intent: z.enum(['inspect', 'develop', 'execute']).default('inspect'),
+    }),
+    z.object({
+      key: z.string().regex(/^[A-Za-z0-9._:/-]{1,100}$/u),
+      operation: z.literal('deployment.status'),
+      project: projectSchema,
+      limit: z.number().int().min(1).max(10).default(5),
+    }),
+    z.object({
+      key: z.string().regex(/^[A-Za-z0-9._:/-]{1,100}$/u),
+      operation: z.literal('deployment.runtime-logs'),
+      project: projectSchema,
+      deploymentId: z.string().regex(/^dpl_[A-Za-z0-9]+$/u),
+      limit: z.number().int().min(1).max(20).default(20),
+    }),
+    z.object({
+      key: z.string().regex(/^[A-Za-z0-9._:/-]{1,100}$/u),
+      operation: z.literal('pull-request.status'),
+      project: projectSchema,
+      pullRequestNumber: z.number().int().positive(),
+    }),
+    z.object({
+      key: z.string().regex(/^[A-Za-z0-9._:/-]{1,100}$/u),
+      operation: z.literal('repository.audit'),
+      project: projectSchema,
+      limit: z.number().int().min(1).max(12).default(8),
+    }),
+  ]);
+
+  server.registerTool('evidence.bundle', {
+    title: 'Run bounded parallel evidence reads',
+    description: 'Batch 1-12 declared-safe read operations with concurrency 1-4. Preserves input order, exact project/resource identity and per-item errors; performs no mutations and no hidden retries.',
+    inputSchema: z.object({
+      items: z.array(evidenceBundleItemSchema).min(1).max(12)
+        .refine((items) => new Set(items.map((item) => item.key)).size === items.length, { message: 'Evidence bundle keys must be unique' }),
+      concurrency: z.number().int().min(1).max(4).default(3),
+    }),
+    outputSchema: readReceiptSchema,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    _meta: { securitySchemes: oauthSecurity },
+  }, async (input) => result(await runtime.evidenceBundle(input)));
 
   if (runtime.repositoryAuditReadEnabled) {
     server.registerTool('repository.audit', {
