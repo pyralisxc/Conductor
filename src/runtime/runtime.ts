@@ -308,7 +308,7 @@ export class ConductorToolRuntime {
   }
 
   get repositoryAuditReadEnabled(): boolean {
-    return Boolean(this.repositoryAuditProvider && this.workItemProvider);
+    return Boolean(this.repositoryAuditProvider && this.workItemCandidateProvider);
   }
 
   get developmentStatusReadEnabled(): boolean {
@@ -595,7 +595,7 @@ export class ConductorToolRuntime {
         const tasks = await Promise.allSettled([
           this.preflightProject(resolvedProject, 'inspect'),
           this.repositoryAuditProvider!.getRepositoryAudit({ project: resolvedProject, limit }),
-          this.workItemProvider!.listWorkItems({ project: resolvedProject, limit: 100 }),
+          this.workItemCandidateProvider!.listWorkItems({ project: resolvedProject, limit: 100 }),
           this.deploymentProvider
             ? this.deploymentProvider.getDeploymentStatus({ project: resolvedProject, limit: Math.min(limit, 10) })
             : Promise.reject({ code: 'TOOL_UNAVAILABLE', message: 'Deployment provider is not configured' }),
