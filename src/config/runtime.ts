@@ -5,8 +5,8 @@ import { DevelopmentIntelligenceProvider, UnavailableDevelopmentIntelligenceProv
 import type { ToolRuntimeProvider } from '../providers/runtime.js';
 import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
 import { VercelDeploymentProvider } from '../providers/vercel.js';
-import { vercelInstallationToken } from '../transport/vercel-connections.js';
-import { RoutedProviderConnectionCredentialResolver } from '../transport/provider-connections.js';
+import { VERCEL_RUNTIME_CONNECTION_ID, vercelInstallationToken } from '../transport/vercel-connections.js';
+import { RedisProviderConnectionCredentialStore, RoutedProviderConnectionCredentialResolver } from '../transport/provider-connections.js';
 import { IdempotentMutationExecutor } from '../runtime/idempotency.js';
 import { RedisIdempotencyStore } from '../runtime/redis-idempotency.js';
 
@@ -79,8 +79,13 @@ export function createRuntimeFromEnvironment(
     providers.push(new WorkspaceRuntimeProvider({ projects: workspaceBindings }));
   }
 
+  const redisUrl = environment.UPSTASH_REDIS_REST_URL ?? environment.KV_REST_API_URL;
+  const redisToken = environment.UPSTASH_REDIS_REST_TOKEN ?? environment.KV_REST_API_TOKEN;
+  const providerCredentialStore = redisUrl && redisToken ? new RedisProviderConnectionCredentialStore({ url: redisUrl, token: redisToken }) : undefined;
   const connectionCredentialResolver = new RoutedProviderConnectionCredentialResolver({
-    vercel: ({ connectionId, accountId }) => vercelInstallationToken(connectionId, accountId),
+    vercel: async ({ connectionId, accountId }) => connectionId === VERCEL_RUNTIME_CONNECTION_ID
+      ? (await providerCredentialStore?.resolve({ provider: 'vercel', connectionId }))?.token
+      : vercelInstallationToken(connectionId, accountId),
   });
 
   const vercelBindings = bindings.flatMap((binding) => binding.vercelProject
@@ -91,7 +96,8 @@ export function createRuntimeFromEnvironment(
     vercelProvider = new VercelDeploymentProvider({
       token: environment.CONDUCTOR_VERCEL_TOKEN ?? environment.VERCEL_TOKEN,
       credentialResolver: connectionCredentialResolver,
-      bindings: vercelBindings,
+      runtimeConnectionId: VERCEL_RUNTIME_CONNECTION_ID,
+      bindings: vercelBindings;
     });
     providers.push(vercelProvider);
   }
@@ -101,8 +107,6 @@ export function createRuntimeFromEnvironment(
   if (!githubProvider || (!environment.GITHUB_TOKEN && !githubApp)) {
     throw new Error('GitHub mutations require an authorized owner/project and GitHub authentication');
   }
-  const redisUrl = environment.UPSTASH_REDIS_REST_URL ?? environment.KV_REST_API_URL;
-  const redisToken = environment.UPSTASH_REDIS_REST_TOKEN ?? environment.KV_REST_API_TOKEN;
   if (!redisUrl || !redisToken) {
     throw new Error('GitHub mutations require durable Redis idempotency state');
   }

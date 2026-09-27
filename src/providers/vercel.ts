@@ -28,6 +28,7 @@ interface VercelDeploymentProviderOptions {
   token?: string;
   tokenResolver?: (binding: VercelProjectBinding) => Promise<string | undefined>;
   credentialResolver?: ProviderConnectionCredentialResolver;
+  runtimeConnectionId?: string;
   bindings: VercelProjectBinding[];
   apiBaseUrl?: string;
   fetch?: typeof globalThis.fetch;
@@ -41,6 +42,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   private readonly token?: string;
   private readonly tokenResolver?: (binding: VercelProjectBinding) => Promise<string | undefined>;
   private readonly credentialResolver?: ProviderConnectionCredentialResolver;
+  private readonly runtimeConnectionId?: string;
   private readonly bindings: ReadonlyMap<string, VercelProjectBinding>;
   private readonly apiBaseUrl: string;
   private readonly fetch: typeof globalThis.fetch;
@@ -50,6 +52,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     this.token = options.token?.trim() || undefined;
     this.tokenResolver = options.tokenResolver;
     this.credentialResolver = options.credentialResolver;
+    this.runtimeConnectionId = options.runtimeConnectionId?.trim() || undefined;
     this.bindings = new Map(options.bindings.map(binding => [binding.id, { ...binding }]));
     this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.vercel.com').replace(/\/$/u, '');
     this.fetch = options.fetch ?? globalThis.fetch;
@@ -97,21 +100,21 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
         // Project read access does not imply access to project environment variables.
         await this.listEnvironment({ project });
       }
-      if (operation === 'deployment.runtime-logs' && binding.runtimeLogsDirect && !this.token) {
-        throw { code: 'AUTH_REQUIRED', source: 'vercel', message: 'deployment.runtime-logs is opted into direct-token routing, but CONDUCTOR_VERCEL_TOKEN is not configured' };
-      }
+      const runtimeRoute = operation === 'deployment.runtime-logs' ? await this.runtimeCredentialRoute(binding) : undefined;
       return [{
         provider: 'vercel',
         status: operation === 'deployment.runtime-logs'
-          ? binding.connectionId && !binding.runtimeLogsDirect ? 'unavailable' : 'degraded'
+          ? runtimeRoute === 'none' ? 'unavailable' : 'degraded'
           : operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit' || operation === 'deployment.env.list' ? 'ready' : 'degraded',
         summary: `Vercel project ${resolved.name} (${resolved.id}) is ${explicit ? 'bound' : 'uniquely linked for read access'} for ${operation}`,
         diagnostics: [{ level: 'info', source: 'vercel', message: operation === 'deployment.runtime-logs'
-          ? binding.connectionId && !binding.runtimeLogsDirect
-            ? 'Vercel Integration API installation tokens do not authorize the documented runtime-log endpoint through any installable integration scope; deployment.logs remains available. Add an exact runtime-log direct-token binding to use deployment.runtime-logs.'
-            : binding.runtimeLogsDirect
-              ? 'Project identity remains verified through the bound installation; runtime-log reads are routed only through the explicit direct token and remain unverified until one exact deployment read succeeds.'
-              : 'Project read verified with a direct Vercel access token; runtime-log endpoint access is unverified until an exact deployment read succeeds.'
+          ? runtimeRoute === 'shared-connection'
+            ? 'Project identity remains verified through the bound installation; runtime-log reads use the shared owner runtime connection and remain unverified until one exact deployment read succeeds.'
+            : runtimeRoute === 'legacy-direct'
+              ? 'Project identity remains verified through the bound installation; runtime-log reads use the legacy direct-token compatibility path and remain unverified until one exact deployment read succeeds.'
+              : runtimeRoute === 'direct-primary'
+                ? 'Project read uses a direct Vercel token; runtime-log endpoint access is unverified until one exact deployment read succeeds.'
+                : 'Vercel Integration API installation tokens do not authorize the documented runtime-log endpoint. Connect owner runtime-log access once in Conductor; deployment.logs remains available.'
           : environmentOperation
             ? operation === 'deployment.env.list'
               ? 'Environment metadata read verified.'
@@ -507,12 +510,9 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
 
   async getRuntimeLogs(input: VercelRuntimeLogsInput): Promise<Record<string, unknown>> {
     const bound = await this.exactDeployment(input.project, input.deploymentId, true);
-    if (bound.binding.connectionId && !bound.binding.runtimeLogsDirect) {
-      throw {
-        code: 'TOOL_UNAVAILABLE',
-        source: 'vercel',
-        message: 'Vercel Integration API installation tokens do not authorize the runtime-log endpoint; deployment.logs remains available. Configure an exact runtime-log direct-token binding to use deployment.runtime-logs.',
-      };
+    const runtimeRoute = await this.runtimeCredentialRoute(bound.binding);
+    if (runtimeRoute === 'none') {
+      throw { code: 'TOOL_UNAVAILABLE', source: 'vercel', message: 'Vercel Integration API installation tokens do not authorize the runtime-log endpoint; deployment.logs remains available. Connect owner runtime-log access once in Conductor to use deployment.runtime-logs.' };
     }
     const limit = clamp(input.limit ?? 50, 1, 100);
     const response = await this.request(
@@ -520,10 +520,22 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       { ...scopeQuery(bound.binding), limit: String(limit) },
       bound.binding,
       undefined,
-      'direct',
+      'runtime',
     );
     const entries = parseEventStream(await response.text());
-    return { provider: 'vercel', projectId: bound.id, deploymentId: input.deploymentId, entries: entries.slice(0, limit).map(normalizeLogEntry).filter(Boolean), truncated: entries.length > limit, observedAt: this.now().toISOString() };
+    const deployment = normalizeDeployment(bound.detail);
+    return {
+      provider: 'vercel',
+      projectId: bound.id,
+      deploymentId: input.deploymentId,
+      environment: deployment?.target ?? null,
+      sourceRevision: deployment?.sourceRevision ?? null,
+      sourceRef: deployment?.sourceRef ?? null,
+      sourceRepository: deployment?.sourceRepository ?? null,
+      entries: entries.slice(0, limit).map(normalizeLogEntry).filter(Boolean),
+      truncated: entries.length > limit,
+      observedAt: this.now().toISOString(),
+    };
   }
 
   async getAudit(input: VercelProjectInput): Promise<Record<string, unknown>> {
@@ -579,9 +591,23 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     return token;
   }
 
-  private directTokenValue(): string {
-    if (!this.token) throw { code: 'AUTH_REQUIRED', source: 'vercel', message: 'Direct Vercel runtime-log access requires CONDUCTOR_VERCEL_TOKEN' };
-    return this.token;
+  private async sharedRuntimeToken(): Promise<string | undefined> {
+    if (!this.runtimeConnectionId || !this.credentialResolver) return undefined;
+    return (await this.credentialResolver.resolve({ provider: 'vercel', connectionId: this.runtimeConnectionId }))?.token;
+  }
+
+  private async runtimeCredentialRoute(binding: VercelProjectBinding): Promise<'shared-connection' | 'legacy-direct' | 'direct-primary' | 'none'> {
+    if (await this.sharedRuntimeToken()) return 'shared-connection';
+    if (binding.runtimeLogsDirect && this.token) return 'legacy-direct';
+    if (!binding.connectionId && this.token) return 'direct-primary';
+    return 'none';
+  }
+
+  private async runtimeTokenValue(binding: VercelProjectBinding): Promise<string> {
+    const shared = await this.sharedRuntimeToken();
+    if (shared) return shared;
+    if ((binding.runtimeLogsDirect || !binding.connectionId) && this.token) return this.token;
+    throw { code: 'AUTH_REQUIRED', source: 'vercel', message: 'Direct Vercel runtime-log access requires an active owner runtime connection' };
   }
 
   private async getProject(binding: VercelProjectBinding): Promise<JsonRecord> {
@@ -600,8 +626,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     return body as JsonRecord;
   }
 
-  private async request(path: string, query: Record<string, string>, binding: VercelProjectBinding, options?: { method: 'POST' | 'PATCH' | 'DELETE'; body?: object }, credential: 'binding' | 'direct' = 'binding'): Promise<Response> {
-    const token = credential === 'direct' ? this.directTokenValue() : await this.tokenValue(binding);
+  private async request(path: string, query: Record<string, string>, binding: VercelProjectBinding, options?: { method: 'POST' | 'PATCH' | 'DELETE'; body?: object }, credential: 'binding' | 'runtime' = 'binding'): Promise<Response> {
+    const token = credential === 'runtime' ? await this.runtimeTokenValue(binding) : await this.tokenValue(binding);
     const url = new URL(`${this.apiBaseUrl}${path}`);
     for (const [key, value] of Object.entries(query)) if (value) url.searchParams.set(key, value);
     const response = await this.fetch(url, {
