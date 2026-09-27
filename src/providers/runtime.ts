@@ -35,6 +35,7 @@ import type {
   RepositoryAcquisitionPreflight,
   AcquireRepositoryInput,
   RepositoryAcquisitionResult,
+  RepositoryBootstrapTopology,
   GetDeploymentStatusInput,
   GetDeploymentLogsInput,
   DeploymentProjectStatus,
@@ -60,6 +61,11 @@ export interface OperationPreflightProvider extends RuntimeCapabilityProvider {
 
 export interface ProjectReferenceResolver {
   resolveProjectReference(project: ProjectReference): ProjectReference;
+}
+
+
+export interface RepositoryBootstrapReadProvider extends RuntimeCapabilityProvider {
+  getRepositoryBootstrap(project: ProjectReference): Promise<RepositoryBootstrapTopology>;
 }
 
 export interface PullRequestReadProvider extends RuntimeCapabilityProvider {

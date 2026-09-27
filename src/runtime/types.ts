@@ -5,6 +5,7 @@ export type ToolOperationName =
   | 'preflight_project'
   | 'preflight_operation'
   | 'repository.acquire.preflight'
+  | 'work.bootstrap'
   | 'development.status'
   | 'pull-request.status'
   | 'source.artifact.read'
@@ -132,6 +133,7 @@ export interface ProviderHealth {
 
 export interface CapabilityReport {
   contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
+  catalogDigest: string;
   operations: ToolDefinition[];
   capabilities: CapabilityAvailability[];
   providers: ProviderHealth[];
@@ -239,6 +241,49 @@ export interface OperationPreflight {
   exposed: boolean;
   status: 'ready' | 'degraded' | 'blocked';
   checks: OperationPreflightCheck[];
+}
+
+
+export interface RepositoryBootstrapTopology {
+  provider: 'github';
+  repository: string;
+  defaultBranch: string;
+  defaultHead: string;
+  integrationBranch: 'preview' | 'vercel-preview' | null;
+  integrationHead: string | null;
+  observedAt: string;
+}
+
+export type ClientCatalogFreshness = 'unknown' | 'current' | 'stale-client-schema';
+
+export interface GetWorkBootstrapInput {
+  project: ProjectReference;
+  limit?: number;
+  clientCatalogDigest?: string;
+}
+
+export interface WorkBootstrapProjection {
+  contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
+  catalogDigest: string;
+  clientCatalog: {
+    suppliedDigest: string | null;
+    freshness: ClientCatalogFreshness;
+  };
+  project: ProjectReference;
+  topology: RepositoryBootstrapTopology | null;
+  preflight: ProjectPreflight;
+  work: DevelopmentStatusProjection['work'];
+  intelligence: {
+    status: 'ready' | 'degraded' | 'blocked' | 'unavailable';
+    summary: string;
+  };
+  deployment: {
+    provider: string;
+    projectId: string;
+    production: DeploymentRecord | null;
+    observedAt: string;
+  } | null;
+  observedAt: string;
 }
 
 export interface GetDevelopmentStatusInput {

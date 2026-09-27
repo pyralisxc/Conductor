@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clientFingerprint, parseWorkScopeGrant, WorkScopeAuthorizer, type WorkScopeGrant, type WorkScopeStore } from '../src/transport/work-scope.js';
+import { clientFingerprint, issueBootstrapEvidence, parseWorkScopeGrant, verifyBootstrapEvidence, WorkScopeAuthorizer, type WorkScopeGrant, type WorkScopeStore } from '../src/transport/work-scope.js';
 
 process.env.CONDUCTOR_SESSION_SECRET = 'test-work-context-secret-long-enough-for-hmac';
 
@@ -64,4 +64,24 @@ test('two fresh conversations sharing one OAuth client keep independent active r
   await assert.rejects(authorizer.assertAllowed(auth, 'develop', { id: 'arcanum', repository: 'pyralisxc/Arcanum' }, a), /outside/);
   await assert.rejects(authorizer.assertAllowed(auth, 'develop', { id: 'construction', repository: 'pyralisxc/Construction' }, b), /outside/);
   await assert.rejects(authorizer.assertAllowed(auth, 'develop', { id: 'construction', repository: 'pyralisxc/Construction' }, `${a}x`), /Invalid work context/);
+});
+
+
+test('bootstrap evidence is short-lived, client-bound, repository-bound and credential-free', () => {
+  const issued = issueBootstrapEvidence('owner-approved-client', {
+    repository: 'pyralisxc/Conductor',
+    projectId: 'Conductor',
+    catalogDigest: 'a'.repeat(64),
+    observedAt: '2026-09-27T00:00:00.000Z',
+  });
+  const value = verifyBootstrapEvidence(issued.handle, 'owner-approved-client', {
+    repository: 'pyralisxc/Conductor',
+    projectId: 'Conductor',
+    catalogDigest: 'a'.repeat(64),
+  });
+  assert.equal(value.repository, 'pyralisxc/conductor');
+  assert.equal(value.projectId, 'Conductor');
+  assert.doesNotMatch(issued.handle, /token|secret|credential/iu);
+  assert.throws(() => verifyBootstrapEvidence(issued.handle, 'different-client'), /mismatched/);
+  assert.throws(() => verifyBootstrapEvidence(issued.handle, 'owner-approved-client', { repository: 'pyralisxc/Other' }), /repository mismatch/);
 });

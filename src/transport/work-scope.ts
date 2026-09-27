@@ -52,6 +52,72 @@ function contextRepository(token: string, clientId: string): string {
   catch { throw new Error('Invalid work context'); }
 }
 
+
+const BOOTSTRAP_EVIDENCE_TTL_MS = 5 * 60 * 1000;
+
+interface BootstrapEvidence {
+  v: 1;
+  clientFingerprint: string;
+  repository: string;
+  projectId: string;
+  catalogDigest: string;
+  observedAt: string;
+  expiresAt: number;
+  id: string;
+}
+
+function bootstrapEvidenceSignature(payload: string): string {
+  return createHmac('sha256', derivedSecret('bootstrap-evidence')).update(payload).digest('base64url');
+}
+
+export function issueBootstrapEvidence(clientId: string, input: {
+  repository: string;
+  projectId: string;
+  catalogDigest: string;
+  observedAt: string;
+}): { handle: string; expiresAt: number } {
+  const repository = normalizeRepository(input.repository);
+  if (!/^[0-9a-f]{64}$/u.test(input.catalogDigest)) throw new Error('Invalid catalog digest');
+  const expiresAt = Date.now() + BOOTSTRAP_EVIDENCE_TTL_MS;
+  const value: BootstrapEvidence = {
+    v: 1,
+    clientFingerprint: clientFingerprint(clientId),
+    repository,
+    projectId: input.projectId,
+    catalogDigest: input.catalogDigest,
+    observedAt: input.observedAt,
+    expiresAt,
+    id: randomUUID(),
+  };
+  const payload = Buffer.from(JSON.stringify(value)).toString('base64url');
+  return { handle: `${payload}.${bootstrapEvidenceSignature(payload)}`, expiresAt };
+}
+
+export function verifyBootstrapEvidence(handle: string, clientId: string, expected?: {
+  repository?: string;
+  projectId?: string;
+  catalogDigest?: string;
+}): BootstrapEvidence {
+  if (handle.length > 2048) throw new Error('Invalid bootstrap evidence');
+  const parts = handle.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error('Invalid bootstrap evidence');
+  const expectedSignature = Buffer.from(bootstrapEvidenceSignature(parts[0]));
+  const received = Buffer.from(parts[1]);
+  if (expectedSignature.length !== received.length || !timingSafeEqual(expectedSignature, received)) throw new Error('Invalid bootstrap evidence');
+  let value: BootstrapEvidence;
+  try { value = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as BootstrapEvidence; }
+  catch { throw new Error('Invalid bootstrap evidence'); }
+  if (!value || value.v !== 1 || value.clientFingerprint !== clientFingerprint(clientId)
+    || typeof value.id !== 'string' || !Number.isSafeInteger(value.expiresAt)
+    || value.expiresAt <= Date.now() || value.expiresAt > Date.now() + BOOTSTRAP_EVIDENCE_TTL_MS) {
+    throw new Error('Expired or mismatched bootstrap evidence');
+  }
+  if (expected?.repository && value.repository !== normalizeRepository(expected.repository)) throw new Error('Bootstrap evidence repository mismatch');
+  if (expected?.projectId && value.projectId !== expected.projectId) throw new Error('Bootstrap evidence project mismatch');
+  if (expected?.catalogDigest && value.catalogDigest !== expected.catalogDigest) throw new Error('Bootstrap evidence catalog mismatch');
+  return value;
+}
+
 export function clientFingerprint(clientId: string): string {
   return createHash('sha256').update(clientId).digest('hex');
 }
