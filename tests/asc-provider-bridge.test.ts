@@ -56,6 +56,9 @@ test('ASC provider bridge exposes only safe GitHub App identity metadata', async
             appSlug: 'asc-control',
           };
         },
+        async getInstallationAttestation() {
+          throw new Error('not used by this test');
+        },
       },
     }
   );
