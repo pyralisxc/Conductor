@@ -667,7 +667,13 @@ test('lifecycle advance recognizes an exact current Preview head that was alread
       };
     },
     async listWorkItems() { return { repository: 'pyralisxc/Conductor', items: [], truncated: false }; },
-    async listWorkItemPullRequests() { return [mergedIntegration, mergedPromotion]; },
+    async listWorkItemPullRequests() {
+      return [
+        { ...mergedIntegration, pullRequestNumber: 29, url: 'https://github.test/pull/29', head: { ref: 'work/older-pass', sha: 'e'.repeat(40) } },
+        mergedIntegration,
+        mergedPromotion,
+      ];
+    },
   };
   const runtime = new ConductorToolRuntime({
     sourceControlMutationProvider,
