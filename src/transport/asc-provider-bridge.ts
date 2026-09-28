@@ -50,6 +50,12 @@ function installationIdFromPath(
   return match?.[1];
 }
 
+function isGitHubAppIdentityPath(
+  pathname: string
+): boolean {
+  return pathname === '/internal/asc/github/app';
+}
+
 export interface AscProviderBridgeOptions {
   readonly secret: string;
   readonly githubApp: GitHubAppCredentialProvider;
@@ -64,7 +70,10 @@ export async function handleAscProviderBridgeRequest(
   const installationId = installationIdFromPath(
     requestUrl.pathname
   );
-  if (!installationId) return false;
+  const appIdentity = isGitHubAppIdentityPath(
+    requestUrl.pathname
+  );
+  if (!installationId && !appIdentity) return false;
 
   if (req.method !== 'GET') {
     res.writeHead(405, {
@@ -86,9 +95,28 @@ export async function handleAscProviderBridgeRequest(
   }
 
   try {
+    if (appIdentity) {
+      const identity =
+        await resolved.githubApp.getIdentity();
+      if (
+        identity.kind !== 'app' ||
+        !identity.appId ||
+        !identity.appSlug
+      ) {
+        throw new Error(
+          'Configured GitHub identity is not an App'
+        );
+      }
+      json(res, 200, {
+        appId: identity.appId,
+        appSlug: identity.appSlug,
+      });
+      return true;
+    }
+
     const attestation =
       await resolved.githubApp.getInstallationAttestation(
-        installationId
+        installationId!
       );
     json(res, 200, safeAttestation(attestation));
   } catch (error) {
