@@ -28,19 +28,36 @@ test('GitHub provider reports missing authentication explicitly', async () => {
   assert.equal(checks[0]?.error?.code, 'AUTH_REQUIRED');
 });
 
-test('GitHub provider proves project-specific read and write permissions', async () => {
+test('GitHub provider proves project-specific read and write permissions and exposes the observed API budget', async () => {
   const requested: string[] = [];
+  const resetSeconds = 1_893_456_000;
   const provider = new GitHubRuntimeProvider({
     token: 'secret',
     bindings: [{ id: 'conductor', repository: 'pyralisxc/Conductor' }],
     fetch: async (input) => {
       requested.push(String(input));
       if (String(input).endsWith('/rate_limit')) {
-        return Response.json({ resources: {} });
+        return Response.json({ resources: {} }, {
+          headers: {
+            'x-ratelimit-limit': '5000',
+            'x-ratelimit-remaining': '4999',
+            'x-ratelimit-used': '1',
+            'x-ratelimit-reset': String(resetSeconds),
+            'x-ratelimit-resource': 'core',
+          },
+        });
       }
       return Response.json({
         full_name: 'pyralisxc/Conductor',
         permissions: { pull: true, push: false },
+      }, {
+        headers: {
+          'x-ratelimit-limit': '5000',
+          'x-ratelimit-remaining': '4998',
+          'x-ratelimit-used': '2',
+          'x-ratelimit-reset': String(resetSeconds),
+          'x-ratelimit-resource': 'core',
+        },
       });
     },
   });
@@ -48,9 +65,56 @@ test('GitHub provider proves project-specific read and write permissions', async
   const capabilities = await provider.getCapabilities();
   assert.equal(capabilities.find((item) => item.capability === 'github.read')?.available, true);
   const checks = await provider.preflightProject({ id: 'conductor' });
-  assert.equal(checks.find((check) => check.check === 'github.read')?.status, 'ready');
+  const readCheck = checks.find((check) => check.check === 'github.read');
+  assert.equal(readCheck?.status, 'ready');
   assert.equal(checks.find((check) => check.check === 'github.write')?.error?.code, 'PERMISSION_DENIED');
   assert.match(requested.at(-1) ?? '', /repos\/pyralisxc\/Conductor$/);
+  const budget = readCheck?.diagnostics.find((diagnostic) => diagnostic.message.startsWith('GitHub API budget:'));
+  assert.equal(budget?.details?.limit, 5000);
+  assert.equal(budget?.details?.remaining, 4998);
+  assert.equal(budget?.details?.used, 2);
+  assert.equal(budget?.details?.resource, 'core');
+  assert.equal(budget?.details?.providerCallsObserved, 2);
+  assert.equal(budget?.details?.resetAt, new Date(resetSeconds * 1000).toISOString());
+});
+
+test('GitHub provider treats exhausted API budget as transient and suppresses calls until reset', async () => {
+  const resetSeconds = Math.floor(Date.now() / 1000) + 3600;
+  let calls = 0;
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    bindings: [{ id: 'conductor', repository: 'pyralisxc/Conductor' }],
+    fetch: async (input) => {
+      calls += 1;
+      if (String(input).endsWith('/rate_limit')) return Response.json({ resources: {} });
+      return Response.json({ message: 'API rate limit exceeded for installation' }, {
+        status: 403,
+        headers: {
+          'x-github-request-id': 'rate-test',
+          'x-ratelimit-limit': '5000',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-used': '5000',
+          'x-ratelimit-reset': String(resetSeconds),
+          'x-ratelimit-resource': 'core',
+        },
+      });
+    },
+  });
+
+  await provider.getCapabilities();
+  const first = await provider.preflightProject({ id: 'conductor' });
+  assert.equal(first.every((check) => check.status === 'blocked'), true);
+  assert.equal(first[0]?.error?.code, 'TRANSIENT');
+  assert.equal(first[0]?.error?.retryable, true);
+  assert.equal(first[0]?.error?.diagnostics[0]?.details?.remaining, 0);
+  assert.equal(first[0]?.error?.diagnostics[0]?.details?.resetAt, new Date(resetSeconds * 1000).toISOString());
+  assert.equal(calls, 2);
+
+  const second = await provider.preflightProject({ id: 'conductor' });
+  assert.equal(second.every((check) => check.status === 'blocked'), true);
+  assert.equal(second[0]?.error?.code, 'TRANSIENT');
+  assert.match(second[0]?.error?.message ?? '', /exhausted until/);
+  assert.equal(calls, 2);
 });
 
 test('GitHub App credentials discover the repository installation and mint a repository-scoped token', async () => {
