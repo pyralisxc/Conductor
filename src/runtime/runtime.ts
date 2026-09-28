@@ -1332,6 +1332,28 @@ export class ConductorToolRuntime {
       if (!topology.integrationBranch || !topology.integrationHead) throw { code: 'CONFLICT', message: 'Repository has no exact Preview integration branch after integration' };
       if (integrationMergeSha && topology.integrationHead !== integrationMergeSha) throw { code: 'CONFLICT', message: `Preview moved from expected integration merge ${integrationMergeSha} to ${topology.integrationHead}; refusing to infer the promotion candidate` };
 
+      const alreadyPromoted = artifacts.find((item) =>
+        item.role === 'main-promotion'
+        && item.pullRequest.merged
+        && item.pullRequest.head.sha === topology.integrationHead
+      );
+      if (alreadyPromoted) {
+        transitions.push({
+          operation: 'pull-request.status',
+          status: 'observed',
+          summary: `Current Preview head ${topology.integrationHead} was already promoted by PR #${alreadyPromoted.pullRequest.pullRequestNumber}.`,
+          pullRequestNumber: alreadyPromoted.pullRequest.pullRequestNumber,
+          commitSha: topology.integrationHead,
+        });
+        return lifecycleProjection(
+          project,
+          input.issueNumber,
+          'complete',
+          `Current Preview head ${topology.integrationHead} is already represented by merged promotion PR #${alreadyPromoted.pullRequest.pullRequestNumber}; no duplicate promotion is required.`,
+          transitions,
+        );
+      }
+
       let previewDeployment: import('./types.js').DeploymentRecord | null = null;
       for (let attempt = 0; attempt <= maxPolls; attempt++) {
         const status = await this.deploymentProvider!.getDeploymentStatus({ project, limit: 20 });

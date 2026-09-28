@@ -573,6 +573,149 @@ test('lifecycle advance integrates verified work, proves Preview, prepares promo
 });
 
 
+test('lifecycle advance recognizes an exact current Preview head that was already promoted', async () => {
+  const previewHead = 'b'.repeat(40);
+  const mainHead = 'c'.repeat(40);
+  let promotionCreates = 0;
+  let deploymentReads = 0;
+
+  const mergedIntegration = {
+    repository: 'pyralisxc/Conductor',
+    pullRequestNumber: 30,
+    url: 'https://github.test/pull/30',
+    state: 'closed',
+    draft: false,
+    merged: true,
+    mergeable: true,
+    mergeableState: 'clean',
+    head: { ref: 'work/170-done', sha: 'a'.repeat(40) },
+    base: { ref: 'preview', sha: 'd'.repeat(40) },
+    labels: [],
+    checks: { total: 1, pending: 0, successful: 1, failed: 0, neutral: 0, skipped: 0, items: [] },
+    workflowRuns: [],
+    orchestration: {
+      state: 'merged' as const,
+      action: 'none' as const,
+      shouldAct: false,
+      summary: 'merged',
+      resumeWhen: null,
+      transition: { observed: false, previousHeadSha: null, previousState: null, headChanged: null, stateChanged: null, meaningful: null },
+      seal: { requested: false, expectedPreSealCheckpoint: false, exactHeadVerificationRequired: false },
+      signals: { pending: [], actionRequired: [], failed: [] },
+    },
+  };
+  const mergedPromotion = {
+    repository: 'pyralisxc/Conductor',
+    pullRequestNumber: 31,
+    url: 'https://github.test/pull/31',
+    state: 'closed',
+    draft: false,
+    merged: true,
+    mergeable: true,
+    mergeableState: 'clean',
+    head: { ref: 'preview', sha: previewHead },
+    base: { ref: 'main', sha: mainHead },
+    labels: [],
+    checks: { total: 1, pending: 0, successful: 1, failed: 0, neutral: 0, skipped: 0, items: [] },
+    workflowRuns: [],
+    orchestration: {
+      state: 'merged' as const,
+      action: 'none' as const,
+      shouldAct: false,
+      summary: 'merged',
+      resumeWhen: null,
+      transition: { observed: false, previousHeadSha: null, previousState: null, headChanged: null, stateChanged: null, meaningful: null },
+      seal: { requested: false, expectedPreSealCheckpoint: false, exactHeadVerificationRequired: false },
+      signals: { pending: [], actionRequired: [], failed: [] },
+    },
+  };
+
+  const sourceControlMutationProvider: any = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    async createBranch() { throw new Error('unused'); },
+    async bootstrapIntegrationBranch() { throw new Error('unused'); },
+    async deleteBranch() { throw new Error('unused'); },
+    async createCommit() { throw new Error('unused'); },
+    async createPullRequest() { promotionCreates += 1; throw new Error('duplicate promotion must not be created'); },
+    async commentPullRequest() { throw new Error('unused'); },
+    async updatePullRequestLabels() { throw new Error('unused'); },
+    async mergeIntegrationPullRequest() { throw new Error('unused'); },
+    async reconcilePreviewPullRequest() { throw new Error('unused'); },
+    async promotePullRequest() { throw new Error('unused'); },
+  };
+  const workProvider: any = {
+    id: 'github-work',
+    async getCapabilities() { return []; },
+    async getWorkItemStatus() {
+      return {
+        repository: 'pyralisxc/Conductor',
+        issueNumber: 170,
+        url: 'https://github.test/issues/170',
+        title: 'Bundle',
+        body: '',
+        state: 'open',
+        status: 'review',
+        statusSource: 'label',
+        kind: 'feature',
+        kindSource: 'label',
+        origin: 'user-feedback',
+        originSource: 'label',
+        labels: [],
+        createdAt: '2026-09-27T00:00:00Z',
+        updatedAt: '2026-09-27T00:00:00Z',
+      };
+    },
+    async listWorkItems() { return { repository: 'pyralisxc/Conductor', items: [], truncated: false }; },
+    async listWorkItemPullRequests() { return [mergedIntegration, mergedPromotion]; },
+  };
+  const runtime = new ConductorToolRuntime({
+    sourceControlMutationProvider,
+    pullRequestProvider: {
+      id: 'github-pr',
+      async getCapabilities() { return []; },
+      async getPullRequestStatus() { throw new Error('no PR reread required for already-promoted exact Preview'); },
+    } as any,
+    workItemCandidateProvider: workProvider,
+    repositoryBootstrapProvider: {
+      id: 'github-topology',
+      async getCapabilities() { return []; },
+      async getRepositoryBootstrap() {
+        return {
+          provider: 'github' as const,
+          repository: 'pyralisxc/Conductor',
+          defaultBranch: 'main',
+          defaultHead: mainHead,
+          integrationBranch: 'preview' as const,
+          integrationHead: previewHead,
+          observedAt: '2026-09-27T00:00:00Z',
+        };
+      },
+    },
+    deploymentProvider: {
+      id: 'vercel',
+      async getCapabilities() { return []; },
+      async getDeploymentStatus() { deploymentReads += 1; throw new Error('deployment proof is unnecessary after exact promotion is already merged'); },
+    } as any,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+
+  const receipt = await runtime.advanceLifecycle({
+    project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+    issueNumber: 170,
+    maxPolls: 0,
+    pollIntervalMs: 0,
+    idempotencyKey: 'lifecycle-already-promoted-test',
+  });
+
+  assert.equal(receipt.status, 'succeeded');
+  if (receipt.status !== 'succeeded') return;
+  assert.equal(receipt.result.stage, 'complete');
+  assert.equal(receipt.result.transitions.at(-1)?.pullRequestNumber, 31);
+  assert.equal(promotionCreates, 0);
+  assert.equal(deploymentReads, 0);
+});
+
 test('evidence bundle enforces concurrency, preserves order, and isolates partial failure', async () => {
   let active = 0;
   let peak = 0;
