@@ -1492,16 +1492,23 @@ export class ConductorToolRuntime {
     });
   }
 
-  private async executeCompositeMutation<Result>(
+  private async executeCompositeMutation(
     operation: 'lifecycle.advance' | 'lifecycle.resume',
     project: ProjectReference,
-    run: () => Promise<Result>,
-  ): Promise<ExecutionReceipt<Result>> {
+    run: () => Promise<LifecycleAdvanceProjection>,
+  ): Promise<ExecutionReceipt<LifecycleAdvanceProjection>> {
     const operationId = this.createOperationId();
     const startedAt = this.now().toISOString();
+    const startedAtMs = Date.now();
+    const providerUsageBefore = this.captureProviderUsage();
     try {
       const result = await run();
-      return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, operationId, operation, target: { kind: 'project', id: project.id, ref: project.ref }, status: 'succeeded', startedAt, finishedAt: this.now().toISOString(), result, diagnostics: [{ level: 'info', source: 'conductor', message: 'Composite lifecycle effects retain durable idempotency in each underlying mutation substep; the composite re-reads provider state on retry.' }] };
+      const measured = {
+        ...result,
+        elapsedMs: Math.max(0, Date.now() - startedAtMs),
+        providerUsage: this.providerUsageDelta(providerUsageBefore),
+      };
+      return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, operationId, operation, target: { kind: 'project', id: project.id, ref: project.ref }, status: 'succeeded', startedAt, finishedAt: this.now().toISOString(), result: measured, diagnostics: [{ level: 'info', source: 'conductor', message: 'Composite lifecycle effects retain durable idempotency in each underlying mutation substep; the composite re-reads provider state on retry. Provider usage is measured as the operation-local delta from configured provider counters.' }] };
     } catch (error) {
       const normalized = normalizeToolError(error);
       return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, operationId, operation, target: { kind: 'project', id: project.id, ref: project.ref }, status: 'failed', startedAt, finishedAt: this.now().toISOString(), error: normalized, diagnostics: normalized.diagnostics };
@@ -1863,7 +1870,7 @@ function lifecycleProjection(
   previewProof: LifecycleAdvanceProjection['previewProof'] = null,
   gate: LifecycleGateSpec | null = null,
 ): LifecycleAdvanceProjection {
-  return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, project, issueNumber, stage, summary, transitions, previewProof, gate };
+  return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, project, issueNumber, stage, summary, transitions, elapsedMs: 0, providerUsage: [], previewProof, gate };
 }
 
 
