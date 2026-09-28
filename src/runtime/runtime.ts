@@ -68,6 +68,8 @@ import {
   type PullRequestStatus,
   type GetSourceArtifactInput,
   type SourceArtifactRead,
+  type DiscoverSourceInput,
+  type SourceDiscoveryResult,
   type GetCiRunEvidenceInput,
   type CiRunEvidence,
   type UpdatePullRequestLabelsInput,
@@ -153,6 +155,12 @@ const DEVELOPMENT_STATUS_READ_DEFINITION: ToolDefinition = {
 const PULL_REQUEST_READ_DEFINITION: ToolDefinition = {
   name: 'pull-request.status',
   description: 'Read one pull request with exact head/base identity plus observed check and workflow state.',
+  mutates: false,
+};
+
+const SOURCE_DISCOVERY_READ_DEFINITION: ToolDefinition = {
+  name: 'source.discover',
+  description: 'Read a bounded exact-SHA repository manifest or literal source matches without semantic inference or mutation authority.',
   mutates: false,
 };
 
@@ -359,6 +367,10 @@ export class ConductorToolRuntime {
 
   get pullRequestReadEnabled(): boolean {
     return Boolean(this.pullRequestProvider);
+  }
+
+  get sourceDiscoveryReadEnabled(): boolean {
+    return Boolean(this.sourceArtifactProvider?.discoverSource);
   }
 
   get sourceArtifactReadEnabled(): boolean {
@@ -1055,6 +1067,20 @@ export class ConductorToolRuntime {
   }
 
 
+  async sourceDiscover(input: DiscoverSourceInput): Promise<ExecutionReceipt<SourceDiscoveryResult>> {
+    const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return await this.executeRead(
+      'source.discover',
+      { kind: 'repository', id: resolvedProject.repository ?? resolvedProject.id, ref: input.sha },
+      async () => {
+        if (!this.sourceArtifactProvider?.discoverSource) {
+          throw { code: 'TOOL_UNAVAILABLE', message: 'Source discovery provider is not configured' };
+        }
+        return { result: await this.sourceArtifactProvider.discoverSource({ ...input, project: resolvedProject }) };
+      },
+    );
+  }
+
   async sourceArtifactRead(input: GetSourceArtifactInput): Promise<ExecutionReceipt<SourceArtifactRead>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
     return await this.executeRead(
@@ -1546,6 +1572,7 @@ export class ConductorToolRuntime {
       ...(this.repositoryAuditReadEnabled ? [REPOSITORY_AUDIT_READ_DEFINITION] : []),
       ...(this.developmentStatusReadEnabled ? [DEVELOPMENT_STATUS_READ_DEFINITION] : []),
       ...(this.pullRequestReadEnabled ? [PULL_REQUEST_READ_DEFINITION] : []),
+      ...(this.sourceDiscoveryReadEnabled ? [SOURCE_DISCOVERY_READ_DEFINITION] : []),
       ...(this.sourceArtifactReadEnabled ? [EXECUTION_EVIDENCE_READ_DEFINITIONS[0]!] : []),
       ...(this.ciReadEnabled ? [EXECUTION_EVIDENCE_READ_DEFINITIONS[1]!] : []),
       ...(this.deploymentReadEnabled ? [...DEPLOYMENT_READ_DEFINITIONS, ...VERCEL_AUDIT_DEFINITIONS] : []),

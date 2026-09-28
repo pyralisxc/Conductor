@@ -31,7 +31,7 @@ const errorSchema = z.object({
 
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
-  'work.bootstrap', 'repository.audit', 'evidence.bundle', 'development.status', 'pull-request.status', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
+  'work.bootstrap', 'repository.audit', 'evidence.bundle', 'development.status', 'pull-request.status', 'source.discover', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
   'repository.acquire', 'lifecycle.advance', 'lifecycle.resume',
   'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
@@ -78,7 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v5'),
+      catalogVersion: z.literal('conductor.catalog.v6'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -481,10 +481,31 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
   }
 
 
+  if (runtime.sourceDiscoveryReadEnabled) {
+    server.registerTool('source.discover', {
+      title: 'Discover source paths at an exact revision',
+      description: 'Read a bounded exact-SHA repository manifest or perform bounded literal source discovery. This is provider-native source location evidence only: no semantic ranking, architecture inference, impact analysis, or mutation authority.',
+      inputSchema: z.object({
+        project: projectSchema,
+        sha: z.string().regex(/^[0-9a-f]{40}$/i),
+        query: z.string().min(1).max(256).optional(),
+        pathPrefix: z.string().min(1).max(1024).optional(),
+        caseSensitive: z.boolean().default(false),
+        maxFiles: z.number().int().min(1).max(120).default(80),
+        maxBytes: z.number().int().min(1024).max(5 * 1024 * 1024).default(2 * 1024 * 1024),
+        maxFileBytes: z.number().int().min(1024).max(512 * 1024).default(128 * 1024),
+        maxMatches: z.number().int().min(1).max(50).default(20),
+      }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.sourceDiscover(input)));
+  }
+
   if (runtime.sourceArtifactReadEnabled) {
     server.registerTool('source.artifact.read', {
       title: 'Read exact source artifact',
-      description: 'Use after Development Intelligence has narrowed the source area. Read one complete bounded UTF-8 file at an exact 40-character Git SHA and repository-relative path. This tool does no browsing, repository-wide search, architecture inference, or semantic interpretation.',
+      description: 'Read one complete bounded UTF-8 file at an exact 40-character Git SHA and repository-relative path, typically after `source.discover` or Development Intelligence has identified the path. This tool does no repository-wide search, architecture inference, or semantic interpretation.',
       inputSchema: z.object({
         project: projectSchema,
         sha: z.string().regex(/^[0-9a-f]{40}$/i),

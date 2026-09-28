@@ -122,9 +122,10 @@ The current canary succeeds when a human-directed development flow can be recons
 
 ## DI-first provider evidence loop
 
-- Development Intelligence narrows an unfamiliar change to an exact source path and immutable revision without Conductor duplicating repository search or architecture inference.
-- `source.artifact.read` returns the complete exact UTF-8 artifact for that SHA/path when within the bound and explicitly reports binary, too-large, or unsupported content instead of returning a partial edit surface.
+- `source.discover` provides a bounded provider-native baseline for exact-SHA manifest/literal source location when the path is not already known. It reports explicit scan/file/byte/match limits and truncation, and never assigns semantic relevance or mutation authority.
+- Development Intelligence remains the semantic/project-wide path for natural-language discovery, architecture, relationships, impact, and uncertainty; Conductor source discovery must not recreate those semantics.
+- `source.artifact.read` returns the complete exact UTF-8 artifact for a selected SHA/path when within the bound and explicitly reports binary, too-large, or unsupported content instead of returning a partial edit surface.
 - A stale or non-immutable source selector fails closed.
 - `pull-request.status` remains the first CI read. An actionable failing run is then drilled down with `ci.run.read`, which verifies the exact PR head and workflow-run SHA before returning jobs/steps.
 - CI log output is tail-bounded, explicitly marked truncated when applicable, and redacts secret-like material before it leaves the GitHub adapter.
-- A fresh client can execute the normal DI → exact source artifact → bounded Conductor mutation → GitHub CI evidence → DI transition verification loop without requiring a generic GitHub file/search/log proxy.
+- A fresh client can execute both the direct Conductor path (`source.discover` → exact artifact → bounded mutation) and the DI-assisted path (DI semantic localization → exact artifact → bounded mutation), while DI remains the deeper understanding layer.

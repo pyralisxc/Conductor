@@ -133,3 +133,6 @@ The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the confi
 
 
 - `evidence.bundle(items, concurrency)` is the first bounded parallel read surface. It accepts 1–12 explicit items and a concurrency ceiling of 1–4, supports only project preflight, deployment status, runtime logs, pull-request status, and repository audit, preserves input order, keeps every project's exact identity/error separate, performs no hidden retries, and returns compact operation-specific evidence rather than concatenating full standalone receipts. It is intentionally not a batch mutation or arbitrary tool-dispatch surface.
+
+
+- `source.discover(project, sha, ...)` provides bounded provider-native source location evidence at one exact immutable revision. Without a query it returns a bounded recursive-tree manifest. With a query it scans only bounded likely-text blobs from that exact tree for literal line matches. It reports scan/file/byte/match limits, truncation reasons, skipped large/binary/unsupported files, and exact blob identities. Results are path evidence, not semantic relevance, architecture meaning, impact analysis, or mutation authority; use `source.artifact.read` to inspect a selected file exactly and Development Intelligence for semantic/project-wide reasoning.

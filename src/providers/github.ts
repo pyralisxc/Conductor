@@ -15,6 +15,8 @@ import type {
   PullRequestStatus,
   GetSourceArtifactInput,
   SourceArtifactRead,
+  DiscoverSourceInput,
+  SourceDiscoveryResult,
   GetCiRunEvidenceInput,
   CiRunEvidence,
   CiJobEvidence,
@@ -205,6 +207,13 @@ interface GitHubTreeResponse {
     sha: string;
     size?: number;
   }>;
+}
+
+interface GitHubBlobResponse {
+  sha: string;
+  size?: number;
+  encoding?: string | null;
+  content?: string | null;
 }
 
 interface GitHubGitObjectResponse { sha: string }
@@ -550,6 +559,196 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       },
       workflowRuns: observedWorkflowRuns,
       orchestration,
+    };
+  }
+
+
+  async discoverSource(input: DiscoverSourceInput): Promise<SourceDiscoveryResult> {
+    const { repository, credential } = await this.readableRepository(input.project, GITHUB_READ_OPERATION_PERMISSIONS['source.discover']);
+    assertSha(input.sha, 'sha');
+
+    const query = input.query === undefined ? null : input.query.trim();
+    if (query !== null && (query.length < 1 || query.length > 256)) {
+      throw { code: 'CONFLICT', message: 'Source discovery query must be 1-256 characters when provided' };
+    }
+    const pathPrefix = input.pathPrefix?.trim()
+      ? validRepositoryPath(input.pathPrefix.trim().replace(/\/+$/u, ''))
+      : null;
+    const caseSensitive = input.caseSensitive ?? false;
+    const maxFiles = boundedInteger(input.maxFiles ?? 80, 1, 120);
+    const maxBytes = boundedInteger(input.maxBytes ?? 2 * 1024 * 1024, 1024, 5 * 1024 * 1024);
+    const maxFileBytes = boundedInteger(input.maxFileBytes ?? 128 * 1024, 1024, 512 * 1024);
+    const maxMatches = boundedInteger(input.maxMatches ?? 20, 1, 50);
+
+    const commit = await this.request<{ sha: string; tree: { sha: string } }>(
+      repository,
+      `/git/commits/${encodeURIComponent(input.sha)}`,
+      {},
+      credential,
+    );
+    if (!commit?.tree?.sha) throw { code: 'COMMAND_FAILED', message: 'GitHub did not return the exact commit tree for source discovery' };
+    const tree = await this.request<GitHubTreeResponse>(
+      repository,
+      `/git/trees/${encodeURIComponent(commit.tree.sha)}?recursive=1`,
+      {},
+      credential,
+    );
+
+    const allBlobs = tree.tree
+      .filter((entry) =>
+        entry.type === 'blob'
+        && (!pathPrefix || entry.path === pathPrefix || entry.path.startsWith(`${pathPrefix}/`))
+      )
+      .sort((left, right) => left.path.localeCompare(right.path));
+    const totalFiles = tree.tree.filter((entry) => entry.type === 'blob').length;
+    const limits = { maxFiles, maxBytes, maxFileBytes, maxMatches };
+    const truncationReasons = new Set<string>();
+    if (tree.truncated) truncationReasons.add('provider-tree-truncated');
+
+    if (query === null) {
+      const files = allBlobs.slice(0, maxFiles).map((entry) => ({
+        path: entry.path,
+        blobSha: entry.sha,
+        size: typeof entry.size === 'number' ? entry.size : null,
+      }));
+      if (allBlobs.length > files.length) truncationReasons.add('file-result-limit');
+      return {
+        provider: 'github',
+        repository,
+        revisionSha: input.sha,
+        treeSha: commit.tree.sha,
+        mode: 'manifest',
+        query: null,
+        pathPrefix,
+        totalFiles,
+        candidateFiles: allBlobs.length,
+        files,
+        matches: [],
+        scannedFiles: 0,
+        scannedBytes: 0,
+        skipped: { tooLarge: 0, binaryOrInvalidText: 0, unsupported: 0 },
+        truncated: truncationReasons.size > 0,
+        truncationReasons: [...truncationReasons],
+        limits,
+        observedAt: new Date().toISOString(),
+        note: 'Manifest mode returns bounded exact-tree file metadata only; it does not rank, infer, or interpret source meaning.',
+      };
+    }
+
+    const textCandidates = allBlobs.filter((entry) => sourceDiscoveryTextCandidate(entry.path));
+    const skipped = {
+      tooLarge: 0,
+      binaryOrInvalidText: 0,
+      unsupported: allBlobs.length - textCandidates.length,
+    };
+    const selected: typeof textCandidates = [];
+    let plannedBytes = 0;
+    for (const entry of textCandidates) {
+      if (selected.length >= maxFiles) {
+        truncationReasons.add('scan-file-limit');
+        break;
+      }
+      const size = typeof entry.size === 'number' ? entry.size : null;
+      if (size === null) {
+        skipped.unsupported += 1;
+        continue;
+      }
+      if (size > maxFileBytes) {
+        skipped.tooLarge += 1;
+        continue;
+      }
+      if (plannedBytes + size > maxBytes) {
+        truncationReasons.add('scan-byte-limit');
+        continue;
+      }
+      selected.push(entry);
+      plannedBytes += size;
+    }
+
+    const matches: SourceDiscoveryResult['matches'] = [];
+    let scannedFiles = 0;
+    let scannedBytes = 0;
+    let stopForMatches = false;
+
+    for (let offset = 0; offset < selected.length && !stopForMatches; offset += 4) {
+      const batch = selected.slice(offset, offset + 4);
+      const payloads = await Promise.all(batch.map(async (entry) => ({
+        entry,
+        payload: await this.request<GitHubBlobResponse>(
+          repository,
+          `/git/blobs/${encodeURIComponent(entry.sha)}`,
+          {},
+          credential,
+        ),
+      })));
+
+      for (const { entry, payload } of payloads) {
+        if (payload.encoding !== 'base64' || typeof payload.content !== 'string') {
+          skipped.unsupported += 1;
+          continue;
+        }
+        const bytes = Buffer.from(payload.content.replace(/\s/gu, ''), 'base64');
+        if (bytes.byteLength > maxFileBytes) {
+          skipped.tooLarge += 1;
+          continue;
+        }
+        scannedFiles += 1;
+        scannedBytes += bytes.byteLength;
+        if (bytes.includes(0)) {
+          skipped.binaryOrInvalidText += 1;
+          continue;
+        }
+        let content: string;
+        try {
+          content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        } catch {
+          skipped.binaryOrInvalidText += 1;
+          continue;
+        }
+
+        const needle = caseSensitive ? query : query.toLocaleLowerCase();
+        const lines = content.split(/\r?\n/u);
+        for (let index = 0; index < lines.length; index++) {
+          const line = lines[index] ?? '';
+          const haystack = caseSensitive ? line : line.toLocaleLowerCase();
+          if (!haystack.includes(needle)) continue;
+          matches.push({
+            path: entry.path,
+            blobSha: entry.sha,
+            size: typeof entry.size === 'number' ? entry.size : bytes.byteLength,
+            line: index + 1,
+            snippet: sourceDiscoverySnippet(line),
+          });
+          if (matches.length >= maxMatches) {
+            truncationReasons.add('match-limit');
+            stopForMatches = true;
+            break;
+          }
+        }
+        if (stopForMatches) break;
+      }
+    }
+
+    return {
+      provider: 'github',
+      repository,
+      revisionSha: input.sha,
+      treeSha: commit.tree.sha,
+      mode: 'literal',
+      query,
+      pathPrefix,
+      totalFiles,
+      candidateFiles: allBlobs.length,
+      files: [],
+      matches,
+      scannedFiles,
+      scannedBytes,
+      skipped,
+      truncated: truncationReasons.size > 0,
+      truncationReasons: [...truncationReasons],
+      limits,
+      observedAt: new Date().toISOString(),
+      note: 'Literal discovery is exact-SHA provider evidence only. Match order is repository-path order, not semantic relevance, and matches never authorize mutation by themselves.',
     };
   }
 
@@ -2174,6 +2373,26 @@ function enforceAcquisitionBounds(tree: GitHubTreeResponse, blobs: AcquisitionBl
   }
 }
 
+const SOURCE_DISCOVERY_TEXT_EXTENSIONS = new Set([
+  '.c', '.cc', '.cpp', '.cs', '.css', '.go', '.gql', '.graphql', '.h', '.hpp',
+  '.html', '.ini', '.java', '.js', '.jsx', '.json', '.kt', '.kts', '.md', '.mdx',
+  '.mjs', '.cjs', '.php', '.proto', '.py', '.rb', '.rs', '.scss', '.sh', '.sql',
+  '.svelte', '.swift', '.toml', '.ts', '.tsx', '.txt', '.vue', '.yaml', '.yml', '.zsh',
+]);
+const SOURCE_DISCOVERY_TEXT_BASENAMES = new Set(['Dockerfile', 'Makefile', 'Procfile', 'Gemfile', 'Rakefile']);
+
+function sourceDiscoveryTextCandidate(path: string): boolean {
+  const basename = path.split('/').at(-1) ?? path;
+  if (SOURCE_DISCOVERY_TEXT_BASENAMES.has(basename)) return true;
+  const dot = basename.lastIndexOf('.');
+  return dot >= 0 && SOURCE_DISCOVERY_TEXT_EXTENSIONS.has(basename.slice(dot).toLowerCase());
+}
+
+function sourceDiscoverySnippet(line: string): string {
+  const compact = line.replace(/\t/gu, '  ').trimEnd();
+  return compact.length <= 320 ? compact : `${compact.slice(0, 317)}...`;
+}
+
 function rawGithubUrl(repository: string, sha: string, path: string): string {
   return `https://raw.githubusercontent.com/${repository.split('/').map(encodeURIComponent).join('/')}/${encodeURIComponent(sha)}/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
@@ -2182,6 +2401,7 @@ type GitHubReadOperation =
   | 'development.status'
   | 'repository.audit'
   | 'pull-request.status'
+  | 'source.discover'
   | 'source.artifact.read'
   | 'ci.run.read'
   | 'work-item.status'
@@ -2229,6 +2449,7 @@ const GITHUB_READ_OPERATION_PERMISSIONS: Readonly<Record<
     checks: 'read',
     actions: 'read',
   },
+  'source.discover': { contents: 'read' },
   'source.artifact.read': { contents: 'read' },
   'ci.run.read': {
     pull_requests: 'read',

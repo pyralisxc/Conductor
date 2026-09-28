@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v5' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v6' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -11,6 +11,7 @@ export type ToolOperationName =
   | 'evidence.bundle'
   | 'development.status'
   | 'pull-request.status'
+  | 'source.discover'
   | 'source.artifact.read'
   | 'ci.run.read'
   | 'work-item.status'
@@ -751,6 +752,60 @@ export interface PullRequestStatus {
   };
   workflowRuns: PullRequestWorkflowRunState[];
   orchestration: PullRequestOrchestration;
+}
+
+export interface DiscoverSourceInput {
+  project: ProjectReference;
+  sha: string;
+  query?: string;
+  pathPrefix?: string;
+  caseSensitive?: boolean;
+  maxFiles?: number;
+  maxBytes?: number;
+  maxFileBytes?: number;
+  maxMatches?: number;
+}
+
+export interface SourceDiscoveryFile {
+  path: string;
+  blobSha: string;
+  size: number | null;
+}
+
+export interface SourceDiscoveryMatch extends SourceDiscoveryFile {
+  line: number;
+  snippet: string;
+}
+
+export interface SourceDiscoveryResult {
+  provider: 'github';
+  repository: string;
+  revisionSha: string;
+  treeSha: string;
+  mode: 'manifest' | 'literal';
+  query: string | null;
+  pathPrefix: string | null;
+  totalFiles: number;
+  candidateFiles: number;
+  files: SourceDiscoveryFile[];
+  matches: SourceDiscoveryMatch[];
+  scannedFiles: number;
+  scannedBytes: number;
+  skipped: {
+    tooLarge: number;
+    binaryOrInvalidText: number;
+    unsupported: number;
+  };
+  truncated: boolean;
+  truncationReasons: string[];
+  limits: {
+    maxFiles: number;
+    maxBytes: number;
+    maxFileBytes: number;
+    maxMatches: number;
+  };
+  observedAt: string;
+  note: string;
 }
 
 export type SourceArtifactStatus = 'available' | 'too-large' | 'binary' | 'unsupported';
