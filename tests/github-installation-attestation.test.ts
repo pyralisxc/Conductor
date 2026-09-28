@@ -18,7 +18,10 @@ function privateKey(): string {
 }
 
 test('GitHub App installation attestation returns safe installation metadata without token', async () => {
-  const seen = [];
+  const seen: Array<{
+    url: string;
+    authorization: string | null;
+  }> = [];
   const provider = new GitHubAppCredentialProvider({
     appId: '123',
     privateKey: privateKey(),

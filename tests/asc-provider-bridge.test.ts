@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import type {
+  IncomingHttpHeaders,
+  IncomingMessage,
+  ServerResponse
+} from 'node:http';
 
 import {
   handleAscProviderBridgeRequest
@@ -7,35 +12,39 @@ import {
 
 class FakeResponse {
   statusCode = 0;
-  headers = {};
+  headers: Record<string, string> = {};
   body = '';
 
-  writeHead(status, headers = {}) {
+  writeHead(
+    status: number,
+    headers: Record<string, string> = {}
+  ) {
     this.statusCode = status;
     this.headers = headers;
     return this;
   }
 
-  end(body = '') {
+  end(body: string = '') {
     this.body = String(body);
   }
 }
 
-function request(token = 'a'.repeat(40)) {
+function request(
+  token = 'a'.repeat(40)
+): IncomingMessage {
   return {
     method: 'GET',
     headers: {
       authorization: 'Bearer ' + token,
-    },
-    [Symbol.asyncIterator]: async function* () {},
-  };
+    } as IncomingHttpHeaders,
+  } as IncomingMessage;
 }
 
 test('ASC provider bridge exposes only safe GitHub App identity metadata', async () => {
   const res = new FakeResponse();
   const handled = await handleAscProviderBridgeRequest(
     request(),
-    res,
+    res as unknown as ServerResponse,
     new URL('https://conductor.example/internal/asc/github/app'),
     {
       secret: 'a'.repeat(40),
@@ -65,7 +74,7 @@ test('ASC provider bridge rejects wrong service secret before GitHub access', as
 
   await handleAscProviderBridgeRequest(
     request('wrong-secret-value-that-is-long-enough'),
-    res,
+    res as unknown as ServerResponse,
     new URL('https://conductor.example/internal/asc/github/app'),
     {
       secret: 'a'.repeat(40),
