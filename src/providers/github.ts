@@ -524,6 +524,41 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       {},
       credential,
     );
+    const labels = (pull.labels ?? []).flatMap((label) => label.name ? [label.name] : []);
+    if (pull.merged) {
+      const checks: PullRequestStatus['checks']['items'] = [];
+      const workflowRuns: PullRequestStatus['workflowRuns'] = [];
+      return {
+        repository,
+        pullRequestNumber: pull.number,
+        url: pull.html_url,
+        state: pull.state,
+        draft: pull.draft ?? false,
+        merged: true,
+        mergeable: pull.mergeable ?? null,
+        mergeableState: pull.mergeable_state ?? null,
+        head: pull.head,
+        base: pull.base,
+        labels,
+        checks: {
+          total: 0,
+          pending: 0,
+          successful: 0,
+          failed: 0,
+          neutral: 0,
+          skipped: 0,
+          items: checks,
+        },
+        workflowRuns,
+        orchestration: derivePullRequestOrchestration({
+          pull,
+          labels,
+          checks,
+          workflowRuns,
+          previous: input.previous,
+        }),
+      };
+    }
     const [checkRuns, workflowRuns] = await Promise.all([
       this.request<GitHubCheckRunsResponse>(
         repository,
@@ -556,7 +591,6 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       && check.conclusion !== null
       && !['success', 'neutral', 'skipped'].includes(check.conclusion)
     ).length;
-    const labels = (pull.labels ?? []).flatMap((label) => label.name ? [label.name] : []);
     const observedWorkflowRuns = markHistoricalWorkflowRuns(workflowRuns.workflow_runs.map((run) => ({
       id: run.id,
       name: run.name ?? `workflow-${run.id}`,
@@ -1717,9 +1751,9 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       return [referenced.number];
     }))].slice(0, 10);
 
-    return await Promise.all(pullRequestNumbers.map(async (pullRequestNumber) =>
+    return await boundedGitHubMap(pullRequestNumbers, 2, async (pullRequestNumber) =>
       await this.getPullRequestStatus({ project: input.project, pullRequestNumber })
-    ));
+    );
   }
 
   async createWorkItem(input: CreateWorkItemInput): Promise<WorkItemRecord> {
@@ -3186,6 +3220,24 @@ function validRepositoryPath(value: string): string {
     throw { code: 'PERMISSION_DENIED', message: `Unsafe repository path: ${value}` };
   }
   return value;
+}
+
+async function boundedGitHubMap<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function boundedInteger(value: number, min: number, max: number): number {

@@ -613,6 +613,83 @@ test('GitHub provider returns exact PR identity plus checks and workflow runs', 
   assert.equal(status.orchestration.shouldAct, false);
 });
 
+
+test('GitHub work-item candidate expansion bounds PR reads and skips settled merged verification evidence', async () => {
+  const issueNumber = 55;
+  const pullNumbers = [101, 102, 103, 104, 105, 106];
+  let activePullReads = 0;
+  let peakPullReads = 0;
+  const requests: string[] = [];
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { issues: 'read', pull_requests: 'read', checks: 'read', actions: 'read' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.includes(`/issues/${issueNumber}/timeline`)) {
+        return Response.json(pullNumbers.map((number) => ({
+          event: 'cross-referenced',
+          source: {
+            issue: {
+              number,
+              repository_url: 'https://api.github.com/repos/pyralisxc/Conductor',
+              pull_request: {},
+            },
+          },
+        })));
+      }
+      const match = url.match(/\/pulls\/(\d+)$/u);
+      if (match) {
+        activePullReads += 1;
+        peakPullReads = Math.max(peakPullReads, activePullReads);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        activePullReads -= 1;
+        const number = Number(match[1]);
+        return Response.json({
+          number,
+          html_url: `https://github.com/pyralisxc/Conductor/pull/${number}`,
+          state: 'closed',
+          draft: false,
+          merged: true,
+          mergeable: null,
+          mergeable_state: 'unknown',
+          head: { ref: `work/${number}`, sha: String(number).padStart(40, '0') },
+          base: { ref: 'preview', sha: 'b'.repeat(40) },
+          labels: [],
+        });
+      }
+      if (url.includes('/check-runs') || url.includes('/actions/runs?')) {
+        throw new Error('settled merged PR must not re-read verification evidence');
+      }
+      throw new Error(`Unexpected request ${url}`);
+    },
+  });
+
+  const candidates = await provider.listWorkItemPullRequests({
+    project: { id: 'pyralisxc/Conductor' },
+    issueNumber,
+  });
+  assert.equal(candidates.length, pullNumbers.length);
+  assert.equal(peakPullReads, 2);
+  assert.equal(candidates.every((candidate) => candidate.merged), true);
+  assert.equal(candidates.every((candidate) => candidate.checks.total === 0), true);
+  assert.equal(candidates.every((candidate) => candidate.workflowRuns.length === 0), true);
+  assert.equal(candidates.every((candidate) => candidate.orchestration.state === 'merged'), true);
+  assert.equal(requests.filter((url) => url.includes('/check-runs')).length, 0);
+  assert.equal(requests.filter((url) => url.includes('/actions/runs?')).length, 0);
+});
+
 test('GitHub provider updates PR labels without erasing unrelated labels', async () => {
   const requests: Array<{ method: string; body?: any }> = [];
   const provider = new GitHubRuntimeProvider({
