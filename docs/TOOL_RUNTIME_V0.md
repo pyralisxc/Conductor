@@ -36,7 +36,7 @@ When explicitly enabled with durable Redis idempotency state, the current source
 - `pull-request.labels.update` adds/removes labels while preserving unrelated labels.
 - `pull-request.merge.integration` merges only an exact head/base candidate from a bounded work/repair/audit/release source into a non-accepted integration branch.
 - `pull-request.merge.reconcile-preview` merges only an exact repository-default-branch candidate into `preview` or `vercel-preview`, always using a merge commit for exceptional Main-only content changes.
-- `pull-request.merge.promote` merges only an exact `preview`/`vercel-preview` head/base candidate into the repository default branch with a merge commit and requires a non-empty owner approval reference. Normal promotion preserves Preview ancestry without a return PR.
+- `pull-request.merge.promote` merges only an exact `preview`/`vercel-preview` head/base candidate into the repository default branch with a merge commit, requires a non-empty owner approval reference, and fails closed while any open `production-blocking` work item exists unless every current blocker is explicitly named in the override. The durable receipt records the exact overridden blocker numbers. Normal promotion preserves Preview ancestry without a return PR.
 - `deployment.redeploy` redeploys one exact bound deployment; production-source redeploys require exact owner approval.
 - `deployment.git.create` creates a deployment from an exact linked Git repository/ref/full SHA. Preview lets Vercel infer the Preview target; production requires exact owner approval.
 - `deployment.promote` and `deployment.rollback` move production traffic only to one exact READY bound deployment with explicit owner approval and read-after-write reconciliation.
@@ -47,6 +47,7 @@ When explicitly enabled with durable Redis idempotency state, the current source
 - `work-scope.identity` identifies the connected OAuth client and owner-granted exceptions for the work-scope page. `work-scope.begin` declares a conversation's active exact owner/repository and returns a 12-hour, client-bound `workContext`. Supply it on code and deployment mutations and on their `preflight_operation` checks. Issue creation and maintenance route separately without a work context. The declaration is agent supplied; the server does not verify the chat's workspace.
 - `work-item.update-status` changes only lifecycle status; `done` closes the backing issue and active statuses reopen it. Link a confirmed duplicate to its canonical issue before closing it.
 - `work-item.classification.update` changes kind and/or origin without changing lifecycle status. `unknown` clears that classification. Issue maintenance uses `route-work`, including for an exact issue in another repository.
+- `work-item.triage.update` changes severity, priority, and/or the explicit `production-blocking` release gate while preserving lifecycle status, kind, origin, and unrelated labels. `unknown` clears severity/priority and `false` clears the release gate.
 
 The initial work-item vocabulary is deliberately small:
 

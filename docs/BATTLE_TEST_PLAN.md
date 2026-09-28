@@ -30,6 +30,7 @@ This document tests the **current bounded runtime**. Future automation experimen
 16a. `kind:audit` round-trips through issue creation/classification without replacing unrelated labels.
 16b. `repository.audit` succeeds with Development Intelligence disconnected and reports GitHub/work/Vercel provider facts with explicit availability boundaries.
 16c. When Development Intelligence is available, its `audit_repository` result is attached as a separate semantic evidence plane and never merged into Conductor provider facts or mutation authority.
+16d. Severity, priority, and `production-blocking` triage round-trip through normalized issue labels; triage mutation preserves lifecycle/kind/origin/unrelated labels and can explicitly clear each triage field.
 
 ## Current runtime — bounded development
 
@@ -84,6 +85,7 @@ This document tests the **current bounded runtime**. Future automation experimen
 ## Current runtime — release and reconciliation
 
 44. Main promotion requires an exact head SHA, exact base SHA, repository-default target, and explicit owner approval reference.
+44a. Main promotion fails closed while open `production-blocking` work items exist; an override must name every current blocker exactly, unrelated override numbers are rejected, and the durable result records the overridden blocker issue numbers. Closing or clearing the gate removes that blocker without changing lifecycle status.
 45. Stale promotion identity fails closed.
 46. Conductor cannot infer or bypass Main approval.
 47. Normal promotion uses a merge commit, so the exact approved Preview head becomes Main ancestry without a return PR; squash/rebase promotion fails closed.

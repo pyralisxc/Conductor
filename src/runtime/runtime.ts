@@ -87,6 +87,7 @@ import {
   type CommentWorkItemInput,
   type UpdateWorkItemStatusInput,
   type UpdateWorkItemClassificationInput,
+  type UpdateWorkItemTriageInput,
   type GetDeploymentStatusInput,
   type GetDeploymentLogsInput,
   type DeploymentProjectStatus,
@@ -210,6 +211,7 @@ const WORK_ITEM_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'work-item.comment.create', description: 'Add evidence or a consolidation link to one existing issue.', mutates: true },
   { name: 'work-item.update-status', description: 'Move one durable work item to an explicit normalized status.', mutates: true },
   { name: 'work-item.classification.update', description: 'Update normalized work kind and/or origin without changing lifecycle status.', mutates: true },
+  { name: 'work-item.triage.update', description: 'Update normalized severity, priority, and production release-gate triage without changing lifecycle status.', mutates: true },
 ];
 
 const PULL_REQUEST_LIFECYCLE_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
@@ -1220,6 +1222,13 @@ export class ConductorToolRuntime {
   async updateWorkItemClassification(input: UpdateWorkItemClassificationInput) {
     return await this.executeWorkItemMutation(input, 'work-item.classification.update', async (provider) => {
       const result = await provider.updateWorkItemClassification(input);
+      return { result, identifiers: { issueNumber: result.issueNumber } };
+    });
+  }
+
+  async updateWorkItemTriage(input: UpdateWorkItemTriageInput) {
+    return await this.executeWorkItemMutation(input, 'work-item.triage.update', async (provider) => {
+      const result = await provider.updateWorkItemTriage(input);
       return { result, identifiers: { issueNumber: result.issueNumber } };
     });
   }

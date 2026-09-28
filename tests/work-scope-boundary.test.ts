@@ -14,6 +14,7 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
   let routedComments = 0;
   let routedStatuses = 0;
   let routedClassifications = 0;
+  let routedTriage = 0;
   const grants = new Map<string, WorkScopeGrant>();
   const store: WorkScopeStore = {
     async get(id) { return grants.get(id) ?? null; },
@@ -38,6 +39,10 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
       async updateWorkItemClassification(input) {
         routedClassifications++;
         return { ...workItem(input.project.repository!), kind: input.kind ?? 'unknown', origin: input.origin ?? 'unknown' };
+      },
+      async updateWorkItemTriage(input) {
+        routedTriage++;
+        return { ...workItem(input.project.repository!), severity: input.severity ?? 'unknown', priority: input.priority ?? 'unknown', productionBlocking: input.productionBlocking ?? false };
       },
     },
     sourceControlMutationProvider: {
@@ -96,8 +101,10 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
     assert.notEqual((await client.callTool({ name: 'work-item.comment.create', arguments: commentInput })).isError, true);
     assert.equal(routedComments, 1);
     assert.notEqual((await client.callTool({ name: 'work-item.classification.update', arguments: { project: destination, issueNumber: 7, kind: 'bug', idempotencyKey: 'route-classify-existing' } })).isError, true);
+    assert.notEqual((await client.callTool({ name: 'work-item.triage.update', arguments: { project: destination, issueNumber: 7, severity: 'high', priority: 'p1', productionBlocking: true, idempotencyKey: 'route-triage-existing' } })).isError, true);
     assert.notEqual((await client.callTool({ name: 'work-item.update-status', arguments: { project: destination, issueNumber: 7, status: 'done', idempotencyKey: 'route-close-duplicate' } })).isError, true);
     assert.equal(routedClassifications, 1);
+    assert.equal(routedTriage, 1);
     assert.equal(routedStatuses, 1);
     assert.equal(providerCalls, 0);
 
@@ -130,6 +137,8 @@ function workItem(repository: string) {
     status: 'ready' as const, statusSource: 'label' as const,
     kind: 'unknown' as const, kindSource: 'default' as const,
     origin: 'unknown' as const, originSource: 'default' as const,
+    severity: 'unknown' as const, severitySource: 'default' as const,
+    priority: 'unknown' as const, prioritySource: 'default' as const, productionBlocking: false,
     labels: [], createdAt: '2026-09-24T00:00:00Z', updatedAt: '2026-09-24T00:00:00Z',
   };
 }

@@ -34,6 +34,7 @@ import type {
   CommentWorkItemInput,
   UpdateWorkItemStatusInput,
   UpdateWorkItemClassificationInput,
+  UpdateWorkItemTriageInput,
   RepositoryAcquisitionPreflightInput,
   RepositoryAcquisitionPreflight,
   AcquireRepositoryInput,
@@ -108,6 +109,7 @@ export interface WorkItemMutationProvider extends WorkItemReadProvider {
   commentWorkItem(input: CommentWorkItemInput): Promise<{ repository: string; issueNumber: number; commentId: string; url: string }>;
   updateWorkItemStatus(input: UpdateWorkItemStatusInput): Promise<WorkItemRecord>;
   updateWorkItemClassification(input: UpdateWorkItemClassificationInput): Promise<WorkItemRecord>;
+  updateWorkItemTriage(input: UpdateWorkItemTriageInput): Promise<WorkItemRecord>;
 }
 
 export interface DeploymentReadProvider extends RuntimeCapabilityProvider {
@@ -156,7 +158,7 @@ export interface SourceControlMutationProvider extends RuntimeCapabilityProvider
   rerunPullRequestVerification?(input: RerunPullRequestVerificationInput): Promise<{ repository: string; pullRequestNumber: number; workflowRunId: number; url: string | null; headSha: string; requested: true }>;
   mergeIntegrationPullRequest(input: MergeIntegrationPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }>;
   reconcilePreviewPullRequest(input: ReconcilePreviewPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string }>;
-  promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string }>;
+  promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string; overriddenBlockerIssueNumbers: number[] }>;
 }
 
 export type ToolRuntimeProvider =
