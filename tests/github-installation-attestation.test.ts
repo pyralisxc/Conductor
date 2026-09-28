@@ -153,3 +153,121 @@ test('GitHub permission map projects only bounded ASC capabilities', () => {
     ]
   );
 });
+
+
+test('GitHub repository attestation proves exact repository uses expected installation without token', async () => {
+  const seen: Array<{
+    url: string;
+    authorization: string | null;
+    method: string;
+  }> = [];
+  const provider = new GitHubAppCredentialProvider({
+    appId: '123',
+    privateKey: privateKey(),
+    now: () => new Date('2026-09-28T02:40:00.000Z'),
+    fetch: async (url, init) => {
+      seen.push({
+        url: String(url),
+        authorization: new Headers(
+          init?.headers
+        ).get('authorization'),
+        method: init?.method ?? 'GET',
+      });
+
+      return new Response(JSON.stringify({
+        id: 456,
+        app_id: 123,
+        account: {
+          id: 789,
+          login: 'pyralisxc',
+          type: 'User',
+        },
+        target_type: 'User',
+        repository_selection: 'selected',
+        permissions: {
+          metadata: 'read',
+          contents: 'write',
+          pull_requests: 'write',
+        },
+        suspended_at: null,
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+
+  const result =
+    await provider.getRepositoryAttestation(
+      'pyralisxc/AI-Systems-Control',
+      '456'
+    );
+
+  assert.equal(
+    seen[0]?.url,
+    'https://api.github.com/repos/pyralisxc/AI-Systems-Control/installation'
+  );
+  assert.equal(seen[0]?.method, 'GET');
+  assert.match(
+    seen[0]?.authorization ?? '',
+    /^Bearer /u
+  );
+  assert.deepEqual(result, {
+    installationId: '456',
+    repository: 'pyralisxc/AI-Systems-Control',
+    accountId: '789',
+    accountLogin: 'pyralisxc',
+    accountType: 'User',
+    permissions: {
+      metadata: 'read',
+      contents: 'write',
+      pull_requests: 'write',
+    },
+    capabilities: [
+      'pull_request.read',
+      'pull_request.write',
+      'repository.read',
+      'source.read',
+      'source.write',
+    ],
+    verifiedAt: '2026-09-28T02:40:00.000Z',
+  });
+  assert.equal(
+    JSON.stringify(result).includes('token'),
+    false
+  );
+});
+
+test('GitHub repository attestation rejects repository attached to another installation', async () => {
+  const provider = new GitHubAppCredentialProvider({
+    appId: '123',
+    privateKey: privateKey(),
+    fetch: async () =>
+      new Response(JSON.stringify({
+        id: 999,
+        app_id: 123,
+        account: {
+          id: 789,
+          login: 'pyralisxc',
+          type: 'User',
+        },
+        repository_selection: 'selected',
+        permissions: {
+          metadata: 'read',
+        },
+        suspended_at: null,
+      }), { status: 200 }),
+  });
+
+  await assert.rejects(
+    () => provider.getRepositoryAttestation(
+      'pyralisxc/AI-Systems-Control',
+      '456'
+    ),
+    (error) =>
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'CONFLICT'
+  );
+});
