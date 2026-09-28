@@ -43,10 +43,16 @@ import type {
   WorkItemOrigin,
   MutableWorkItemOrigin,
   WorkItemClassificationSource,
+  WorkItemSeverity,
+  MutableWorkItemSeverity,
+  WorkItemPriority,
+  MutableWorkItemPriority,
+  WorkItemTriageSource,
   CreateWorkItemInput,
   CommentWorkItemInput,
   UpdateWorkItemStatusInput,
   UpdateWorkItemClassificationInput,
+  UpdateWorkItemTriageInput,
   RepositoryAcquisitionPreflightInput,
   RepositoryAcquisitionPreflight,
   AcquireRepositoryInput,
@@ -1693,13 +1699,19 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     const status = input.status ?? 'backlog';
     const kind = input.kind ?? 'unknown';
     const origin = input.origin ?? 'unknown';
+    const severity = input.severity ?? 'unknown';
+    const priority = input.priority ?? 'unknown';
+    const productionBlocking = input.productionBlocking ?? false;
     const labels = normalizedLabels(input.labels);
     if (labels.some(isWorkItemReservedLabel)) {
-      throw { code: 'CONFLICT', message: 'Work-item labels may not set reserved status:*, kind:*, or origin:* labels directly' };
+      throw { code: 'CONFLICT', message: 'Work-item labels may not set reserved normalized status/classification/triage labels directly' };
     }
     await this.ensureWorkItemStatusLabel(repository, credential, status);
     if (kind !== 'unknown') await this.ensureWorkItemKindLabel(repository, credential, kind);
     if (origin !== 'unknown') await this.ensureWorkItemOriginLabel(repository, credential, origin);
+    if (severity !== 'unknown') await this.ensureWorkItemSeverityLabel(repository, credential, severity);
+    if (priority !== 'unknown') await this.ensureWorkItemPriorityLabel(repository, credential, priority);
+    if (productionBlocking) await this.ensureProductionBlockingLabel(repository, credential);
     const created = await this.request<GitHubIssueResponse>(repository, '/issues', {
       method: 'POST',
       body: JSON.stringify({
@@ -1710,6 +1722,9 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
           workItemStatusLabel(status),
           ...(kind === 'unknown' ? [] : [workItemKindLabel(kind)]),
           ...(origin === 'unknown' ? [] : [workItemOriginLabel(origin)]),
+          ...(severity === 'unknown' ? [] : [workItemSeverityLabel(severity)]),
+          ...(priority === 'unknown' ? [] : [workItemPriorityLabel(priority)]),
+          ...(productionBlocking ? [WORK_ITEM_PRODUCTION_BLOCKING_LABEL] : []),
         ],
       }),
     }, credential);
@@ -1788,6 +1803,43 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     return workItemFromIssue(repository, { ...current, labels: updatedLabels });
   }
 
+  async updateWorkItemTriage(input: UpdateWorkItemTriageInput): Promise<WorkItemRecord> {
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['work-item.triage.update']);
+    assertIssueNumber(input.issueNumber);
+    if (input.severity === undefined && input.priority === undefined && input.productionBlocking === undefined) {
+      throw { code: 'CONFLICT', message: 'At least one of severity, priority, or productionBlocking must be provided' };
+    }
+    const current = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {}, credential);
+    assertIssueIsWorkItem(current);
+    let labels = issueLabelNames(current);
+    if (input.severity !== undefined) {
+      labels = labels.filter((label) => !isWorkItemSeverityLabel(label));
+      if (input.severity !== 'unknown') {
+        await this.ensureWorkItemSeverityLabel(repository, credential, input.severity);
+        labels.push(workItemSeverityLabel(input.severity));
+      }
+    }
+    if (input.priority !== undefined) {
+      labels = labels.filter((label) => !isWorkItemPriorityLabel(label));
+      if (input.priority !== 'unknown') {
+        await this.ensureWorkItemPriorityLabel(repository, credential, input.priority);
+        labels.push(workItemPriorityLabel(input.priority));
+      }
+    }
+    if (input.productionBlocking !== undefined) {
+      labels = labels.filter((label) => !isProductionBlockingLabel(label));
+      if (input.productionBlocking) {
+        await this.ensureProductionBlockingLabel(repository, credential);
+        labels.push(WORK_ITEM_PRODUCTION_BLOCKING_LABEL);
+      }
+    }
+    const updatedLabels = await this.request<GitHubLabelResponse[]>(repository, `/issues/${input.issueNumber}/labels`, {
+      method: 'PUT',
+      body: JSON.stringify({ labels: normalizedLabels(labels).sort((a, b) => a.localeCompare(b)) }),
+    }, credential);
+    return workItemFromIssue(repository, { ...current, labels: updatedLabels });
+  }
+
   private async ensureWorkItemStatusLabel(
     repository: string,
     credential: GitHubCredential,
@@ -1828,6 +1880,18 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       workItemOriginColor(origin),
       `Conductor work origin: ${origin}`,
     );
+  }
+
+  private async ensureWorkItemSeverityLabel(repository: string, credential: GitHubCredential, severity: MutableWorkItemSeverity): Promise<void> {
+    await this.ensureWorkItemLabel(repository, credential, workItemSeverityLabel(severity), workItemSeverityColor(severity), `Conductor work severity: ${severity}`);
+  }
+
+  private async ensureWorkItemPriorityLabel(repository: string, credential: GitHubCredential, priority: MutableWorkItemPriority): Promise<void> {
+    await this.ensureWorkItemLabel(repository, credential, workItemPriorityLabel(priority), workItemPriorityColor(priority), `Conductor work priority: ${priority}`);
+  }
+
+  private async ensureProductionBlockingLabel(repository: string, credential: GitHubCredential): Promise<void> {
+    await this.ensureWorkItemLabel(repository, credential, WORK_ITEM_PRODUCTION_BLOCKING_LABEL, 'CF222E', 'Open work item blocks production promotion unless explicitly overridden');
   }
 
   private async ensureWorkItemLabel(
@@ -2043,7 +2107,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     return await this.mergePullRequest(repository, credential, pull, 'merge');
   }
 
-  async promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string }> {
+  async promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string; overriddenBlockerIssueNumbers: number[] }> {
     const approvalReference = input.approvalReference.trim();
     if (!approvalReference) throw { code: 'PERMISSION_DENIED', message: 'Promotion requires a non-empty owner approval reference' };
     const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.merge.promote']);
@@ -2056,8 +2120,29 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     if (input.mergeMethod && input.mergeMethod !== 'merge') {
       throw { code: 'PERMISSION_DENIED', message: 'Main promotion requires a merge commit to preserve Preview ancestry' };
     }
+    const blockers = await this.openProductionBlockerIssueNumbers(repository, credential);
+    const overrides = [...new Set(input.overrideBlockerIssueNumbers ?? [])].sort((a, b) => a - b);
+    if (overrides.some((issueNumber) => !Number.isSafeInteger(issueNumber) || issueNumber < 1)) {
+      throw { code: 'CONFLICT', message: 'Production blocker override issue numbers must be positive safe integers' };
+    }
+    const unrelatedOverrides = overrides.filter((issueNumber) => !blockers.includes(issueNumber));
+    if (unrelatedOverrides.length > 0) {
+      throw { code: 'PERMISSION_DENIED', message: `Production blocker override names non-blocking issue(s): ${unrelatedOverrides.map((value) => `#${value}`).join(', ')}` };
+    }
+    const unoverridden = blockers.filter((issueNumber) => !overrides.includes(issueNumber));
+    if (unoverridden.length > 0) {
+      throw { code: 'PERMISSION_DENIED', message: `Production promotion is blocked by open production-blocking issue(s): ${unoverridden.map((value) => `#${value}`).join(', ')}. Explicitly name every blocker to override.` };
+    }
     const merged = await this.mergePullRequest(repository, credential, pull, 'merge');
-    return { ...merged, approvalReference };
+    return { ...merged, approvalReference, overriddenBlockerIssueNumbers: blockers };
+  }
+
+  private async openProductionBlockerIssueNumbers(repository: string, credential: GitHubCredential): Promise<number[]> {
+    const issues = await this.request<GitHubIssueResponse[]>(repository, '/issues?state=open&labels=production-blocking&per_page=100', {}, credential);
+    if (issues.length >= 100) {
+      throw { code: 'CONFLICT', message: 'Production blocker enumeration reached its 100-item safety bound; promotion fails closed until the release scope is reduced' };
+    }
+    return issues.filter((issue) => !issue.pull_request).map((issue) => issue.number).sort((a, b) => a - b);
   }
 
   private async mergeCandidate(
@@ -2426,7 +2511,8 @@ type GitHubWriteOperation =
   | 'work-item.create'
   | 'work-item.comment.create'
   | 'work-item.update-status'
-  | 'work-item.classification.update';
+  | 'work-item.classification.update'
+  | 'work-item.triage.update';
 
 const GITHUB_READ_OPERATION_PERMISSIONS: Readonly<Record<
   GitHubReadOperation,
@@ -2477,11 +2563,12 @@ const GITHUB_WRITE_OPERATION_PERMISSIONS: Readonly<Record<
   'pull-request.verify.rerun': { actions: 'write' },
   'pull-request.merge.integration': { contents: 'write' },
   'pull-request.merge.reconcile-preview': { contents: 'write' },
-  'pull-request.merge.promote': { contents: 'write' },
+  'pull-request.merge.promote': { contents: 'write', issues: 'read' },
   'work-item.create': { issues: 'write' },
   'work-item.comment.create': { issues: 'write' },
   'work-item.update-status': { issues: 'write' },
   'work-item.classification.update': { issues: 'write' },
+  'work-item.triage.update': { issues: 'write' },
 };
 
 function githubOperationRequirements(operation: RuntimeOperationName): {
@@ -2764,6 +2851,9 @@ function uniqueStrings(values: string[]): string[] {
 const WORK_ITEM_STATUS_PREFIX = 'status:';
 const WORK_ITEM_KIND_PREFIX = 'kind:';
 const WORK_ITEM_ORIGIN_PREFIX = 'origin:';
+const WORK_ITEM_SEVERITY_PREFIX = 'severity:';
+const WORK_ITEM_PRIORITY_PREFIX = 'priority:';
+const WORK_ITEM_PRODUCTION_BLOCKING_LABEL = 'production-blocking';
 
 const WORK_ITEM_STATUSES: readonly MutableWorkItemStatus[] = [
   'backlog', 'ready', 'in-progress', 'blocked', 'review', 'done',
@@ -2774,6 +2864,8 @@ const WORK_ITEM_KINDS: readonly MutableWorkItemKind[] = [
 const WORK_ITEM_ORIGINS: readonly MutableWorkItemOrigin[] = [
   'human', 'agent-audit', 'di-finding', 'ci', 'runtime', 'dependency', 'user-feedback',
 ];
+const WORK_ITEM_SEVERITIES: readonly MutableWorkItemSeverity[] = ['critical', 'high', 'medium', 'low'];
+const WORK_ITEM_PRIORITIES: readonly MutableWorkItemPriority[] = ['p0', 'p1', 'p2', 'p3'];
 
 function workItemStatusLabel(status: MutableWorkItemStatus): string {
   return `${WORK_ITEM_STATUS_PREFIX}${status}`;
@@ -2785,6 +2877,14 @@ function workItemKindLabel(kind: MutableWorkItemKind): string {
 
 function workItemOriginLabel(origin: MutableWorkItemOrigin): string {
   return `${WORK_ITEM_ORIGIN_PREFIX}${origin}`;
+}
+
+function workItemSeverityLabel(severity: MutableWorkItemSeverity): string {
+  return `${WORK_ITEM_SEVERITY_PREFIX}${severity}`;
+}
+
+function workItemPriorityLabel(priority: MutableWorkItemPriority): string {
+  return `${WORK_ITEM_PRIORITY_PREFIX}${priority}`;
 }
 
 function workItemStatusColor(status: MutableWorkItemStatus): string {
@@ -2816,6 +2916,14 @@ function workItemOriginColor(_origin: MutableWorkItemOrigin): string {
   return 'D4C5F9';
 }
 
+function workItemSeverityColor(severity: MutableWorkItemSeverity): string {
+  return ({ critical: 'CF222E', high: 'FB8F44', medium: 'BF8700', low: '0969DA' } as const)[severity];
+}
+
+function workItemPriorityColor(priority: MutableWorkItemPriority): string {
+  return ({ p0: 'CF222E', p1: 'FB8F44', p2: 'BF8700', p3: '0969DA' } as const)[priority];
+}
+
 function isWorkItemStatusLabel(label: string): boolean {
   return label.toLowerCase().startsWith(WORK_ITEM_STATUS_PREFIX);
 }
@@ -2828,8 +2936,21 @@ function isWorkItemOriginLabel(label: string): boolean {
   return label.toLowerCase().startsWith(WORK_ITEM_ORIGIN_PREFIX);
 }
 
+function isWorkItemSeverityLabel(label: string): boolean {
+  return label.toLowerCase().startsWith(WORK_ITEM_SEVERITY_PREFIX);
+}
+
+function isWorkItemPriorityLabel(label: string): boolean {
+  return label.toLowerCase().startsWith(WORK_ITEM_PRIORITY_PREFIX);
+}
+
+function isProductionBlockingLabel(label: string): boolean {
+  return label.toLowerCase() === WORK_ITEM_PRODUCTION_BLOCKING_LABEL;
+}
+
 function isWorkItemReservedLabel(label: string): boolean {
-  return isWorkItemStatusLabel(label) || isWorkItemKindLabel(label) || isWorkItemOriginLabel(label);
+  return isWorkItemStatusLabel(label) || isWorkItemKindLabel(label) || isWorkItemOriginLabel(label)
+    || isWorkItemSeverityLabel(label) || isWorkItemPriorityLabel(label) || isProductionBlockingLabel(label);
 }
 
 function issueLabelNames(issue: GitHubIssueResponse): string[] {
@@ -2878,6 +2999,8 @@ function workItemFromIssue(repository: string, issue: GitHubIssueResponse): Work
   const derived = deriveWorkItemStatus(issue);
   const kind = deriveClassification(labels, WORK_ITEM_KIND_PREFIX, WORK_ITEM_KINDS);
   const origin = deriveClassification(labels, WORK_ITEM_ORIGIN_PREFIX, WORK_ITEM_ORIGINS);
+  const severity = deriveClassification(labels, WORK_ITEM_SEVERITY_PREFIX, WORK_ITEM_SEVERITIES);
+  const priority = deriveClassification(labels, WORK_ITEM_PRIORITY_PREFIX, WORK_ITEM_PRIORITIES);
   return {
     repository,
     issueNumber: issue.number,
@@ -2891,6 +3014,11 @@ function workItemFromIssue(repository: string, issue: GitHubIssueResponse): Work
     kindSource: kind.source,
     origin: origin.value as WorkItemOrigin,
     originSource: origin.source,
+    severity: severity.value as WorkItemSeverity,
+    severitySource: severity.source as WorkItemTriageSource,
+    priority: priority.value as WorkItemPriority,
+    prioritySource: priority.source as WorkItemTriageSource,
+    productionBlocking: labels.some(isProductionBlockingLabel),
     labels,
     createdAt: issue.created_at,
     updatedAt: issue.updated_at,

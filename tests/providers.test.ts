@@ -672,7 +672,7 @@ test('GitHub provider separates integration merge from accepted-branch promotion
           kind: 'app-installation' as const,
           identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
           repository,
-          permissions: { contents: 'write' },
+          permissions: { contents: 'write', issues: 'read' },
         };
       },
     },
@@ -704,6 +704,7 @@ test('GitHub provider separates integration merge from accepted-branch promotion
       if (/\/repos\/pyralisxc\/CardForge$/u.test(url) && method === 'GET') return Response.json({
         full_name: 'pyralisxc/CardForge', default_branch: 'main',
       });
+      if (url.includes('/issues?state=open&labels=production-blocking&per_page=100') && method === 'GET') return Response.json([]);
       if (url.endsWith('/merge') && method === 'PUT') {
         mergeRequests.push(body);
         return Response.json({ merged: true, sha: 'd'.repeat(40), message: 'merged' });
