@@ -6,6 +6,7 @@ import type {
 
 import {
   GitHubAppCredentialProvider,
+  type GitHubIdentity,
   type GitHubInstallationAttestation
 } from '../providers/github-auth.js';
 
@@ -56,9 +57,16 @@ function isGitHubAppIdentityPath(
   return pathname === '/internal/asc/github/app';
 }
 
+export interface AscGitHubAttestationProvider {
+  getIdentity(): Promise<GitHubIdentity>;
+  getInstallationAttestation(
+    installationId: string | number
+  ): Promise<GitHubInstallationAttestation>;
+}
+
 export interface AscProviderBridgeOptions {
   readonly secret: string;
-  readonly githubApp: GitHubAppCredentialProvider;
+  readonly githubApp: AscGitHubAttestationProvider;
 }
 
 export async function handleAscProviderBridgeRequest(

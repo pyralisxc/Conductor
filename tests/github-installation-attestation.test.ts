@@ -60,7 +60,10 @@ test('GitHub App installation attestation returns safe installation metadata wit
     seen[0].url,
     'https://api.github.com/app/installations/456'
   );
-  assert.match(seen[0].authorization, /^Bearer /u);
+  assert.match(
+    seen[0].authorization ?? '',
+    /^Bearer /u
+  );
   assert.deepEqual(result, {
     installationId: '456',
     accountId: '789',
