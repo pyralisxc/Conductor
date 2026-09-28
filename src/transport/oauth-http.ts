@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleVercelConnectionRequest } from './vercel-connections.js';
+import { handleAscProviderBridgeRequest } from './asc-provider-bridge.js';
 import {
   clearOwnerSession,
   normalizeReturnTo,
@@ -86,6 +87,7 @@ export async function handleOAuthHttpRequest(
   res: ServerResponse,
   requestUrl: URL,
 ): Promise<boolean> {
+  if (await handleAscProviderBridgeRequest(req, res, requestUrl)) return true;
   if (await handleVercelConnectionRequest(req, res, requestUrl)) return true;
   if ((requestUrl.pathname === '/.well-known/oauth-protected-resource'
       || requestUrl.pathname === '/.well-known/oauth-protected-resource/mcp')
