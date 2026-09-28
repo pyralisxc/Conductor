@@ -14,6 +14,7 @@ import type {
 } from '../runtime/types.js';
 import type { VercelOperationsProvider, OperationPreflightProvider } from './runtime.js';
 import type { ProviderConnectionCredentialResolver } from '../transport/provider-connections.js';
+import { ProviderUsageTracker } from './usage.js';
 
 interface VercelProjectBinding {
   id: string;
@@ -49,6 +50,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   private readonly apiBaseUrl: string;
   private readonly logsBaseUrl: string;
   private readonly fetch: typeof globalThis.fetch;
+  private readonly usage: ProviderUsageTracker;
   private readonly now: () => Date;
   private readonly runtimeLogTotalMs: number;
 
@@ -60,9 +62,14 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     this.bindings = new Map(options.bindings.map(binding => [binding.id, { ...binding }]));
     this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.vercel.com').replace(/\/$/u, '');
     this.logsBaseUrl = (options.logsBaseUrl ?? (this.apiBaseUrl === 'https://api.vercel.com' ? 'https://vercel.com' : this.apiBaseUrl)).replace(/\/$/u, '');
-    this.fetch = options.fetch ?? globalThis.fetch;
+    this.usage = new ProviderUsageTracker(this.id);
+    this.fetch = this.usage.wrap(options.fetch ?? globalThis.fetch);
     this.now = options.now ?? (() => new Date());
     this.runtimeLogTotalMs = clamp(options.runtimeLogTotalMs ?? 8_000, 1_000, 20_000);
+  }
+
+  getUsageSnapshot() {
+    return this.usage.snapshot();
   }
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {

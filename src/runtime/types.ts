@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v7' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v8' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -137,6 +137,25 @@ export interface ProviderHealth {
   provider: string;
   health: 'ready' | 'degraded' | 'unavailable';
   error?: NormalizedToolError;
+}
+
+export interface ProviderUsageSnapshot {
+  provider: string;
+  calls: number;
+  duplicateReads: number;
+  requestBodyBytes: number;
+  reportedResponseBytes: number;
+  responsesWithUnknownBytes: number;
+  observedAt: string;
+}
+
+export interface ProviderUsageDelta {
+  provider: string;
+  calls: number;
+  duplicateReads: number;
+  requestBodyBytes: number;
+  reportedResponseBytes: number;
+  responsesWithUnknownBytes: number;
 }
 
 export interface CapabilityReport {
@@ -296,6 +315,8 @@ export interface WorkBootstrapProjection {
     production: DeploymentRecord | null;
     observedAt: string;
   } | null;
+  elapsedMs: number;
+  providerUsage: ProviderUsageDelta[];
   observedAt: string;
 }
 
@@ -364,6 +385,7 @@ export interface EvidenceBundleProjection {
   succeeded: number;
   failed: number;
   elapsedMs: number;
+  providerUsage: ProviderUsageDelta[];
   items: EvidenceBundleItemResult[];
   note: string;
 }

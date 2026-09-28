@@ -30,6 +30,8 @@ import {
   type ProjectPreflight,
   type ProjectReference,
   type ProviderHealth,
+  type ProviderUsageDelta,
+  type ProviderUsageSnapshot,
   type ToolDefinition,
   type ToolDiagnostic,
   type ToolOperationName,
@@ -314,6 +316,33 @@ export class ConductorToolRuntime {
     this.deploymentProvider = options.deploymentProvider;
   }
 
+  private captureProviderUsage(): Map<string, ProviderUsageSnapshot> {
+    const snapshots = new Map<string, ProviderUsageSnapshot>();
+    for (const provider of this.providers) {
+      const snapshot = provider.getUsageSnapshot?.();
+      if (snapshot) snapshots.set(provider.id, snapshot);
+    }
+    return snapshots;
+  }
+
+  private providerUsageDelta(before: Map<string, ProviderUsageSnapshot>): ProviderUsageDelta[] {
+    const deltas: ProviderUsageDelta[] = [];
+    for (const provider of this.providers) {
+      const current = provider.getUsageSnapshot?.();
+      if (!current) continue;
+      const prior = before.get(provider.id);
+      deltas.push({
+        provider: provider.id,
+        calls: Math.max(0, current.calls - (prior?.calls ?? 0)),
+        duplicateReads: Math.max(0, current.duplicateReads - (prior?.duplicateReads ?? 0)),
+        requestBodyBytes: Math.max(0, current.requestBodyBytes - (prior?.requestBodyBytes ?? 0)),
+        reportedResponseBytes: Math.max(0, current.reportedResponseBytes - (prior?.reportedResponseBytes ?? 0)),
+        responsesWithUnknownBytes: Math.max(0, current.responsesWithUnknownBytes - (prior?.responsesWithUnknownBytes ?? 0)),
+      });
+    }
+    return deltas.sort((left, right) => left.provider.localeCompare(right.provider));
+  }
+
   get repositoryAcquisitionReadEnabled(): boolean {
     return Boolean(this.repositoryAcquisitionProvider);
   }
@@ -562,6 +591,8 @@ export class ConductorToolRuntime {
       'work.bootstrap',
       { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
       async () => {
+        const startedAt = Date.now();
+        const providerUsageBefore = this.captureProviderUsage();
         const development = await this.developmentStatus({ project: resolvedProject, limit: input.limit ?? 10 });
         if (development.status === 'failed') throw development.error;
 
@@ -620,6 +651,8 @@ export class ConductorToolRuntime {
             work: development.result.work,
             intelligence,
             deployment,
+            elapsedMs: Math.max(0, Date.now() - startedAt),
+            providerUsage: this.providerUsageDelta(providerUsageBefore),
             observedAt: this.now().toISOString(),
           },
           diagnostics: [
@@ -659,6 +692,7 @@ export class ConductorToolRuntime {
         }
 
         const startedAt = Date.now();
+        const providerUsageBefore = this.captureProviderUsage();
         const results = await boundedEvidenceMap(items, concurrency, async (item) =>
           await this.runEvidenceBundleItem(item)
         );
@@ -671,8 +705,9 @@ export class ConductorToolRuntime {
             succeeded,
             failed: results.length - succeeded,
             elapsedMs: Math.max(0, Date.now() - startedAt),
+            providerUsage: this.providerUsageDelta(providerUsageBefore),
             items: results,
-            note: 'Read-only bundle execution preserves input order, limits concurrency, performs no hidden retries, and keeps per-item failures explicit.',
+            note: 'Read-only bundle execution preserves input order, limits concurrency, performs no hidden retries, and keeps per-item failures explicit. Provider usage counts network calls, duplicate identical GET/HEAD reads within 30 seconds, known request-body bytes, Content-Length-reported response bytes, and responses whose byte size is unknown.',
           },
         };
       },

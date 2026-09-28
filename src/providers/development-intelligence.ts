@@ -7,6 +7,7 @@ import type {
   RuntimeOperationName,
 } from '../runtime/types.js';
 import type { OperationPreflightProvider, ProjectPreflightProvider, RepositorySemanticAuditProvider } from './runtime.js';
+import { ProviderUsageTracker } from './usage.js';
 
 /**
  * Truthful placeholder used until a deployed Development Intelligence API
@@ -80,11 +81,17 @@ export class DevelopmentIntelligenceProvider implements ProjectPreflightProvider
   private readonly endpoint: string;
   private readonly token?: string;
   private readonly fetch: typeof globalThis.fetch;
+  private readonly usage: ProviderUsageTracker;
 
   constructor(options: DevelopmentIntelligenceProviderOptions) {
     this.endpoint = options.endpoint;
     this.token = options.token;
-    this.fetch = options.fetch ?? globalThis.fetch;
+    this.usage = new ProviderUsageTracker(this.id);
+    this.fetch = this.usage.wrap(options.fetch ?? globalThis.fetch);
+  }
+
+  getUsageSnapshot() {
+    return this.usage.snapshot();
   }
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
