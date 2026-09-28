@@ -1309,6 +1309,7 @@ export class ConductorToolRuntime {
       if (openIntegrations.length > 1) throw { code: 'CONFLICT', message: 'Multiple open work-to-Preview pull requests are linked to the same canonical work item' };
 
       let integrationMergeSha: string | null = null;
+      const mergedIntegrations = artifacts.filter((item) => item.role === 'preview-integration' && item.pullRequest.merged);
       if (openIntegrations.length === 1) {
         const integration = await pollPull(openIntegrations[0]!.pullRequest);
         const stop = stopForPull(integration, false);
@@ -1321,11 +1322,6 @@ export class ConductorToolRuntime {
         if (merged.status === 'failed') throw merged.error;
         integrationMergeSha = merged.result.mergeCommitSha;
         transitions.push({ operation: 'pull-request.merge.integration', status: merged.idempotency?.replayed ? 'replayed' : 'performed', summary: `Integrated PR #${integration.pullRequestNumber} into ${integration.base.ref}.`, pullRequestNumber: integration.pullRequestNumber, mergeCommitSha: merged.result.mergeCommitSha });
-      } else {
-        const mergedIntegrations = artifacts.filter((item) => item.role === 'preview-integration' && item.pullRequest.merged);
-        if (mergedIntegrations.length === 0) return lifecycleProjection(project, input.issueNumber, 'action-required', 'No linked work-to-Preview pull request exists for this canonical work item.', transitions);
-        if (mergedIntegrations.length > 1) throw { code: 'CONFLICT', message: 'Multiple merged integration pull requests are linked to this work item; exact continuation is ambiguous' };
-        transitions.push({ operation: 'pull-request.status', status: 'observed', summary: `Integration PR #${mergedIntegrations[0]!.pullRequest.pullRequestNumber} is already merged.`, pullRequestNumber: mergedIntegrations[0]!.pullRequest.pullRequestNumber });
       }
 
       const topology = await this.repositoryBootstrapProvider!.getRepositoryBootstrap(project);
@@ -1352,6 +1348,12 @@ export class ConductorToolRuntime {
           `Current Preview head ${topology.integrationHead} is already represented by merged promotion PR #${alreadyPromoted.pullRequest.pullRequestNumber}; no duplicate promotion is required.`,
           transitions,
         );
+      }
+
+      if (openIntegrations.length === 0) {
+        if (mergedIntegrations.length === 0) return lifecycleProjection(project, input.issueNumber, 'action-required', 'No linked work-to-Preview pull request exists for this canonical work item.', transitions);
+        if (mergedIntegrations.length > 1) throw { code: 'CONFLICT', message: 'Multiple merged integration pull requests are linked to this work item; exact continuation is ambiguous' };
+        transitions.push({ operation: 'pull-request.status', status: 'observed', summary: `Integration PR #${mergedIntegrations[0]!.pullRequest.pullRequestNumber} is already merged.`, pullRequestNumber: mergedIntegrations[0]!.pullRequest.pullRequestNumber });
       }
 
       let previewDeployment: import('./types.js').DeploymentRecord | null = null;
