@@ -97,6 +97,9 @@ test('GitHub issues normalize lifecycle, kind, and origin without replacing nati
     status: 'ready',
     kind: 'investigation',
     origin: 'di-finding',
+    severity: 'high',
+    priority: 'p1',
+    productionBlocking: true,
     labels: ['area:di'],
     idempotencyKey: 'work-item:create:semantic-orientation',
   });
