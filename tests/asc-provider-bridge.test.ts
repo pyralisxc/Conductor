@@ -90,6 +90,9 @@ test('ASC provider bridge rejects wrong service secret before GitHub access', as
             appSlug: 'asc-control',
           };
         },
+        async getInstallationAttestation() {
+          throw new Error('not used by this test');
+        },
       },
     }
   );
