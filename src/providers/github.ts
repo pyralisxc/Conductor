@@ -61,7 +61,7 @@ import type {
   RepositoryProviderAudit,
   GetRepositoryAuditInput,
 } from '../runtime/types.js';
-import { normalizeToolError } from '../runtime/errors.js';
+import { ConductorToolError, normalizeToolError } from '../runtime/errors.js';
 import type { OperationPreflightProvider, RepositoryAcquisitionProvider, RepositoryAuditReadProvider, SourceControlMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
 import {
   StaticGitHubCredentialProvider,
@@ -240,6 +240,16 @@ export interface GitHubRuntimeProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
+interface GitHubRateLimitSnapshot {
+  limit: number | null;
+  remaining: number | null;
+  used: number | null;
+  resetAt: string | null;
+  resource: string | null;
+  retryAfterSeconds: number | null;
+  observedAt: string;
+}
+
 export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, RepositoryAcquisitionProvider, RepositoryAuditReadProvider, SourceControlMutationProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
   readonly id = 'github';
   private readonly credentials?: GitHubCredentialProvider;
@@ -247,6 +257,8 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
   private readonly allowedOwners: ReadonlyMap<string, string>;
   private readonly apiBaseUrl: string;
   private readonly fetch: typeof globalThis.fetch;
+  private providerCallCount = 0;
+  private rateLimit: GitHubRateLimitSnapshot | null = null;
 
   constructor(options: GitHubRuntimeProviderOptions) {
     if (options.token && options.credentials) {
@@ -258,7 +270,15 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     this.bindings = new Map((options.bindings ?? []).map((binding) => [binding.id, binding]));
     this.allowedOwners = new Map((options.allowedOwners ?? []).map((owner) => [owner.toLowerCase(), owner]));
     this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.github.com').replace(/\/$/, '');
-    this.fetch = options.fetch ?? globalThis.fetch;
+    const rawFetch = options.fetch ?? globalThis.fetch;
+    this.fetch = async (input, init) => {
+      const guard = this.rateLimitGuard();
+      if (guard) throw guard;
+      this.providerCallCount += 1;
+      const response = await rawFetch(input, init);
+      this.observeRateLimit(response);
+      return response;
+    };
   }
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
@@ -348,7 +368,10 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         code: 'PERMISSION_DENIED',
         message: `GitHub token cannot read ${configured.repository}`,
       }, 'PERMISSION_DENIED', this.id);
-      const permissionEvidence = permissionDiagnostics(credential, configured.repository);
+      const permissionEvidence = [
+        ...permissionDiagnostics(credential, configured.repository),
+        ...this.rateLimitDiagnostics(),
+      ];
       const missingPermissions = credential.kind === 'app-installation'
         ? missingDevelopPermissions(credential)
         : [];
@@ -421,7 +444,10 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     }
     try {
       const credential = await this.credentials.getCredential(configured.repository);
-      const evidence = permissionDiagnostics(credential, configured.repository);
+      const evidence = [
+        ...permissionDiagnostics(credential, configured.repository),
+        ...this.rateLimitDiagnostics(),
+      ];
       if (credential.kind === 'app-installation') {
         const missing = missingPermissions(credential, requirements.permissions);
         if (missing.length > 0) {
@@ -2238,6 +2264,69 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     return `${[...this.allowedOwners.values()][0]}/${projectId}`;
   }
 
+  private observeRateLimit(response: Response): void {
+    const observed = githubRateLimitHeaders(response.headers);
+    if (!observed) return;
+    this.rateLimit = {
+      ...observed,
+      observedAt: new Date().toISOString(),
+    };
+  }
+
+  private rateLimitGuard(): ConductorToolError | null {
+    const snapshot = this.rateLimit;
+    if (!snapshot || snapshot.remaining !== 0 || !snapshot.resetAt) return null;
+    const resetAtMs = Date.parse(snapshot.resetAt);
+    if (!Number.isFinite(resetAtMs) || resetAtMs <= Date.now()) return null;
+    return new ConductorToolError({
+      code: 'TRANSIENT',
+      message: `GitHub API rate limit is exhausted until ${snapshot.resetAt}`,
+      retryable: true,
+      source: this.id,
+      diagnostics: [{
+        level: 'warning',
+        code: 'TRANSIENT',
+        source: this.id,
+        message: 'GitHub API request suppressed until the observed rate-limit reset',
+        details: {
+          limit: snapshot.limit,
+          remaining: snapshot.remaining,
+          used: snapshot.used,
+          resetAt: snapshot.resetAt,
+          resource: snapshot.resource,
+          providerCallsObserved: this.providerCallCount,
+        },
+      }],
+    });
+  }
+
+  private rateLimitDiagnostics(): ToolDiagnostic[] {
+    const snapshot = this.rateLimit;
+    if (!snapshot) return [];
+    const ratio = snapshot.limit && snapshot.remaining !== null
+      ? snapshot.remaining / snapshot.limit
+      : null;
+    const low = snapshot.remaining === 0 || (ratio !== null && ratio <= 0.1);
+    const budget = snapshot.limit !== null && snapshot.remaining !== null
+      ? `${snapshot.remaining}/${snapshot.limit} remaining`
+      : 'rate-limit headers observed';
+    return [{
+      level: low ? 'warning' : 'info',
+      source: this.id,
+      message: `GitHub API budget: ${budget}${snapshot.resetAt ? `; resets ${snapshot.resetAt}` : ''}`,
+      details: {
+        limit: snapshot.limit,
+        remaining: snapshot.remaining,
+        used: snapshot.used,
+        resetAt: snapshot.resetAt,
+        resource: snapshot.resource,
+        retryAfterSeconds: snapshot.retryAfterSeconds,
+        observedAt: snapshot.observedAt,
+        providerCallsObserved: this.providerCallCount,
+      },
+    }];
+  }
+
   private headers(token: string): Record<string, string> {
     return {
       Accept: 'application/vnd.github+json',
@@ -3286,21 +3375,86 @@ function githubChecks(
   }));
 }
 
-async function githubResponseError(response: Response): Promise<unknown> {
+interface GitHubRateLimitHeaders {
+  limit: number | null;
+  remaining: number | null;
+  used: number | null;
+  resetAt: string | null;
+  resource: string | null;
+  retryAfterSeconds: number | null;
+}
+
+function integerHeader(headers: Headers, name: string): number | null {
+  const value = headers.get(name);
+  if (value === null || value.trim() === '') return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function githubRateLimitHeaders(headers: Headers): GitHubRateLimitHeaders | null {
+  const limit = integerHeader(headers, 'x-ratelimit-limit');
+  const remaining = integerHeader(headers, 'x-ratelimit-remaining');
+  const used = integerHeader(headers, 'x-ratelimit-used');
+  const resetSeconds = integerHeader(headers, 'x-ratelimit-reset');
+  const resource = headers.get('x-ratelimit-resource');
+  const retryAfterSeconds = integerHeader(headers, 'retry-after');
+  if (
+    limit === null
+    && remaining === null
+    && used === null
+    && resetSeconds === null
+    && resource === null
+    && retryAfterSeconds === null
+  ) return null;
+  return {
+    limit,
+    remaining,
+    used,
+    resetAt: resetSeconds === null ? null : new Date(resetSeconds * 1000).toISOString(),
+    resource,
+    retryAfterSeconds,
+  };
+}
+
+async function githubResponseError(response: Response): Promise<ConductorToolError> {
   const requestId = response.headers.get('x-github-request-id');
   const acceptedPermissions = response.headers.get('x-accepted-github-permissions');
+  const rateLimit = githubRateLimitHeaders(response.headers);
   const body = await response.json().catch(() => undefined) as { message?: string } | undefined;
-  const details: Record<string, string> = {};
+  const message = body?.message ?? `GitHub request failed with status ${response.status}`;
+  const rateLimited = response.status === 429
+    || rateLimit?.remaining === 0
+    || /rate limit/iu.test(message);
+  const normalized = normalizeToolError(
+    rateLimited ? { code: 'TRANSIENT', message } : { status: response.status, message },
+    'TOOL_UNAVAILABLE',
+    'github',
+  );
+  const code = rateLimited ? 'TRANSIENT' : normalized.code;
+  const details: Record<string, string | number | boolean | null> = {
+    httpStatus: response.status,
+  };
   if (requestId) details.requestId = requestId;
   if (acceptedPermissions) details.acceptedPermissions = acceptedPermissions;
-  return {
-    status: response.status,
-    message: body?.message ?? `GitHub request failed with status ${response.status}`,
-    diagnostics: Object.keys(details).length > 0 ? [{
-      level: 'error',
+  if (rateLimit) {
+    details.limit = rateLimit.limit;
+    details.remaining = rateLimit.remaining;
+    details.used = rateLimit.used;
+    details.resetAt = rateLimit.resetAt;
+    details.resource = rateLimit.resource;
+    details.retryAfterSeconds = rateLimit.retryAfterSeconds;
+  }
+  return new ConductorToolError({
+    code,
+    message,
+    retryable: rateLimited || normalized.retryable,
+    source: 'github',
+    diagnostics: [{
+      level: rateLimited ? 'warning' : 'error',
+      code,
       source: 'github',
-      message: 'GitHub request failed',
+      message: rateLimited ? 'GitHub API rate limit exhausted' : 'GitHub request failed',
       details,
-    }] : undefined,
-  };
+    }],
+  });
 }
