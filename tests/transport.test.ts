@@ -159,6 +159,19 @@ test('MCP publishes DI-first exact source and CI drill-down reads when their pro
     async getSourceArtifact(input) {
       return { provider: 'github', repository: input.project.repository!, revisionSha: input.sha, path: input.path, blobSha: 'blob', size: 4, status: 'available', content: 'text', encoding: 'utf-8', reason: null, observedAt: '2026-09-25T00:00:00Z' };
     },
+    async discoverSource(input) {
+      return {
+        provider: 'github', repository: input.project.repository!, revisionSha: input.sha, treeSha: 'tree',
+        mode: input.query ? 'literal' : 'manifest', query: input.query ?? null, pathPrefix: input.pathPrefix ?? null,
+        totalFiles: 1, candidateFiles: 1,
+        files: input.query ? [] : [{ path: 'src/index.ts', blobSha: 'blob', size: 4 }],
+        matches: input.query ? [{ path: 'src/index.ts', blobSha: 'blob', size: 4, line: 1, snippet: 'text' }] : [],
+        scannedFiles: input.query ? 1 : 0, scannedBytes: input.query ? 4 : 0,
+        skipped: { tooLarge: 0, binaryOrInvalidText: 0, unsupported: 0 }, truncated: false, truncationReasons: [],
+        limits: { maxFiles: 80, maxBytes: 2097152, maxFileBytes: 131072, maxMatches: 20 },
+        observedAt: '2026-09-25T00:00:00Z', note: 'provider evidence',
+      };
+    },
   };
   const ciReadProvider: CiReadProvider = {
     id: 'ci',
@@ -174,8 +187,10 @@ test('MCP publishes DI-first exact source and CI drill-down reads when their pro
   await client.connect(clientTransport);
   const listed = await within(client.listTools());
   const names = listed.tools.map(tool => tool.name);
+  assert.equal(names.includes('source.discover'), true);
   assert.equal(names.includes('source.artifact.read'), true);
   assert.equal(names.includes('ci.run.read'), true);
+  assert.equal(listed.tools.find(tool => tool.name === 'source.discover')?.annotations?.readOnlyHint, true);
   assert.equal(listed.tools.find(tool => tool.name === 'source.artifact.read')?.annotations?.readOnlyHint, true);
   assert.equal(listed.tools.find(tool => tool.name === 'ci.run.read')?.annotations?.readOnlyHint, true);
   await client.close();
