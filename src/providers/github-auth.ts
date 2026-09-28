@@ -86,6 +86,17 @@ export interface GitHubInstallationAttestation {
   verifiedAt: string;
 }
 
+export interface GitHubRepositoryAttestation {
+  installationId: string;
+  repository: string;
+  accountId: string;
+  accountLogin: string;
+  accountType: "User" | "Organization" | "Enterprise";
+  permissions: Readonly<Record<string, GitHubPermissionLevel>>;
+  capabilities: readonly string[];
+  verifiedAt: string;
+}
+
 export interface GitHubAppCredentialProviderOptions {
   appId: string;
   privateKey: string;
@@ -215,6 +226,104 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       repositorySelection,
       permissions,
       capabilities: githubCapabilitiesFromPermissions(permissions),
+      verifiedAt: this.now().toISOString(),
+    });
+  }
+
+  async getRepositoryAttestation(
+    repositoryInput: string,
+    expectedInstallationIdInput: string | number
+  ): Promise<GitHubRepositoryAttestation> {
+    const [owner, name] = splitRepository(repositoryInput);
+    const expectedInstallationId =
+      String(expectedInstallationIdInput).trim();
+
+    if (!/^[1-9]\d{0,19}$/u.test(expectedInstallationId)) {
+      throw {
+        code: 'NOT_FOUND',
+        source: 'github',
+        message: 'Expected GitHub installation ID is invalid',
+      };
+    }
+
+    const response = await this.fetch(
+      `${this.apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/installation`,
+      { headers: await this.appHeaders() },
+    );
+    if (!response.ok) throw await githubAppResponseError(response);
+
+    const installation =
+      await response.json() as GitHubInstallationResponse;
+
+    if (String(installation.id) !== expectedInstallationId) {
+      throw {
+        code: 'CONFLICT',
+        source: 'github',
+        message:
+          'GitHub repository is attached to a different App installation',
+      };
+    }
+    if (
+      installation.app_id !== undefined &&
+      String(installation.app_id) !== this.appId
+    ) {
+      throw {
+        code: 'CONFLICT',
+        source: 'github',
+        message: 'GitHub repository installation belongs to a different GitHub App',
+      };
+    }
+    if (installation.suspended_at) {
+      throw {
+        code: 'AUTH_REQUIRED',
+        source: 'github',
+        message: 'GitHub repository installation is suspended',
+      };
+    }
+
+    const accountId = String(
+      installation.account?.id ?? ''
+    ).trim();
+    const accountLogin =
+      installation.account?.login?.trim() ?? '';
+    const accountTypeRaw =
+      installation.account?.type?.trim() ??
+      installation.target_type?.trim() ??
+      '';
+    const accountType =
+      accountTypeRaw === 'Organization' ||
+      accountTypeRaw === 'Enterprise'
+        ? accountTypeRaw
+        : accountTypeRaw === 'User'
+          ? 'User'
+          : undefined;
+
+    if (
+      !/^[1-9]\d*$/u.test(accountId) ||
+      !accountLogin ||
+      !accountType
+    ) {
+      throw {
+        code: 'CONFLICT',
+        source: 'github',
+        message:
+          'GitHub repository attestation is missing safe account metadata',
+      };
+    }
+
+    const permissions = Object.freeze({
+      ...(installation.permissions ?? {}),
+    });
+
+    return Object.freeze({
+      installationId: expectedInstallationId,
+      repository: `${owner}/${name}`,
+      accountId,
+      accountLogin,
+      accountType,
+      permissions,
+      capabilities:
+        githubCapabilitiesFromPermissions(permissions),
       verifiedAt: this.now().toISOString(),
     });
   }

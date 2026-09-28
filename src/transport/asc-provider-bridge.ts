@@ -7,7 +7,8 @@ import type {
 import {
   GitHubAppCredentialProvider,
   type GitHubIdentity,
-  type GitHubInstallationAttestation
+  type GitHubInstallationAttestation,
+  type GitHubRepositoryAttestation
 } from '../providers/github-auth.js';
 
 function json(
@@ -57,11 +58,47 @@ function isGitHubAppIdentityPath(
   return pathname === '/internal/asc/github/app';
 }
 
+function repositoryAttestationFromPath(
+  pathname: string
+):
+  | {
+      readonly installationId: string;
+      readonly repository: string;
+    }
+  | undefined {
+  const match =
+    /^\/internal\/asc\/github\/installations\/([1-9][0-9]{0,19})\/repositories\/([^/]+)\/([^/]+)\/attest$/u.exec(
+      pathname
+    );
+
+  if (!match) return undefined;
+
+  const owner = decodeURIComponent(match[2] ?? '').trim();
+  const repo = decodeURIComponent(match[3] ?? '').trim();
+  if (
+    !owner ||
+    !repo ||
+    owner.includes('/') ||
+    repo.includes('/')
+  ) {
+    return undefined;
+  }
+
+  return Object.freeze({
+    installationId: match[1]!,
+    repository: owner + '/' + repo
+  });
+}
+
 export interface AscGitHubAttestationProvider {
   getIdentity(): Promise<GitHubIdentity>;
   getInstallationAttestation(
     installationId: string | number
   ): Promise<GitHubInstallationAttestation>;
+  getRepositoryAttestation(
+    repository: string,
+    expectedInstallationId: string | number
+  ): Promise<GitHubRepositoryAttestation>;
 }
 
 export interface AscProviderBridgeOptions {
@@ -81,7 +118,17 @@ export async function handleAscProviderBridgeRequest(
   const appIdentity = isGitHubAppIdentityPath(
     requestUrl.pathname
   );
-  if (!installationId && !appIdentity) return false;
+  const repositoryAttestation =
+    repositoryAttestationFromPath(
+      requestUrl.pathname
+    );
+  if (
+    !installationId &&
+    !appIdentity &&
+    !repositoryAttestation
+  ) {
+    return false;
+  }
 
   if (req.method !== 'GET') {
     res.writeHead(405, {
@@ -122,6 +169,20 @@ export async function handleAscProviderBridgeRequest(
       return true;
     }
 
+    if (repositoryAttestation) {
+      const attestation =
+        await resolved.githubApp.getRepositoryAttestation(
+          repositoryAttestation.repository,
+          repositoryAttestation.installationId
+        );
+      json(
+        res,
+        200,
+        safeRepositoryAttestation(attestation)
+      );
+      return true;
+    }
+
     const attestation =
       await resolved.githubApp.getInstallationAttestation(
         installationId!
@@ -150,6 +211,20 @@ export async function handleAscProviderBridgeRequest(
   }
 
   return true;
+}
+
+function safeRepositoryAttestation(
+  value: GitHubRepositoryAttestation
+) {
+  return {
+    installationId: value.installationId,
+    repository: value.repository,
+    accountId: value.accountId,
+    accountLogin: value.accountLogin,
+    accountType: value.accountType,
+    capabilities: value.capabilities,
+    verifiedAt: value.verifiedAt,
+  };
 }
 
 function safeAttestation(
