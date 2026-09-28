@@ -14,6 +14,8 @@ import type {
   PullRequestStatus,
   GetSourceArtifactInput,
   SourceArtifactRead,
+  DiscoverSourceInput,
+  SourceDiscoveryResult,
   GetCiRunEvidenceInput,
   CiRunEvidence,
   UpdatePullRequestLabelsInput,
@@ -85,6 +87,7 @@ export interface PullRequestReadProvider extends RuntimeCapabilityProvider {
 
 export interface SourceArtifactReadProvider extends RuntimeCapabilityProvider {
   getSourceArtifact(input: GetSourceArtifactInput): Promise<SourceArtifactRead>;
+  discoverSource?(input: DiscoverSourceInput): Promise<SourceDiscoveryResult>;
 }
 
 export interface CiReadProvider extends RuntimeCapabilityProvider {

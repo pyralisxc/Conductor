@@ -967,6 +967,69 @@ test('GitHub exact source artifact read is immutable, bounded, and text-only', a
   assert.equal(requested.length, before);
 });
 
+test('GitHub source discovery binds literal matches to one exact commit tree with explicit bounds', async () => {
+  const sha = 'a'.repeat(40);
+  const treeSha = 'b'.repeat(40);
+  const githubBlob = 'c'.repeat(40);
+  const readmeBlob = 'd'.repeat(40);
+  const requested: string[] = [];
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      requested.push(`${url.pathname}${url.search}`);
+      if (url.pathname === `/repos/pyralisxc/Conductor/git/commits/${sha}`) return Response.json({ sha, tree: { sha: treeSha } });
+      if (url.pathname === `/repos/pyralisxc/Conductor/git/trees/${treeSha}`) {
+        assert.equal(url.searchParams.get('recursive'), '1');
+        return Response.json({
+          sha: treeSha, truncated: false,
+          tree: [
+            { path: 'README.md', mode: '100644', type: 'blob', sha: readmeBlob, size: 28 },
+            { path: 'src/providers/github.ts', mode: '100644', type: 'blob', sha: githubBlob, size: 96 },
+            { path: 'public/logo.png', mode: '100644', type: 'blob', sha: 'e'.repeat(40), size: 20 },
+          ],
+        });
+      }
+      if (url.pathname === `/repos/pyralisxc/Conductor/git/blobs/${githubBlob}`) {
+        const content = "throw new Error('head is not proven contained in Preview or the repository default branch');\n";
+        return Response.json({ sha: githubBlob, size: Buffer.byteLength(content), encoding: 'base64', content: Buffer.from(content).toString('base64') });
+      }
+      if (url.pathname === `/repos/pyralisxc/Conductor/git/blobs/${readmeBlob}`) {
+        const content = '# Conductor\nProvider runtime.\n';
+        return Response.json({ sha: readmeBlob, size: Buffer.byteLength(content), encoding: 'base64', content: Buffer.from(content).toString('base64') });
+      }
+      return Response.json({ message: 'not found' }, { status: 404 });
+    },
+  });
+
+  const result = await provider.discoverSource({
+    project: { id: 'pyralisxc/Conductor' }, sha, query: 'not proven contained',
+    maxFiles: 10, maxBytes: 4096, maxFileBytes: 1024, maxMatches: 5,
+  });
+  assert.equal(result.mode, 'literal');
+  assert.equal(result.revisionSha, sha);
+  assert.equal(result.treeSha, treeSha);
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0]?.path, 'src/providers/github.ts');
+  assert.equal(result.matches[0]?.line, 1);
+  assert.match(result.matches[0]?.snippet ?? '', /not proven contained/);
+  assert.equal(result.skipped.unsupported, 1);
+  assert.equal(result.truncated, false);
+  assert.equal(requested.some((path) => path.includes('/git/trees/') && path.includes('recursive=1')), true);
+
+  const manifest = await provider.discoverSource({ project: { id: 'pyralisxc/Conductor' }, sha, pathPrefix: 'src', maxFiles: 5 });
+  assert.equal(manifest.mode, 'manifest');
+  assert.deepEqual(manifest.files.map((file) => file.path), ['src/providers/github.ts']);
+
+  const before = requested.length;
+  await assert.rejects(
+    provider.discoverSource({ project: { id: 'pyralisxc/Conductor' }, sha: 'main', query: 'anything' }),
+    (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+  );
+  assert.equal(requested.length, before);
+});
+
 test('GitHub CI run evidence binds PR head and workflow run and redacts bounded failure logs', async () => {
   const head = 'b'.repeat(40);
   const provider = new GitHubRuntimeProvider({

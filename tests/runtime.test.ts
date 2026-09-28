@@ -465,6 +465,37 @@ test('runtime exposes bounded mutations only with a provider and idempotency exe
   assert.equal(creates, 3);
 });
 
+test('runtime exposes bounded source discovery only when the source provider supports it', async () => {
+  const sourceArtifactProvider: SourceArtifactReadProvider = {
+    id: 'github-source',
+    async getCapabilities() { return []; },
+    async getSourceArtifact() { throw new Error('unused'); },
+    async discoverSource(input) {
+      return {
+        provider: 'github' as const, repository: input.project.repository ?? input.project.id,
+        revisionSha: input.sha, treeSha: 'b'.repeat(40),
+        mode: input.query ? 'literal' as const : 'manifest' as const,
+        query: input.query ?? null, pathPrefix: input.pathPrefix ?? null,
+        totalFiles: 2, candidateFiles: 2,
+        files: input.query ? [] : [{ path: 'src/index.ts', blobSha: 'c'.repeat(40), size: 20 }],
+        matches: input.query ? [{ path: 'src/index.ts', blobSha: 'c'.repeat(40), size: 20, line: 1, snippet: 'needle' }] : [],
+        scannedFiles: input.query ? 1 : 0, scannedBytes: input.query ? 20 : 0,
+        skipped: { tooLarge: 0, binaryOrInvalidText: 0, unsupported: 0 },
+        truncated: false, truncationReasons: [],
+        limits: { maxFiles: 80, maxBytes: 2 * 1024 * 1024, maxFileBytes: 128 * 1024, maxMatches: 20 },
+        observedAt: '2026-09-28T00:00:00Z', note: 'provider evidence',
+      };
+    },
+  };
+  const runtime = new ConductorToolRuntime({ sourceArtifactProvider });
+  const capabilities = await runtime.capabilities();
+  assert.equal(capabilities.status, 'succeeded');
+  if (capabilities.status === 'succeeded') assert.equal(capabilities.result.operations.some((item) => item.name === 'source.discover' && !item.mutates), true);
+  const receipt = await runtime.sourceDiscover({ project: { id: 'Conductor', repository: 'pyralisxc/Conductor' }, sha: 'a'.repeat(40), query: 'needle' });
+  assert.equal(receipt.status, 'succeeded');
+  if (receipt.status === 'succeeded') assert.equal(receipt.result.matches[0]?.path, 'src/index.ts');
+});
+
 test('runtime exposes exact source and CI evidence reads without enabling mutations', async () => {
   const sourceArtifactProvider: SourceArtifactReadProvider = {
     id: 'github-source',
