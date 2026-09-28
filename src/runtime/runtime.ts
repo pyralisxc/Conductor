@@ -1051,26 +1051,30 @@ export class ConductorToolRuntime {
         const active = listed.items.filter((item) =>
           ['ready', 'in-progress', 'blocked', 'review'].includes(item.status)
         );
-        const projected = await Promise.all(active.slice(0, limit).map(async (workItem): Promise<DevelopmentStatusWorkItem> => {
-          const candidates = await provider.listWorkItemPullRequests({
-            project: resolvedProject,
-            issueNumber: workItem.issueNumber,
-          });
-          const artifacts = candidates.map((pullRequest) => ({
-            role: lifecycleTransportRole(pullRequest),
-            pullRequest,
-          }));
-          const promotion = artifacts.find((artifact) => artifact.role === 'main-promotion');
-          const previewIntegration = artifacts.find((artifact) => artifact.role === 'preview-integration');
-          const lifecycleStage = promotion
-            ? 'main-promotion' as const
-            : previewIntegration?.pullRequest.merged
-              ? 'preview-integrated' as const
-              : previewIntegration
-                ? 'preview-integration' as const
-                : 'implementation' as const;
-          return { workItem, lifecycleStage, candidates, artifacts };
-        }));
+        const projected = await boundedEvidenceMap(
+          active.slice(0, limit),
+          4,
+          async (workItem): Promise<DevelopmentStatusWorkItem> => {
+            const candidates = await provider.listWorkItemPullRequests({
+              project: resolvedProject,
+              issueNumber: workItem.issueNumber,
+            });
+            const artifacts = candidates.map((pullRequest) => ({
+              role: lifecycleTransportRole(pullRequest),
+              pullRequest,
+            }));
+            const promotion = artifacts.find((artifact) => artifact.role === 'main-promotion');
+            const previewIntegration = artifacts.find((artifact) => artifact.role === 'preview-integration');
+            const lifecycleStage = promotion
+              ? 'main-promotion' as const
+              : previewIntegration?.pullRequest.merged
+                ? 'preview-integrated' as const
+                : previewIntegration
+                  ? 'preview-integration' as const
+                  : 'implementation' as const;
+            return { workItem, lifecycleStage, candidates, artifacts };
+          },
+        );
 
         return {
           result: {
