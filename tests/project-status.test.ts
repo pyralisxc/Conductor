@@ -105,6 +105,11 @@ test('development status groups active work without ranking it and preserves ins
           kindSource: 'label' as const,
           origin: 'human' as const,
           originSource: 'label' as const,
+          severity: 'unknown' as const,
+          severitySource: 'default' as const,
+          priority: 'unknown' as const,
+          prioritySource: 'default' as const,
+          productionBlocking: false,
           labels: [`status:${status}`],
           createdAt: '2026-09-22T00:00:00Z',
           updatedAt: '2026-09-22T01:00:00Z',
@@ -287,6 +292,90 @@ test('work bootstrap composes catalog freshness, topology, work state and provid
   }
 });
 
+
+test('development status bounds active work candidate fan-out to four concurrent reads', async () => {
+  let activeReads = 0;
+  let peakReads = 0;
+  const workProvider: WorkItemCandidateReadProvider = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    async getWorkItemStatus() { throw new Error('unused'); },
+    async listWorkItems() {
+      return {
+        repository: 'pyralisxc/Conductor',
+        truncated: false,
+        items: Array.from({ length: 8 }, (_, index) => {
+          const issueNumber = index + 1;
+          return {
+            repository: 'pyralisxc/Conductor',
+            issueNumber,
+            url: `https://github.com/pyralisxc/Conductor/issues/${issueNumber}`,
+            title: `Work ${issueNumber}`,
+            body: '',
+            state: 'open',
+            status: 'in-progress' as const,
+            statusSource: 'label' as const,
+            kind: 'feature' as const,
+            kindSource: 'label' as const,
+            origin: 'human' as const,
+            originSource: 'label' as const,
+            severity: 'unknown' as const,
+            severitySource: 'default' as const,
+            priority: 'unknown' as const,
+            prioritySource: 'default' as const,
+            productionBlocking: false,
+            labels: ['status:in-progress'],
+            createdAt: '2026-09-28T00:00:00Z',
+            updatedAt: '2026-09-28T00:00:00Z',
+          };
+        }),
+      };
+    },
+    async listWorkItemPullRequests() {
+      activeReads += 1;
+      peakReads = Math.max(peakReads, activeReads);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      activeReads -= 1;
+      return [];
+    },
+  };
+  const githubPreflight: ProjectPreflightProvider = {
+    id: 'github-preflight',
+    async getCapabilities() { return []; },
+    async preflightProject() {
+      return [
+        { check: 'repository.access' as const, status: 'ready' as const, provider: 'github', summary: 'ready', diagnostics: [] },
+        { check: 'github.read' as const, status: 'ready' as const, provider: 'github', summary: 'ready', diagnostics: [] },
+      ];
+    },
+  };
+  const intelligence: ProjectPreflightProvider = {
+    id: 'development-intelligence',
+    async getCapabilities() { return []; },
+    async preflightProject() {
+      return [{
+        check: 'development-intelligence.read' as const,
+        status: 'ready' as const,
+        provider: 'development-intelligence',
+        summary: 'ready',
+        diagnostics: [],
+      }];
+    },
+  };
+  const runtime = new ConductorToolRuntime({
+    providers: [githubPreflight, intelligence],
+    workItemProvider: workProvider as any,
+    workItemCandidateProvider: workProvider,
+  });
+
+  const receipt = await runtime.developmentStatus({
+    project: { id: 'pyralisxc/Conductor' },
+    limit: 8,
+  });
+  assert.equal(receipt.status, 'succeeded');
+  assert.equal(peakReads, 4);
+});
+
 test('capabilities publishes a stable catalog digest including work.bootstrap', async () => {
   const provider: WorkItemCandidateReadProvider = {
     id: 'github',
@@ -320,7 +409,10 @@ test('repository audit succeeds without DI and keeps semantic audit separate', a
           repository: 'pyralisxc/Conductor', issueNumber: 1, url: 'https://github.test/issues/1',
           title: 'Unclassified', body: '', state: 'open' as const, status: 'ready' as const,
           statusSource: 'label' as const, kind: 'unknown' as const, kindSource: 'default' as const,
-          origin: 'unknown' as const, originSource: 'default' as const, labels: ['status:ready'],
+          origin: 'unknown' as const, originSource: 'default' as const,
+          severity: 'unknown' as const, severitySource: 'default' as const,
+          priority: 'unknown' as const, prioritySource: 'default' as const, productionBlocking: false,
+          labels: ['status:ready'],
           createdAt: '2026-09-27T00:00:00Z', updatedAt: '2026-09-27T00:00:00Z',
         }],
       };

@@ -51,9 +51,16 @@ interface GitHubAppResponse {
 
 interface GitHubInstallationResponse {
   id: number;
-  account?: { login?: string };
+  app_id?: number;
+  account?: {
+    id?: number;
+    login?: string;
+    type?: string;
+  };
+  target_type?: string;
   repository_selection?: 'all' | 'selected' | string;
   permissions?: Record<string, GitHubPermissionLevel>;
+  suspended_at?: string | null;
 }
 
 interface GitHubInstallationTokenResponse {
@@ -66,6 +73,28 @@ interface GitHubInstallationTokenResponse {
 interface CachedCredential {
   credential: GitHubCredential;
   expiresAtMs: number;
+}
+
+export interface GitHubInstallationAttestation {
+  installationId: string;
+  accountId: string;
+  accountLogin: string;
+  accountType: "User" | "Organization" | "Enterprise";
+  repositorySelection: "all" | "selected";
+  permissions: Readonly<Record<string, GitHubPermissionLevel>>;
+  capabilities: readonly string[];
+  verifiedAt: string;
+}
+
+export interface GitHubRepositoryAttestation {
+  installationId: string;
+  repository: string;
+  accountId: string;
+  accountLogin: string;
+  accountType: "User" | "Organization" | "Enterprise";
+  permissions: Readonly<Record<string, GitHubPermissionLevel>>;
+  capabilities: readonly string[];
+  verifiedAt: string;
 }
 
 export interface GitHubAppCredentialProviderOptions {
@@ -106,6 +135,197 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     }
     this.identity = { kind: 'app', appId: String(app.id), appSlug: app.slug };
     return this.identity;
+  }
+
+  async getInstallationAttestation(
+    installationIdInput: string | number
+  ): Promise<GitHubInstallationAttestation> {
+    const installationId = String(installationIdInput).trim();
+    if (!/^[1-9]\d{0,19}$/u.test(installationId)) {
+      throw {
+        code: 'NOT_FOUND',
+        source: 'github',
+        message: 'GitHub installation ID is invalid',
+      };
+    }
+
+    const response = await this.fetch(
+      `${this.apiBaseUrl}/app/installations/${installationId}`,
+      { headers: await this.appHeaders() },
+    );
+    if (!response.ok) throw await githubAppResponseError(response);
+
+    const installation = await response.json() as GitHubInstallationResponse;
+    if (String(installation.id) !== installationId) {
+      throw {
+        code: 'CONFLICT',
+        source: 'github',
+        message: 'GitHub installation attestation returned a different installation ID',
+      };
+    }
+    if (
+      installation.app_id !== undefined &&
+      String(installation.app_id) !== this.appId
+    ) {
+      throw {
+        code: 'CONFLICT',
+        source: 'github',
+        message: 'GitHub installation belongs to a different GitHub App',
+      };
+    }
+    if (installation.suspended_at) {
+      throw {
+        code: 'AUTH_REQUIRED',
+        source: 'github',
+        message: 'GitHub App installation is suspended',
+      };
+    }
+
+    const accountId = String(installation.account?.id ?? '').trim();
+    const accountLogin = installation.account?.login?.trim() ?? '';
+    const accountTypeRaw =
+      installation.account?.type?.trim() ??
+      installation.target_type?.trim() ??
+      '';
+    const accountType =
+      accountTypeRaw === 'Organization' ||
+      accountTypeRaw === 'Enterprise'
+        ? accountTypeRaw
+        : accountTypeRaw === 'User'
+          ? 'User'
+          : undefined;
+    const repositorySelection =
+      installation.repository_selection === 'all'
+        ? 'all'
+        : installation.repository_selection === 'selected'
+          ? 'selected'
+          : undefined;
+
+    if (
+      !/^[1-9]\d*$/u.test(accountId) ||
+      !accountLogin ||
+      !accountType ||
+      !repositorySelection
+    ) {
+      throw {
+        code: 'CONFLICT',
+        source: 'github',
+        message: 'GitHub installation attestation is missing safe account metadata',
+      };
+    }
+
+    const permissions = Object.freeze({
+      ...(installation.permissions ?? {}),
+    });
+
+    return Object.freeze({
+      installationId,
+      accountId,
+      accountLogin,
+      accountType,
+      repositorySelection,
+      permissions,
+      capabilities: githubCapabilitiesFromPermissions(permissions),
+      verifiedAt: this.now().toISOString(),
+    });
+  }
+
+  async getRepositoryAttestation(
+    repositoryInput: string,
+    expectedInstallationIdInput: string | number
+  ): Promise<GitHubRepositoryAttestation> {
+    const [owner, name] = splitRepository(repositoryInput);
+    const expectedInstallationId =
+      String(expectedInstallationIdInput).trim();
+
+    if (!/^[1-9]\d{0,19}$/u.test(expectedInstallationId)) {
+      throw {
+        code: 'NOT_FOUND',
+        source: 'github',
+        message: 'Expected GitHub installation ID is invalid',
+      };
+    }
+
+    const response = await this.fetch(
+      `${this.apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/installation`,
+      { headers: await this.appHeaders() },
+    );
+    if (!response.ok) throw await githubAppResponseError(response);
+
+    const installation =
+      await response.json() as GitHubInstallationResponse;
+
+    if (String(installation.id) !== expectedInstallationId) {
+      throw {
+        code: 'CONFLICT',
+        source: 'github',
+        message:
+          'GitHub repository is attached to a different App installation',
+      };
+    }
+    if (
+      installation.app_id !== undefined &&
+      String(installation.app_id) !== this.appId
+    ) {
+      throw {
+        code: 'CONFLICT',
+        source: 'github',
+        message: 'GitHub repository installation belongs to a different GitHub App',
+      };
+    }
+    if (installation.suspended_at) {
+      throw {
+        code: 'AUTH_REQUIRED',
+        source: 'github',
+        message: 'GitHub repository installation is suspended',
+      };
+    }
+
+    const accountId = String(
+      installation.account?.id ?? ''
+    ).trim();
+    const accountLogin =
+      installation.account?.login?.trim() ?? '';
+    const accountTypeRaw =
+      installation.account?.type?.trim() ??
+      installation.target_type?.trim() ??
+      '';
+    const accountType =
+      accountTypeRaw === 'Organization' ||
+      accountTypeRaw === 'Enterprise'
+        ? accountTypeRaw
+        : accountTypeRaw === 'User'
+          ? 'User'
+          : undefined;
+
+    if (
+      !/^[1-9]\d*$/u.test(accountId) ||
+      !accountLogin ||
+      !accountType
+    ) {
+      throw {
+        code: 'CONFLICT',
+        source: 'github',
+        message:
+          'GitHub repository attestation is missing safe account metadata',
+      };
+    }
+
+    const permissions = Object.freeze({
+      ...(installation.permissions ?? {}),
+    });
+
+    return Object.freeze({
+      installationId: expectedInstallationId,
+      repository: `${owner}/${name}`,
+      accountId,
+      accountLogin,
+      accountType,
+      permissions,
+      capabilities:
+        githubCapabilitiesFromPermissions(permissions),
+      verifiedAt: this.now().toISOString(),
+    });
   }
 
   async getCredential(repository: string, options: { forceRefresh?: boolean } = {}): Promise<GitHubCredential> {
@@ -206,4 +426,52 @@ async function githubAppResponseError(response: Response): Promise<unknown> {
       details: { requestId },
     }] : undefined,
   };
+}
+
+
+export function githubCapabilitiesFromPermissions(
+  permissions: Readonly<Record<string, GitHubPermissionLevel>>
+): readonly string[] {
+  const output = new Set<string>();
+
+  const add = (
+    permission: string,
+    readCapability: string,
+    writeCapability?: string
+  ) => {
+    const level = permissions[permission];
+    if (!level) return;
+    if (level === 'read' || level === 'write' || level === 'admin') {
+      output.add(readCapability);
+    }
+    if (
+      writeCapability &&
+      (level === 'write' || level === 'admin')
+    ) {
+      output.add(writeCapability);
+    }
+  };
+
+  add('metadata', 'repository.read');
+  add('contents', 'source.read', 'source.write');
+  add('issues', 'issue.read', 'issue.write');
+  add(
+    'pull_requests',
+    'pull_request.read',
+    'pull_request.write'
+  );
+  add('actions', 'actions.read', 'actions.write');
+  add('checks', 'checks.read', 'checks.write');
+  add(
+    'commit_statuses',
+    'commit_status.read',
+    'commit_status.write'
+  );
+  add(
+    'deployments',
+    'deployment.read',
+    'deployment.write'
+  );
+
+  return Object.freeze([...output].sort());
 }

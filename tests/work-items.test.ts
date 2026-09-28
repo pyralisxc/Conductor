@@ -11,7 +11,7 @@ import {
 } from '../src/index.js';
 
 function githubProvider() {
-  let currentLabels = ['status:ready', 'kind:investigation', 'origin:di-finding', 'area:di'];
+  let currentLabels = ['status:ready', 'kind:investigation', 'origin:di-finding', 'severity:high', 'priority:p1', 'production-blocking', 'area:di'];
   let currentState = 'open';
   let currentTitle = 'Improve semantic orientation';
   let currentBody = 'Benchmark Game Studio Core.';
@@ -97,6 +97,9 @@ test('GitHub issues normalize lifecycle, kind, and origin without replacing nati
     status: 'ready',
     kind: 'investigation',
     origin: 'di-finding',
+    severity: 'high',
+    priority: 'p1',
+    productionBlocking: true,
     labels: ['area:di'],
     idempotencyKey: 'work-item:create:semantic-orientation',
   });
@@ -120,6 +123,11 @@ test('GitHub issues normalize lifecycle, kind, and origin without replacing nati
   assert.equal(status.kindSource, 'label');
   assert.equal(status.origin, 'di-finding');
   assert.equal(status.originSource, 'label');
+  assert.equal(status.severity, 'high');
+  assert.equal(status.severitySource, 'label');
+  assert.equal(status.priority, 'p1');
+  assert.equal(status.prioritySource, 'label');
+  assert.equal(status.productionBlocking, true);
 
   const listed = await provider.listWorkItems({
     project,
@@ -140,6 +148,9 @@ test('GitHub issues normalize lifecycle, kind, and origin without replacing nati
   assert.equal(updated.status, 'in-progress');
   assert.equal(updated.kind, 'investigation');
   assert.equal(updated.origin, 'di-finding');
+  assert.equal(updated.severity, 'high');
+  assert.equal(updated.priority, 'p1');
+  assert.equal(updated.productionBlocking, true);
   assert.equal(updated.labels.includes('area:di'), true);
 
   const classified = await provider.updateWorkItemClassification({
@@ -152,7 +163,26 @@ test('GitHub issues normalize lifecycle, kind, and origin without replacing nati
   assert.equal(classified.status, 'in-progress');
   assert.equal(classified.kind, 'improvement');
   assert.equal(classified.origin, 'agent-audit');
+  assert.equal(classified.severity, 'high');
+  assert.equal(classified.priority, 'p1');
+  assert.equal(classified.productionBlocking, true);
   assert.equal(classified.labels.includes('area:di'), true);
+
+  const triaged = await provider.updateWorkItemTriage({
+    project,
+    issueNumber: 7,
+    severity: 'critical',
+    priority: 'p0',
+    productionBlocking: false,
+    idempotencyKey: 'work-item:triage:7:critical-p0',
+  });
+  assert.equal(triaged.status, 'in-progress');
+  assert.equal(triaged.kind, 'improvement');
+  assert.equal(triaged.origin, 'agent-audit');
+  assert.equal(triaged.severity, 'critical');
+  assert.equal(triaged.priority, 'p0');
+  assert.equal(triaged.productionBlocking, false);
+  assert.equal(triaged.labels.includes('area:di'), true);
 
   const cleared = await provider.updateWorkItemClassification({
     project,
@@ -165,13 +195,13 @@ test('GitHub issues normalize lifecycle, kind, and origin without replacing nati
   assert.equal(cleared.origin, 'agent-audit');
 });
 
-test('reserved classification labels cannot bypass normalized work-item fields', async () => {
+test('reserved normalized labels cannot bypass work-item fields', async () => {
   const provider = githubProvider();
   await assert.rejects(
     provider.createWorkItem({
       project: { id: 'pyralisxc/Development-Intelligence' },
       title: 'Invalid direct classification',
-      labels: ['kind:bug'],
+      labels: ['severity:critical'],
       idempotencyKey: 'work-item:create:invalid-label',
     }),
     (error: any) => error?.code === 'CONFLICT' && /reserved/.test(error.message),
@@ -198,6 +228,7 @@ test('runtime and MCP expose human-directed work routing and classification', as
       'work-item.comment.create',
       'work-item.update-status',
       'work-item.classification.update',
+      'work-item.triage.update',
     ]) {
       assert.equal(names.includes(name as any), true);
     }
@@ -217,6 +248,7 @@ test('runtime and MCP expose human-directed work routing and classification', as
     'work-item.comment.create',
     'work-item.update-status',
     'work-item.classification.update',
+    'work-item.triage.update',
   ]) {
     assert.equal(names.includes(name), true);
   }
@@ -264,4 +296,54 @@ test('audit is a first-class work kind and preserves unrelated labels', async ()
   assert.equal(updated.kind, 'audit');
   assert.equal(updated.labels.includes('customer-visible'), true);
   assert.equal(updated.labels.includes('kind:audit'), true);
+});
+
+
+test('Main promotion fails closed on production blockers and exact overrides are auditable', async () => {
+  const headSha = 'a'.repeat(40);
+  const baseSha = 'b'.repeat(40);
+  let blockers = [194];
+  let merges = 0;
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/repos/pyralisxc/Conductor' && method === 'GET') {
+        return Response.json({ full_name: 'pyralisxc/Conductor', default_branch: 'main', permissions: { pull: true, push: true } });
+      }
+      if (url.pathname.endsWith('/pulls/9') && method === 'GET') {
+        return Response.json({
+          number: 9, html_url: 'https://github.test/pull/9', state: 'open', draft: false, merged: false,
+          head: { ref: 'preview', sha: headSha }, base: { ref: 'main', sha: baseSha }, labels: [],
+        });
+      }
+      if (url.pathname.endsWith('/issues') && method === 'GET' && url.searchParams.get('labels') === 'production-blocking') {
+        return Response.json(blockers.map((number) => ({
+          number, html_url: `https://github.test/issues/${number}`, title: 'Blocker', body: '', state: 'open',
+          labels: [{ name: 'production-blocking' }], created_at: '2026-09-28T00:00:00Z', updated_at: '2026-09-28T00:00:00Z',
+        })));
+      }
+      if (url.pathname.endsWith('/pulls/9/merge') && method === 'PUT') {
+        merges++;
+        return Response.json({ merged: true, sha: 'c'.repeat(40), message: 'merged' });
+      }
+      throw new Error(`Unexpected request ${method} ${url.pathname}${url.search}`);
+    },
+  });
+  const base = {
+    project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+    pullRequestNumber: 9, expectedHeadSha: headSha, expectedBaseSha: baseSha,
+    approvalReference: 'owner-approved:blocker-gate-test', idempotencyKey: 'promotion-blocker-test',
+  };
+  await assert.rejects(provider.promotePullRequest(base), (error: any) => error?.code === 'PERMISSION_DENIED' && /#194/.test(error.message));
+  await assert.rejects(provider.promotePullRequest({ ...base, overrideBlockerIssueNumbers: [999] }), (error: any) => error?.code === 'PERMISSION_DENIED' && /#999/.test(error.message));
+  const overridden = await provider.promotePullRequest({ ...base, overrideBlockerIssueNumbers: [194] });
+  assert.deepEqual(overridden.overriddenBlockerIssueNumbers, [194]);
+  assert.equal(merges, 1);
+  blockers = [];
+  const clear = await provider.promotePullRequest({ ...base, overrideBlockerIssueNumbers: undefined });
+  assert.deepEqual(clear.overriddenBlockerIssueNumbers, []);
+  assert.equal(merges, 2);
 });

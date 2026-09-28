@@ -30,6 +30,8 @@ import {
   type ProjectPreflight,
   type ProjectReference,
   type ProviderHealth,
+  type ProviderUsageDelta,
+  type ProviderUsageSnapshot,
   type ToolDefinition,
   type ToolDiagnostic,
   type ToolOperationName,
@@ -87,6 +89,7 @@ import {
   type CommentWorkItemInput,
   type UpdateWorkItemStatusInput,
   type UpdateWorkItemClassificationInput,
+  type UpdateWorkItemTriageInput,
   type GetDeploymentStatusInput,
   type GetDeploymentLogsInput,
   type DeploymentProjectStatus,
@@ -210,6 +213,7 @@ const WORK_ITEM_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'work-item.comment.create', description: 'Add evidence or a consolidation link to one existing issue.', mutates: true },
   { name: 'work-item.update-status', description: 'Move one durable work item to an explicit normalized status.', mutates: true },
   { name: 'work-item.classification.update', description: 'Update normalized work kind and/or origin without changing lifecycle status.', mutates: true },
+  { name: 'work-item.triage.update', description: 'Update normalized severity, priority, and production release-gate triage without changing lifecycle status.', mutates: true },
 ];
 
 const PULL_REQUEST_LIFECYCLE_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
@@ -310,6 +314,33 @@ export class ConductorToolRuntime {
     this.workItemProvider = options.workItemProvider;
     this.workItemCandidateProvider = options.workItemCandidateProvider;
     this.deploymentProvider = options.deploymentProvider;
+  }
+
+  private captureProviderUsage(): Map<string, ProviderUsageSnapshot> {
+    const snapshots = new Map<string, ProviderUsageSnapshot>();
+    for (const provider of this.providers) {
+      const snapshot = provider.getUsageSnapshot?.();
+      if (snapshot) snapshots.set(provider.id, snapshot);
+    }
+    return snapshots;
+  }
+
+  private providerUsageDelta(before: Map<string, ProviderUsageSnapshot>): ProviderUsageDelta[] {
+    const deltas: ProviderUsageDelta[] = [];
+    for (const provider of this.providers) {
+      const current = provider.getUsageSnapshot?.();
+      if (!current) continue;
+      const prior = before.get(provider.id);
+      deltas.push({
+        provider: provider.id,
+        calls: Math.max(0, current.calls - (prior?.calls ?? 0)),
+        duplicateReads: Math.max(0, current.duplicateReads - (prior?.duplicateReads ?? 0)),
+        requestBodyBytes: Math.max(0, current.requestBodyBytes - (prior?.requestBodyBytes ?? 0)),
+        reportedResponseBytes: Math.max(0, current.reportedResponseBytes - (prior?.reportedResponseBytes ?? 0)),
+        responsesWithUnknownBytes: Math.max(0, current.responsesWithUnknownBytes - (prior?.responsesWithUnknownBytes ?? 0)),
+      });
+    }
+    return deltas.sort((left, right) => left.provider.localeCompare(right.provider));
   }
 
   get repositoryAcquisitionReadEnabled(): boolean {
@@ -560,6 +591,8 @@ export class ConductorToolRuntime {
       'work.bootstrap',
       { kind: 'project', id: resolvedProject.id, ref: resolvedProject.ref },
       async () => {
+        const startedAt = Date.now();
+        const providerUsageBefore = this.captureProviderUsage();
         const development = await this.developmentStatus({ project: resolvedProject, limit: input.limit ?? 10 });
         if (development.status === 'failed') throw development.error;
 
@@ -618,6 +651,8 @@ export class ConductorToolRuntime {
             work: development.result.work,
             intelligence,
             deployment,
+            elapsedMs: Math.max(0, Date.now() - startedAt),
+            providerUsage: this.providerUsageDelta(providerUsageBefore),
             observedAt: this.now().toISOString(),
           },
           diagnostics: [
@@ -657,6 +692,7 @@ export class ConductorToolRuntime {
         }
 
         const startedAt = Date.now();
+        const providerUsageBefore = this.captureProviderUsage();
         const results = await boundedEvidenceMap(items, concurrency, async (item) =>
           await this.runEvidenceBundleItem(item)
         );
@@ -669,8 +705,9 @@ export class ConductorToolRuntime {
             succeeded,
             failed: results.length - succeeded,
             elapsedMs: Math.max(0, Date.now() - startedAt),
+            providerUsage: this.providerUsageDelta(providerUsageBefore),
             items: results,
-            note: 'Read-only bundle execution preserves input order, limits concurrency, performs no hidden retries, and keeps per-item failures explicit.',
+            note: 'Read-only bundle execution preserves input order, limits concurrency, performs no hidden retries, and keeps per-item failures explicit. Provider usage counts network calls, duplicate identical GET/HEAD reads within 30 seconds, known request-body bytes, Content-Length-reported response bytes, and responses whose byte size is unknown.',
           },
         };
       },
@@ -1014,26 +1051,30 @@ export class ConductorToolRuntime {
         const active = listed.items.filter((item) =>
           ['ready', 'in-progress', 'blocked', 'review'].includes(item.status)
         );
-        const projected = await Promise.all(active.slice(0, limit).map(async (workItem): Promise<DevelopmentStatusWorkItem> => {
-          const candidates = await provider.listWorkItemPullRequests({
-            project: resolvedProject,
-            issueNumber: workItem.issueNumber,
-          });
-          const artifacts = candidates.map((pullRequest) => ({
-            role: lifecycleTransportRole(pullRequest),
-            pullRequest,
-          }));
-          const promotion = artifacts.find((artifact) => artifact.role === 'main-promotion');
-          const previewIntegration = artifacts.find((artifact) => artifact.role === 'preview-integration');
-          const lifecycleStage = promotion
-            ? 'main-promotion' as const
-            : previewIntegration?.pullRequest.merged
-              ? 'preview-integrated' as const
-              : previewIntegration
-                ? 'preview-integration' as const
-                : 'implementation' as const;
-          return { workItem, lifecycleStage, candidates, artifacts };
-        }));
+        const projected = await boundedEvidenceMap(
+          active.slice(0, limit),
+          4,
+          async (workItem): Promise<DevelopmentStatusWorkItem> => {
+            const candidates = await provider.listWorkItemPullRequests({
+              project: resolvedProject,
+              issueNumber: workItem.issueNumber,
+            });
+            const artifacts = candidates.map((pullRequest) => ({
+              role: lifecycleTransportRole(pullRequest),
+              pullRequest,
+            }));
+            const promotion = artifacts.find((artifact) => artifact.role === 'main-promotion');
+            const previewIntegration = artifacts.find((artifact) => artifact.role === 'preview-integration');
+            const lifecycleStage = promotion
+              ? 'main-promotion' as const
+              : previewIntegration?.pullRequest.merged
+                ? 'preview-integrated' as const
+                : previewIntegration
+                  ? 'preview-integration' as const
+                  : 'implementation' as const;
+            return { workItem, lifecycleStage, candidates, artifacts };
+          },
+        );
 
         return {
           result: {
@@ -1220,6 +1261,13 @@ export class ConductorToolRuntime {
   async updateWorkItemClassification(input: UpdateWorkItemClassificationInput) {
     return await this.executeWorkItemMutation(input, 'work-item.classification.update', async (provider) => {
       const result = await provider.updateWorkItemClassification(input);
+      return { result, identifiers: { issueNumber: result.issueNumber } };
+    });
+  }
+
+  async updateWorkItemTriage(input: UpdateWorkItemTriageInput) {
+    return await this.executeWorkItemMutation(input, 'work-item.triage.update', async (provider) => {
+      const result = await provider.updateWorkItemTriage(input);
       return { result, identifiers: { issueNumber: result.issueNumber } };
     });
   }
@@ -1444,16 +1492,23 @@ export class ConductorToolRuntime {
     });
   }
 
-  private async executeCompositeMutation<Result>(
+  private async executeCompositeMutation(
     operation: 'lifecycle.advance' | 'lifecycle.resume',
     project: ProjectReference,
-    run: () => Promise<Result>,
-  ): Promise<ExecutionReceipt<Result>> {
+    run: () => Promise<LifecycleAdvanceProjection>,
+  ): Promise<ExecutionReceipt<LifecycleAdvanceProjection>> {
     const operationId = this.createOperationId();
     const startedAt = this.now().toISOString();
+    const startedAtMs = Date.now();
+    const providerUsageBefore = this.captureProviderUsage();
     try {
       const result = await run();
-      return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, operationId, operation, target: { kind: 'project', id: project.id, ref: project.ref }, status: 'succeeded', startedAt, finishedAt: this.now().toISOString(), result, diagnostics: [{ level: 'info', source: 'conductor', message: 'Composite lifecycle effects retain durable idempotency in each underlying mutation substep; the composite re-reads provider state on retry.' }] };
+      const measured = {
+        ...result,
+        elapsedMs: Math.max(0, Date.now() - startedAtMs),
+        providerUsage: this.providerUsageDelta(providerUsageBefore),
+      };
+      return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, operationId, operation, target: { kind: 'project', id: project.id, ref: project.ref }, status: 'succeeded', startedAt, finishedAt: this.now().toISOString(), result: measured, diagnostics: [{ level: 'info', source: 'conductor', message: 'Composite lifecycle effects retain durable idempotency in each underlying mutation substep; the composite re-reads provider state on retry. Provider usage is measured as the operation-local delta from configured provider counters.' }] };
     } catch (error) {
       const normalized = normalizeToolError(error);
       return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, operationId, operation, target: { kind: 'project', id: project.id, ref: project.ref }, status: 'failed', startedAt, finishedAt: this.now().toISOString(), error: normalized, diagnostics: normalized.diagnostics };
@@ -1815,7 +1870,7 @@ function lifecycleProjection(
   previewProof: LifecycleAdvanceProjection['previewProof'] = null,
   gate: LifecycleGateSpec | null = null,
 ): LifecycleAdvanceProjection {
-  return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, project, issueNumber, stage, summary, transitions, previewProof, gate };
+  return { contractVersion: TOOL_RUNTIME_CONTRACT_VERSION, project, issueNumber, stage, summary, transitions, elapsedMs: 0, providerUsage: [], previewProof, gate };
 }
 
 

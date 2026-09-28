@@ -43,10 +43,16 @@ import type {
   WorkItemOrigin,
   MutableWorkItemOrigin,
   WorkItemClassificationSource,
+  WorkItemSeverity,
+  MutableWorkItemSeverity,
+  WorkItemPriority,
+  MutableWorkItemPriority,
+  WorkItemTriageSource,
   CreateWorkItemInput,
   CommentWorkItemInput,
   UpdateWorkItemStatusInput,
   UpdateWorkItemClassificationInput,
+  UpdateWorkItemTriageInput,
   RepositoryAcquisitionPreflightInput,
   RepositoryAcquisitionPreflight,
   AcquireRepositoryInput,
@@ -55,13 +61,14 @@ import type {
   RepositoryProviderAudit,
   GetRepositoryAuditInput,
 } from '../runtime/types.js';
-import { normalizeToolError } from '../runtime/errors.js';
+import { ConductorToolError, normalizeToolError } from '../runtime/errors.js';
 import type { OperationPreflightProvider, RepositoryAcquisitionProvider, RepositoryAuditReadProvider, SourceControlMutationProvider, ProjectPreflightProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider } from './runtime.js';
 import {
   StaticGitHubCredentialProvider,
   type GitHubCredential,
   type GitHubCredentialProvider,
 } from './github-auth.js';
+import { ProviderUsageTracker } from './usage.js';
 
 interface GitHubRepositoryResponse {
   full_name: string;
@@ -234,6 +241,16 @@ export interface GitHubRuntimeProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
+interface GitHubRateLimitSnapshot {
+  limit: number | null;
+  remaining: number | null;
+  used: number | null;
+  resetAt: string | null;
+  resource: string | null;
+  retryAfterSeconds: number | null;
+  observedAt: string;
+}
+
 export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, RepositoryAcquisitionProvider, RepositoryAuditReadProvider, SourceControlMutationProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
   readonly id = 'github';
   private readonly credentials?: GitHubCredentialProvider;
@@ -241,6 +258,8 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
   private readonly allowedOwners: ReadonlyMap<string, string>;
   private readonly apiBaseUrl: string;
   private readonly fetch: typeof globalThis.fetch;
+  private readonly usage: ProviderUsageTracker;
+  private rateLimit: GitHubRateLimitSnapshot | null = null;
 
   constructor(options: GitHubRuntimeProviderOptions) {
     if (options.token && options.credentials) {
@@ -252,7 +271,19 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     this.bindings = new Map((options.bindings ?? []).map((binding) => [binding.id, binding]));
     this.allowedOwners = new Map((options.allowedOwners ?? []).map((owner) => [owner.toLowerCase(), owner]));
     this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.github.com').replace(/\/$/, '');
-    this.fetch = options.fetch ?? globalThis.fetch;
+    const rawFetch = options.fetch ?? globalThis.fetch;
+    this.usage = new ProviderUsageTracker(this.id);
+    this.fetch = async (input, init) => {
+      const guard = this.rateLimitGuard();
+      if (guard) throw guard;
+      const response = await this.usage.fetch(rawFetch, input, init);
+      this.observeRateLimit(response);
+      return response;
+    };
+  }
+
+  getUsageSnapshot() {
+    return this.usage.snapshot();
   }
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
@@ -342,7 +373,10 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         code: 'PERMISSION_DENIED',
         message: `GitHub token cannot read ${configured.repository}`,
       }, 'PERMISSION_DENIED', this.id);
-      const permissionEvidence = permissionDiagnostics(credential, configured.repository);
+      const permissionEvidence = [
+        ...permissionDiagnostics(credential, configured.repository),
+        ...this.rateLimitDiagnostics(),
+      ];
       const missingPermissions = credential.kind === 'app-installation'
         ? missingDevelopPermissions(credential)
         : [];
@@ -415,7 +449,10 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     }
     try {
       const credential = await this.credentials.getCredential(configured.repository);
-      const evidence = permissionDiagnostics(credential, configured.repository);
+      const evidence = [
+        ...permissionDiagnostics(credential, configured.repository),
+        ...this.rateLimitDiagnostics(),
+      ];
       if (credential.kind === 'app-installation') {
         const missing = missingPermissions(credential, requirements.permissions);
         if (missing.length > 0) {
@@ -487,6 +524,41 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       {},
       credential,
     );
+    const labels = (pull.labels ?? []).flatMap((label) => label.name ? [label.name] : []);
+    if (pull.merged) {
+      const checks: PullRequestStatus['checks']['items'] = [];
+      const workflowRuns: PullRequestStatus['workflowRuns'] = [];
+      return {
+        repository,
+        pullRequestNumber: pull.number,
+        url: pull.html_url,
+        state: pull.state,
+        draft: pull.draft ?? false,
+        merged: true,
+        mergeable: pull.mergeable ?? null,
+        mergeableState: pull.mergeable_state ?? null,
+        head: pull.head,
+        base: pull.base,
+        labels,
+        checks: {
+          total: 0,
+          pending: 0,
+          successful: 0,
+          failed: 0,
+          neutral: 0,
+          skipped: 0,
+          items: checks,
+        },
+        workflowRuns,
+        orchestration: derivePullRequestOrchestration({
+          pull,
+          labels,
+          checks,
+          workflowRuns,
+          previous: input.previous,
+        }),
+      };
+    }
     const [checkRuns, workflowRuns] = await Promise.all([
       this.request<GitHubCheckRunsResponse>(
         repository,
@@ -519,7 +591,6 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       && check.conclusion !== null
       && !['success', 'neutral', 'skipped'].includes(check.conclusion)
     ).length;
-    const labels = (pull.labels ?? []).flatMap((label) => label.name ? [label.name] : []);
     const observedWorkflowRuns = markHistoricalWorkflowRuns(workflowRuns.workflow_runs.map((run) => ({
       id: run.id,
       name: run.name ?? `workflow-${run.id}`,
@@ -1680,9 +1751,9 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       return [referenced.number];
     }))].slice(0, 10);
 
-    return await Promise.all(pullRequestNumbers.map(async (pullRequestNumber) =>
+    return await boundedGitHubMap(pullRequestNumbers, 2, async (pullRequestNumber) =>
       await this.getPullRequestStatus({ project: input.project, pullRequestNumber })
-    ));
+    );
   }
 
   async createWorkItem(input: CreateWorkItemInput): Promise<WorkItemRecord> {
@@ -1693,13 +1764,19 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     const status = input.status ?? 'backlog';
     const kind = input.kind ?? 'unknown';
     const origin = input.origin ?? 'unknown';
+    const severity = input.severity ?? 'unknown';
+    const priority = input.priority ?? 'unknown';
+    const productionBlocking = input.productionBlocking ?? false;
     const labels = normalizedLabels(input.labels);
     if (labels.some(isWorkItemReservedLabel)) {
-      throw { code: 'CONFLICT', message: 'Work-item labels may not set reserved status:*, kind:*, or origin:* labels directly' };
+      throw { code: 'CONFLICT', message: 'Work-item labels may not set reserved normalized status/classification/triage labels directly' };
     }
     await this.ensureWorkItemStatusLabel(repository, credential, status);
     if (kind !== 'unknown') await this.ensureWorkItemKindLabel(repository, credential, kind);
     if (origin !== 'unknown') await this.ensureWorkItemOriginLabel(repository, credential, origin);
+    if (severity !== 'unknown') await this.ensureWorkItemSeverityLabel(repository, credential, severity);
+    if (priority !== 'unknown') await this.ensureWorkItemPriorityLabel(repository, credential, priority);
+    if (productionBlocking) await this.ensureProductionBlockingLabel(repository, credential);
     const created = await this.request<GitHubIssueResponse>(repository, '/issues', {
       method: 'POST',
       body: JSON.stringify({
@@ -1710,6 +1787,9 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
           workItemStatusLabel(status),
           ...(kind === 'unknown' ? [] : [workItemKindLabel(kind)]),
           ...(origin === 'unknown' ? [] : [workItemOriginLabel(origin)]),
+          ...(severity === 'unknown' ? [] : [workItemSeverityLabel(severity)]),
+          ...(priority === 'unknown' ? [] : [workItemPriorityLabel(priority)]),
+          ...(productionBlocking ? [WORK_ITEM_PRODUCTION_BLOCKING_LABEL] : []),
         ],
       }),
     }, credential);
@@ -1788,6 +1868,43 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     return workItemFromIssue(repository, { ...current, labels: updatedLabels });
   }
 
+  async updateWorkItemTriage(input: UpdateWorkItemTriageInput): Promise<WorkItemRecord> {
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['work-item.triage.update']);
+    assertIssueNumber(input.issueNumber);
+    if (input.severity === undefined && input.priority === undefined && input.productionBlocking === undefined) {
+      throw { code: 'CONFLICT', message: 'At least one of severity, priority, or productionBlocking must be provided' };
+    }
+    const current = await this.request<GitHubIssueResponse>(repository, `/issues/${input.issueNumber}`, {}, credential);
+    assertIssueIsWorkItem(current);
+    let labels = issueLabelNames(current);
+    if (input.severity !== undefined) {
+      labels = labels.filter((label) => !isWorkItemSeverityLabel(label));
+      if (input.severity !== 'unknown') {
+        await this.ensureWorkItemSeverityLabel(repository, credential, input.severity);
+        labels.push(workItemSeverityLabel(input.severity));
+      }
+    }
+    if (input.priority !== undefined) {
+      labels = labels.filter((label) => !isWorkItemPriorityLabel(label));
+      if (input.priority !== 'unknown') {
+        await this.ensureWorkItemPriorityLabel(repository, credential, input.priority);
+        labels.push(workItemPriorityLabel(input.priority));
+      }
+    }
+    if (input.productionBlocking !== undefined) {
+      labels = labels.filter((label) => !isProductionBlockingLabel(label));
+      if (input.productionBlocking) {
+        await this.ensureProductionBlockingLabel(repository, credential);
+        labels.push(WORK_ITEM_PRODUCTION_BLOCKING_LABEL);
+      }
+    }
+    const updatedLabels = await this.request<GitHubLabelResponse[]>(repository, `/issues/${input.issueNumber}/labels`, {
+      method: 'PUT',
+      body: JSON.stringify({ labels: normalizedLabels(labels).sort((a, b) => a.localeCompare(b)) }),
+    }, credential);
+    return workItemFromIssue(repository, { ...current, labels: updatedLabels });
+  }
+
   private async ensureWorkItemStatusLabel(
     repository: string,
     credential: GitHubCredential,
@@ -1828,6 +1945,18 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       workItemOriginColor(origin),
       `Conductor work origin: ${origin}`,
     );
+  }
+
+  private async ensureWorkItemSeverityLabel(repository: string, credential: GitHubCredential, severity: MutableWorkItemSeverity): Promise<void> {
+    await this.ensureWorkItemLabel(repository, credential, workItemSeverityLabel(severity), workItemSeverityColor(severity), `Conductor work severity: ${severity}`);
+  }
+
+  private async ensureWorkItemPriorityLabel(repository: string, credential: GitHubCredential, priority: MutableWorkItemPriority): Promise<void> {
+    await this.ensureWorkItemLabel(repository, credential, workItemPriorityLabel(priority), workItemPriorityColor(priority), `Conductor work priority: ${priority}`);
+  }
+
+  private async ensureProductionBlockingLabel(repository: string, credential: GitHubCredential): Promise<void> {
+    await this.ensureWorkItemLabel(repository, credential, WORK_ITEM_PRODUCTION_BLOCKING_LABEL, 'CF222E', 'Open work item blocks production promotion unless explicitly overridden');
   }
 
   private async ensureWorkItemLabel(
@@ -2043,7 +2172,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     return await this.mergePullRequest(repository, credential, pull, 'merge');
   }
 
-  async promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string }> {
+  async promotePullRequest(input: PromotePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; merged: boolean; mergeCommitSha: string; message: string; approvalReference: string; overriddenBlockerIssueNumbers: number[] }> {
     const approvalReference = input.approvalReference.trim();
     if (!approvalReference) throw { code: 'PERMISSION_DENIED', message: 'Promotion requires a non-empty owner approval reference' };
     const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['pull-request.merge.promote']);
@@ -2056,8 +2185,29 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     if (input.mergeMethod && input.mergeMethod !== 'merge') {
       throw { code: 'PERMISSION_DENIED', message: 'Main promotion requires a merge commit to preserve Preview ancestry' };
     }
+    const blockers = await this.openProductionBlockerIssueNumbers(repository, credential);
+    const overrides = [...new Set(input.overrideBlockerIssueNumbers ?? [])].sort((a, b) => a - b);
+    if (overrides.some((issueNumber) => !Number.isSafeInteger(issueNumber) || issueNumber < 1)) {
+      throw { code: 'CONFLICT', message: 'Production blocker override issue numbers must be positive safe integers' };
+    }
+    const unrelatedOverrides = overrides.filter((issueNumber) => !blockers.includes(issueNumber));
+    if (unrelatedOverrides.length > 0) {
+      throw { code: 'PERMISSION_DENIED', message: `Production blocker override names non-blocking issue(s): ${unrelatedOverrides.map((value) => `#${value}`).join(', ')}` };
+    }
+    const unoverridden = blockers.filter((issueNumber) => !overrides.includes(issueNumber));
+    if (unoverridden.length > 0) {
+      throw { code: 'PERMISSION_DENIED', message: `Production promotion is blocked by open production-blocking issue(s): ${unoverridden.map((value) => `#${value}`).join(', ')}. Explicitly name every blocker to override.` };
+    }
     const merged = await this.mergePullRequest(repository, credential, pull, 'merge');
-    return { ...merged, approvalReference };
+    return { ...merged, approvalReference, overriddenBlockerIssueNumbers: blockers };
+  }
+
+  private async openProductionBlockerIssueNumbers(repository: string, credential: GitHubCredential): Promise<number[]> {
+    const issues = await this.request<GitHubIssueResponse[]>(repository, '/issues?state=open&labels=production-blocking&per_page=100', {}, credential);
+    if (issues.length >= 100) {
+      throw { code: 'CONFLICT', message: 'Production blocker enumeration reached its 100-item safety bound; promotion fails closed until the release scope is reduced' };
+    }
+    return issues.filter((issue) => !issue.pull_request).map((issue) => issue.number).sort((a, b) => a - b);
   }
 
   private async mergeCandidate(
@@ -2151,6 +2301,69 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
   private singleOwnerRepository(projectId: string): string | undefined {
     if (this.allowedOwners.size !== 1 || !validRepositoryName(projectId)) return undefined;
     return `${[...this.allowedOwners.values()][0]}/${projectId}`;
+  }
+
+  private observeRateLimit(response: Response): void {
+    const observed = githubRateLimitHeaders(response.headers);
+    if (!observed) return;
+    this.rateLimit = {
+      ...observed,
+      observedAt: new Date().toISOString(),
+    };
+  }
+
+  private rateLimitGuard(): ConductorToolError | null {
+    const snapshot = this.rateLimit;
+    if (!snapshot || snapshot.remaining !== 0 || !snapshot.resetAt) return null;
+    const resetAtMs = Date.parse(snapshot.resetAt);
+    if (!Number.isFinite(resetAtMs) || resetAtMs <= Date.now()) return null;
+    return new ConductorToolError({
+      code: 'TRANSIENT',
+      message: `GitHub API rate limit is exhausted until ${snapshot.resetAt}`,
+      retryable: true,
+      source: this.id,
+      diagnostics: [{
+        level: 'warning',
+        code: 'TRANSIENT',
+        source: this.id,
+        message: 'GitHub API request suppressed until the observed rate-limit reset',
+        details: {
+          limit: snapshot.limit,
+          remaining: snapshot.remaining,
+          used: snapshot.used,
+          resetAt: snapshot.resetAt,
+          resource: snapshot.resource,
+          providerCallsObserved: this.usage.snapshot().calls,
+        },
+      }],
+    });
+  }
+
+  private rateLimitDiagnostics(): ToolDiagnostic[] {
+    const snapshot = this.rateLimit;
+    if (!snapshot) return [];
+    const ratio = snapshot.limit && snapshot.remaining !== null
+      ? snapshot.remaining / snapshot.limit
+      : null;
+    const low = snapshot.remaining === 0 || (ratio !== null && ratio <= 0.1);
+    const budget = snapshot.limit !== null && snapshot.remaining !== null
+      ? `${snapshot.remaining}/${snapshot.limit} remaining`
+      : 'rate-limit headers observed';
+    return [{
+      level: low ? 'warning' : 'info',
+      source: this.id,
+      message: `GitHub API budget: ${budget}${snapshot.resetAt ? `; resets ${snapshot.resetAt}` : ''}`,
+      details: {
+        limit: snapshot.limit,
+        remaining: snapshot.remaining,
+        used: snapshot.used,
+        resetAt: snapshot.resetAt,
+        resource: snapshot.resource,
+        retryAfterSeconds: snapshot.retryAfterSeconds,
+        observedAt: snapshot.observedAt,
+        providerCallsObserved: this.usage.snapshot().calls,
+      },
+    }];
   }
 
   private headers(token: string): Record<string, string> {
@@ -2426,7 +2639,8 @@ type GitHubWriteOperation =
   | 'work-item.create'
   | 'work-item.comment.create'
   | 'work-item.update-status'
-  | 'work-item.classification.update';
+  | 'work-item.classification.update'
+  | 'work-item.triage.update';
 
 const GITHUB_READ_OPERATION_PERMISSIONS: Readonly<Record<
   GitHubReadOperation,
@@ -2477,11 +2691,12 @@ const GITHUB_WRITE_OPERATION_PERMISSIONS: Readonly<Record<
   'pull-request.verify.rerun': { actions: 'write' },
   'pull-request.merge.integration': { contents: 'write' },
   'pull-request.merge.reconcile-preview': { contents: 'write' },
-  'pull-request.merge.promote': { contents: 'write' },
+  'pull-request.merge.promote': { contents: 'write', issues: 'read' },
   'work-item.create': { issues: 'write' },
   'work-item.comment.create': { issues: 'write' },
   'work-item.update-status': { issues: 'write' },
   'work-item.classification.update': { issues: 'write' },
+  'work-item.triage.update': { issues: 'write' },
 };
 
 function githubOperationRequirements(operation: RuntimeOperationName): {
@@ -2764,6 +2979,9 @@ function uniqueStrings(values: string[]): string[] {
 const WORK_ITEM_STATUS_PREFIX = 'status:';
 const WORK_ITEM_KIND_PREFIX = 'kind:';
 const WORK_ITEM_ORIGIN_PREFIX = 'origin:';
+const WORK_ITEM_SEVERITY_PREFIX = 'severity:';
+const WORK_ITEM_PRIORITY_PREFIX = 'priority:';
+const WORK_ITEM_PRODUCTION_BLOCKING_LABEL = 'production-blocking';
 
 const WORK_ITEM_STATUSES: readonly MutableWorkItemStatus[] = [
   'backlog', 'ready', 'in-progress', 'blocked', 'review', 'done',
@@ -2774,6 +2992,8 @@ const WORK_ITEM_KINDS: readonly MutableWorkItemKind[] = [
 const WORK_ITEM_ORIGINS: readonly MutableWorkItemOrigin[] = [
   'human', 'agent-audit', 'di-finding', 'ci', 'runtime', 'dependency', 'user-feedback',
 ];
+const WORK_ITEM_SEVERITIES: readonly MutableWorkItemSeverity[] = ['critical', 'high', 'medium', 'low'];
+const WORK_ITEM_PRIORITIES: readonly MutableWorkItemPriority[] = ['p0', 'p1', 'p2', 'p3'];
 
 function workItemStatusLabel(status: MutableWorkItemStatus): string {
   return `${WORK_ITEM_STATUS_PREFIX}${status}`;
@@ -2785,6 +3005,14 @@ function workItemKindLabel(kind: MutableWorkItemKind): string {
 
 function workItemOriginLabel(origin: MutableWorkItemOrigin): string {
   return `${WORK_ITEM_ORIGIN_PREFIX}${origin}`;
+}
+
+function workItemSeverityLabel(severity: MutableWorkItemSeverity): string {
+  return `${WORK_ITEM_SEVERITY_PREFIX}${severity}`;
+}
+
+function workItemPriorityLabel(priority: MutableWorkItemPriority): string {
+  return `${WORK_ITEM_PRIORITY_PREFIX}${priority}`;
 }
 
 function workItemStatusColor(status: MutableWorkItemStatus): string {
@@ -2816,6 +3044,14 @@ function workItemOriginColor(_origin: MutableWorkItemOrigin): string {
   return 'D4C5F9';
 }
 
+function workItemSeverityColor(severity: MutableWorkItemSeverity): string {
+  return ({ critical: 'CF222E', high: 'FB8F44', medium: 'BF8700', low: '0969DA' } as const)[severity];
+}
+
+function workItemPriorityColor(priority: MutableWorkItemPriority): string {
+  return ({ p0: 'CF222E', p1: 'FB8F44', p2: 'BF8700', p3: '0969DA' } as const)[priority];
+}
+
 function isWorkItemStatusLabel(label: string): boolean {
   return label.toLowerCase().startsWith(WORK_ITEM_STATUS_PREFIX);
 }
@@ -2828,8 +3064,21 @@ function isWorkItemOriginLabel(label: string): boolean {
   return label.toLowerCase().startsWith(WORK_ITEM_ORIGIN_PREFIX);
 }
 
+function isWorkItemSeverityLabel(label: string): boolean {
+  return label.toLowerCase().startsWith(WORK_ITEM_SEVERITY_PREFIX);
+}
+
+function isWorkItemPriorityLabel(label: string): boolean {
+  return label.toLowerCase().startsWith(WORK_ITEM_PRIORITY_PREFIX);
+}
+
+function isProductionBlockingLabel(label: string): boolean {
+  return label.toLowerCase() === WORK_ITEM_PRODUCTION_BLOCKING_LABEL;
+}
+
 function isWorkItemReservedLabel(label: string): boolean {
-  return isWorkItemStatusLabel(label) || isWorkItemKindLabel(label) || isWorkItemOriginLabel(label);
+  return isWorkItemStatusLabel(label) || isWorkItemKindLabel(label) || isWorkItemOriginLabel(label)
+    || isWorkItemSeverityLabel(label) || isWorkItemPriorityLabel(label) || isProductionBlockingLabel(label);
 }
 
 function issueLabelNames(issue: GitHubIssueResponse): string[] {
@@ -2878,6 +3127,8 @@ function workItemFromIssue(repository: string, issue: GitHubIssueResponse): Work
   const derived = deriveWorkItemStatus(issue);
   const kind = deriveClassification(labels, WORK_ITEM_KIND_PREFIX, WORK_ITEM_KINDS);
   const origin = deriveClassification(labels, WORK_ITEM_ORIGIN_PREFIX, WORK_ITEM_ORIGINS);
+  const severity = deriveClassification(labels, WORK_ITEM_SEVERITY_PREFIX, WORK_ITEM_SEVERITIES);
+  const priority = deriveClassification(labels, WORK_ITEM_PRIORITY_PREFIX, WORK_ITEM_PRIORITIES);
   return {
     repository,
     issueNumber: issue.number,
@@ -2891,6 +3142,11 @@ function workItemFromIssue(repository: string, issue: GitHubIssueResponse): Work
     kindSource: kind.source,
     origin: origin.value as WorkItemOrigin,
     originSource: origin.source,
+    severity: severity.value as WorkItemSeverity,
+    severitySource: severity.source as WorkItemTriageSource,
+    priority: priority.value as WorkItemPriority,
+    prioritySource: priority.source as WorkItemTriageSource,
+    productionBlocking: labels.some(isProductionBlockingLabel),
     labels,
     createdAt: issue.created_at,
     updatedAt: issue.updated_at,
@@ -2964,6 +3220,24 @@ function validRepositoryPath(value: string): string {
     throw { code: 'PERMISSION_DENIED', message: `Unsafe repository path: ${value}` };
   }
   return value;
+}
+
+async function boundedGitHubMap<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function boundedInteger(value: number, min: number, max: number): number {
@@ -3158,21 +3432,86 @@ function githubChecks(
   }));
 }
 
-async function githubResponseError(response: Response): Promise<unknown> {
+interface GitHubRateLimitHeaders {
+  limit: number | null;
+  remaining: number | null;
+  used: number | null;
+  resetAt: string | null;
+  resource: string | null;
+  retryAfterSeconds: number | null;
+}
+
+function integerHeader(headers: Headers, name: string): number | null {
+  const value = headers.get(name);
+  if (value === null || value.trim() === '') return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function githubRateLimitHeaders(headers: Headers): GitHubRateLimitHeaders | null {
+  const limit = integerHeader(headers, 'x-ratelimit-limit');
+  const remaining = integerHeader(headers, 'x-ratelimit-remaining');
+  const used = integerHeader(headers, 'x-ratelimit-used');
+  const resetSeconds = integerHeader(headers, 'x-ratelimit-reset');
+  const resource = headers.get('x-ratelimit-resource');
+  const retryAfterSeconds = integerHeader(headers, 'retry-after');
+  if (
+    limit === null
+    && remaining === null
+    && used === null
+    && resetSeconds === null
+    && resource === null
+    && retryAfterSeconds === null
+  ) return null;
+  return {
+    limit,
+    remaining,
+    used,
+    resetAt: resetSeconds === null ? null : new Date(resetSeconds * 1000).toISOString(),
+    resource,
+    retryAfterSeconds,
+  };
+}
+
+async function githubResponseError(response: Response): Promise<ConductorToolError> {
   const requestId = response.headers.get('x-github-request-id');
   const acceptedPermissions = response.headers.get('x-accepted-github-permissions');
+  const rateLimit = githubRateLimitHeaders(response.headers);
   const body = await response.json().catch(() => undefined) as { message?: string } | undefined;
-  const details: Record<string, string> = {};
+  const message = body?.message ?? `GitHub request failed with status ${response.status}`;
+  const rateLimited = response.status === 429
+    || rateLimit?.remaining === 0
+    || /rate limit/iu.test(message);
+  const normalized = normalizeToolError(
+    rateLimited ? { code: 'TRANSIENT', message } : { status: response.status, message },
+    'TOOL_UNAVAILABLE',
+    'github',
+  );
+  const code = rateLimited ? 'TRANSIENT' : normalized.code;
+  const details: Record<string, string | number | boolean | null> = {
+    httpStatus: response.status,
+  };
   if (requestId) details.requestId = requestId;
   if (acceptedPermissions) details.acceptedPermissions = acceptedPermissions;
-  return {
-    status: response.status,
-    message: body?.message ?? `GitHub request failed with status ${response.status}`,
-    diagnostics: Object.keys(details).length > 0 ? [{
-      level: 'error',
+  if (rateLimit) {
+    details.limit = rateLimit.limit;
+    details.remaining = rateLimit.remaining;
+    details.used = rateLimit.used;
+    details.resetAt = rateLimit.resetAt;
+    details.resource = rateLimit.resource;
+    details.retryAfterSeconds = rateLimit.retryAfterSeconds;
+  }
+  return new ConductorToolError({
+    code,
+    message,
+    retryable: rateLimited || normalized.retryable,
+    source: 'github',
+    diagnostics: [{
+      level: rateLimited ? 'warning' : 'error',
+      code,
       source: 'github',
-      message: 'GitHub request failed',
+      message: rateLimited ? 'GitHub API rate limit exhausted' : 'GitHub request failed',
       details,
-    }] : undefined,
-  };
+    }],
+  });
 }

@@ -37,7 +37,7 @@ const runtimeOperationSchema = z.enum([
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.close', 'pull-request.ready-for-review', 'pull-request.verify.rerun',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
-  'work-item.create', 'work-item.comment.create', 'work-item.update-status', 'work-item.classification.update',
+  'work-item.create', 'work-item.comment.create', 'work-item.update-status', 'work-item.classification.update', 'work-item.triage.update',
   'deployment.redeploy', 'deployment.git.create', 'deployment.promote', 'deployment.rollback', 'deployment.delete',
   'deployment.env.upsert', 'deployment.env.update', 'deployment.env.remove', 'deployment.vcr.create',
 ]);
@@ -78,7 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v6'),
+      catalogVersion: z.literal('conductor.catalog.v9'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -198,6 +198,8 @@ const workItemKindSchema = z.enum([
 const workItemOriginSchema = z.enum([
   'human', 'agent-audit', 'di-finding', 'ci', 'runtime', 'dependency', 'user-feedback', 'unknown',
 ]);
+const workItemSeveritySchema = z.enum(['critical', 'high', 'medium', 'low', 'unknown']);
+const workItemPrioritySchema = z.enum(['p0', 'p1', 'p2', 'p3', 'unknown']);
 const readReceiptSchema = z.object({ receipt: z.union([
   z.object({ ...receiptBase, status: z.literal('succeeded'), result: z.record(z.string(), z.unknown()) }),
   failedReceiptSchema,
@@ -952,7 +954,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
     server.registerTool('pull-request.merge.promote', {
       title: 'Promote an approved pull request',
-      description: 'Merge an exact approved Preview candidate into the repository default branch with a merge commit. Requires exact head SHA, exact base SHA, and an owner approval reference.',
+      description: 'Merge an exact approved Preview candidate into the repository default branch with a merge commit. Requires exact head/base identity, owner approval, and no open production-blocking work items unless every current blocker is explicitly named for override.',
       inputSchema: z.object({
         project: projectSchema,
         workContext: workContextSchema,
@@ -960,6 +962,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
         expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/i),
         approvalReference: z.string().min(1).max(500),
+        overrideBlockerIssueNumbers: z.array(z.number().int().positive()).max(100).optional(),
         mergeMethod: z.literal('merge').optional(),
         idempotencyKey: z.string().min(8).max(200),
       }),
@@ -984,6 +987,9 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         status: newWorkItemStatusSchema.default('backlog'),
         kind: workItemKindSchema.optional(),
         origin: workItemOriginSchema.optional(),
+        severity: workItemSeveritySchema.optional(),
+        priority: workItemPrioritySchema.optional(),
+        productionBlocking: z.boolean().optional(),
         labels: z.array(z.string().min(1).max(100)).max(20).optional(),
         idempotencyKey: z.string().min(8).max(200),
       }),
@@ -1030,6 +1036,27 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     }, async (input, extra) => {
       await requireScopedWrite(extra.authInfo, 'route-work', input.project);
       return result(await runtime.updateWorkItemClassification(input));
+    });
+
+    server.registerTool('work-item.triage.update', {
+      title: 'Update work item triage',
+      description: 'Update normalized severity, priority, and production-blocking release-gate state on one exact routed issue. unknown clears severity/priority; false clears the production gate. Status, kind, origin, and unrelated labels are preserved.',
+      inputSchema: z.object({
+        project: projectSchema,
+        issueNumber: z.number().int().positive(),
+        severity: workItemSeveritySchema.optional(),
+        priority: workItemPrioritySchema.optional(),
+        productionBlocking: z.boolean().optional(),
+        idempotencyKey: z.string().min(8).max(200),
+      }).refine((value) => value.severity !== undefined || value.priority !== undefined || value.productionBlocking !== undefined, {
+        message: 'At least one of severity, priority, or productionBlocking is required',
+      }),
+      outputSchema: mutationOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      await requireScopedWrite(extra.authInfo, 'route-work', input.project);
+      return result(await runtime.updateWorkItemTriage(input));
     });
 
     server.registerTool('work-item.update-status', {

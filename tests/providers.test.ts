@@ -28,19 +28,36 @@ test('GitHub provider reports missing authentication explicitly', async () => {
   assert.equal(checks[0]?.error?.code, 'AUTH_REQUIRED');
 });
 
-test('GitHub provider proves project-specific read and write permissions', async () => {
+test('GitHub provider proves project-specific read and write permissions and exposes the observed API budget', async () => {
   const requested: string[] = [];
+  const resetSeconds = 1_893_456_000;
   const provider = new GitHubRuntimeProvider({
     token: 'secret',
     bindings: [{ id: 'conductor', repository: 'pyralisxc/Conductor' }],
     fetch: async (input) => {
       requested.push(String(input));
       if (String(input).endsWith('/rate_limit')) {
-        return Response.json({ resources: {} });
+        return Response.json({ resources: {} }, {
+          headers: {
+            'x-ratelimit-limit': '5000',
+            'x-ratelimit-remaining': '4999',
+            'x-ratelimit-used': '1',
+            'x-ratelimit-reset': String(resetSeconds),
+            'x-ratelimit-resource': 'core',
+          },
+        });
       }
       return Response.json({
         full_name: 'pyralisxc/Conductor',
         permissions: { pull: true, push: false },
+      }, {
+        headers: {
+          'x-ratelimit-limit': '5000',
+          'x-ratelimit-remaining': '4998',
+          'x-ratelimit-used': '2',
+          'x-ratelimit-reset': String(resetSeconds),
+          'x-ratelimit-resource': 'core',
+        },
       });
     },
   });
@@ -48,9 +65,56 @@ test('GitHub provider proves project-specific read and write permissions', async
   const capabilities = await provider.getCapabilities();
   assert.equal(capabilities.find((item) => item.capability === 'github.read')?.available, true);
   const checks = await provider.preflightProject({ id: 'conductor' });
-  assert.equal(checks.find((check) => check.check === 'github.read')?.status, 'ready');
+  const readCheck = checks.find((check) => check.check === 'github.read');
+  assert.equal(readCheck?.status, 'ready');
   assert.equal(checks.find((check) => check.check === 'github.write')?.error?.code, 'PERMISSION_DENIED');
   assert.match(requested.at(-1) ?? '', /repos\/pyralisxc\/Conductor$/);
+  const budget = readCheck?.diagnostics.find((diagnostic) => diagnostic.message.startsWith('GitHub API budget:'));
+  assert.equal(budget?.details?.limit, 5000);
+  assert.equal(budget?.details?.remaining, 4998);
+  assert.equal(budget?.details?.used, 2);
+  assert.equal(budget?.details?.resource, 'core');
+  assert.equal(budget?.details?.providerCallsObserved, 2);
+  assert.equal(budget?.details?.resetAt, new Date(resetSeconds * 1000).toISOString());
+});
+
+test('GitHub provider treats exhausted API budget as transient and suppresses calls until reset', async () => {
+  const resetSeconds = Math.floor(Date.now() / 1000) + 3600;
+  let calls = 0;
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    bindings: [{ id: 'conductor', repository: 'pyralisxc/Conductor' }],
+    fetch: async (input) => {
+      calls += 1;
+      if (String(input).endsWith('/rate_limit')) return Response.json({ resources: {} });
+      return Response.json({ message: 'API rate limit exceeded for installation' }, {
+        status: 403,
+        headers: {
+          'x-github-request-id': 'rate-test',
+          'x-ratelimit-limit': '5000',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-used': '5000',
+          'x-ratelimit-reset': String(resetSeconds),
+          'x-ratelimit-resource': 'core',
+        },
+      });
+    },
+  });
+
+  await provider.getCapabilities();
+  const first = await provider.preflightProject({ id: 'conductor' });
+  assert.equal(first.every((check) => check.status === 'blocked'), true);
+  assert.equal(first[0]?.error?.code, 'TRANSIENT');
+  assert.equal(first[0]?.error?.retryable, true);
+  assert.equal(first[0]?.error?.diagnostics[0]?.details?.remaining, 0);
+  assert.equal(first[0]?.error?.diagnostics[0]?.details?.resetAt, new Date(resetSeconds * 1000).toISOString());
+  assert.equal(calls, 2);
+
+  const second = await provider.preflightProject({ id: 'conductor' });
+  assert.equal(second.every((check) => check.status === 'blocked'), true);
+  assert.equal(second[0]?.error?.code, 'TRANSIENT');
+  assert.match(second[0]?.error?.message ?? '', /exhausted until/);
+  assert.equal(calls, 2);
 });
 
 test('GitHub App credentials discover the repository installation and mint a repository-scoped token', async () => {
@@ -549,6 +613,83 @@ test('GitHub provider returns exact PR identity plus checks and workflow runs', 
   assert.equal(status.orchestration.shouldAct, false);
 });
 
+
+test('GitHub work-item candidate expansion bounds PR reads and skips settled merged verification evidence', async () => {
+  const issueNumber = 55;
+  const pullNumbers = [101, 102, 103, 104, 105, 106];
+  let activePullReads = 0;
+  let peakPullReads = 0;
+  const requests: string[] = [];
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { issues: 'read', pull_requests: 'read', checks: 'read', actions: 'read' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.includes(`/issues/${issueNumber}/timeline`)) {
+        return Response.json(pullNumbers.map((number) => ({
+          event: 'cross-referenced',
+          source: {
+            issue: {
+              number,
+              repository_url: 'https://api.github.com/repos/pyralisxc/Conductor',
+              pull_request: {},
+            },
+          },
+        })));
+      }
+      const match = url.match(/\/pulls\/(\d+)$/u);
+      if (match) {
+        activePullReads += 1;
+        peakPullReads = Math.max(peakPullReads, activePullReads);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        activePullReads -= 1;
+        const number = Number(match[1]);
+        return Response.json({
+          number,
+          html_url: `https://github.com/pyralisxc/Conductor/pull/${number}`,
+          state: 'closed',
+          draft: false,
+          merged: true,
+          mergeable: null,
+          mergeable_state: 'unknown',
+          head: { ref: `work/${number}`, sha: String(number).padStart(40, '0') },
+          base: { ref: 'preview', sha: 'b'.repeat(40) },
+          labels: [],
+        });
+      }
+      if (url.includes('/check-runs') || url.includes('/actions/runs?')) {
+        throw new Error('settled merged PR must not re-read verification evidence');
+      }
+      throw new Error(`Unexpected request ${url}`);
+    },
+  });
+
+  const candidates = await provider.listWorkItemPullRequests({
+    project: { id: 'pyralisxc/Conductor' },
+    issueNumber,
+  });
+  assert.equal(candidates.length, pullNumbers.length);
+  assert.equal(peakPullReads, 2);
+  assert.equal(candidates.every((candidate) => candidate.merged), true);
+  assert.equal(candidates.every((candidate) => candidate.checks.total === 0), true);
+  assert.equal(candidates.every((candidate) => candidate.workflowRuns.length === 0), true);
+  assert.equal(candidates.every((candidate) => candidate.orchestration.state === 'merged'), true);
+  assert.equal(requests.filter((url) => url.includes('/check-runs')).length, 0);
+  assert.equal(requests.filter((url) => url.includes('/actions/runs?')).length, 0);
+});
+
 test('GitHub provider updates PR labels without erasing unrelated labels', async () => {
   const requests: Array<{ method: string; body?: any }> = [];
   const provider = new GitHubRuntimeProvider({
@@ -672,7 +813,7 @@ test('GitHub provider separates integration merge from accepted-branch promotion
           kind: 'app-installation' as const,
           identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
           repository,
-          permissions: { contents: 'write' },
+          permissions: { contents: 'write', issues: 'read' },
         };
       },
     },
@@ -704,6 +845,7 @@ test('GitHub provider separates integration merge from accepted-branch promotion
       if (/\/repos\/pyralisxc\/CardForge$/u.test(url) && method === 'GET') return Response.json({
         full_name: 'pyralisxc/CardForge', default_branch: 'main',
       });
+      if (url.includes('/issues?state=open&labels=production-blocking&per_page=100') && method === 'GET') return Response.json([]);
       if (url.endsWith('/merge') && method === 'PUT') {
         mergeRequests.push(body);
         return Response.json({ merged: true, sha: 'd'.repeat(40), message: 'merged' });

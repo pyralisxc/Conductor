@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v6' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v9' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -47,6 +47,7 @@ export type MutationOperationName =
   | 'work-item.comment.create'
   | 'work-item.update-status'
   | 'work-item.classification.update'
+  | 'work-item.triage.update'
   | 'deployment.redeploy'
   | 'deployment.git.create'
   | 'deployment.promote'
@@ -136,6 +137,25 @@ export interface ProviderHealth {
   provider: string;
   health: 'ready' | 'degraded' | 'unavailable';
   error?: NormalizedToolError;
+}
+
+export interface ProviderUsageSnapshot {
+  provider: string;
+  calls: number;
+  duplicateReads: number;
+  requestBodyBytes: number;
+  reportedResponseBytes: number;
+  responsesWithUnknownBytes: number;
+  observedAt: string;
+}
+
+export interface ProviderUsageDelta {
+  provider: string;
+  calls: number;
+  duplicateReads: number;
+  requestBodyBytes: number;
+  reportedResponseBytes: number;
+  responsesWithUnknownBytes: number;
 }
 
 export interface CapabilityReport {
@@ -295,6 +315,8 @@ export interface WorkBootstrapProjection {
     production: DeploymentRecord | null;
     observedAt: string;
   } | null;
+  elapsedMs: number;
+  providerUsage: ProviderUsageDelta[];
   observedAt: string;
 }
 
@@ -363,6 +385,7 @@ export interface EvidenceBundleProjection {
   succeeded: number;
   failed: number;
   elapsedMs: number;
+  providerUsage: ProviderUsageDelta[];
   items: EvidenceBundleItemResult[];
   note: string;
 }
@@ -512,6 +535,8 @@ export interface LifecycleAdvanceProjection {
   stage: 'action-required' | 'external-wait' | 'verification-failed' | 'human-gate' | 'complete';
   summary: string;
   transitions: LifecycleTransitionRecord[];
+  elapsedMs: number;
+  providerUsage: ProviderUsageDelta[];
   previewProof: {
     branch: 'preview' | 'vercel-preview';
     commitSha: string;
@@ -926,6 +951,12 @@ export type WorkItemOrigin =
 export type MutableWorkItemOrigin = Exclude<WorkItemOrigin, 'unknown'>;
 export type WorkItemClassificationSource = 'label' | 'default' | 'conflict';
 
+export type WorkItemSeverity = 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+export type MutableWorkItemSeverity = Exclude<WorkItemSeverity, 'unknown'>;
+export type WorkItemPriority = 'p0' | 'p1' | 'p2' | 'p3' | 'unknown';
+export type MutableWorkItemPriority = Exclude<WorkItemPriority, 'unknown'>;
+export type WorkItemTriageSource = 'label' | 'default' | 'conflict';
+
 export interface WorkItemRecord {
   repository: string;
   issueNumber: number;
@@ -939,6 +970,11 @@ export interface WorkItemRecord {
   kindSource: WorkItemClassificationSource;
   origin: WorkItemOrigin;
   originSource: WorkItemClassificationSource;
+  severity: WorkItemSeverity;
+  severitySource: WorkItemTriageSource;
+  priority: WorkItemPriority;
+  prioritySource: WorkItemTriageSource;
+  productionBlocking: boolean;
   labels: string[];
   createdAt: string;
   updatedAt: string;
@@ -975,6 +1011,9 @@ export interface CreateWorkItemInput {
   status?: NewWorkItemStatus;
   kind?: WorkItemKind;
   origin?: WorkItemOrigin;
+  severity?: WorkItemSeverity;
+  priority?: WorkItemPriority;
+  productionBlocking?: boolean;
   labels?: string[];
   idempotencyKey: string;
 }
@@ -998,6 +1037,15 @@ export interface UpdateWorkItemClassificationInput {
   issueNumber: number;
   kind?: WorkItemKind;
   origin?: WorkItemOrigin;
+  idempotencyKey: string;
+}
+
+export interface UpdateWorkItemTriageInput {
+  project: ProjectReference;
+  issueNumber: number;
+  severity?: WorkItemSeverity;
+  priority?: WorkItemPriority;
+  productionBlocking?: boolean;
   idempotencyKey: string;
 }
 
@@ -1054,6 +1102,7 @@ export interface PromotePullRequestInput {
   expectedHeadSha: string;
   expectedBaseSha: string;
   approvalReference: string;
+  overrideBlockerIssueNumbers?: number[];
   mergeMethod?: PullRequestMergeMethod;
   idempotencyKey: string;
 }

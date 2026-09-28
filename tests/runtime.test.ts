@@ -588,6 +588,7 @@ test('repository acquisition has a dedicated read preflight and idempotent mutat
 test('lifecycle advance integrates verified work, proves Preview, prepares promotion, and stops at human gate', async () => {
   const integrationHead = 'a'.repeat(40), integrationMerge = 'b'.repeat(40), mainHead = 'c'.repeat(40);
   let merged = false, promotionCreated = 0;
+  let lifecycleProviderCalls = 0;
   const integrationPull = () => ({
     repository:'pyralisxc/Conductor',pullRequestNumber:10,url:'https://github.test/pull/10',state:merged?'closed':'open',draft:false,merged,mergeable:true,mergeableState:'clean',
     head:{ref:'work/169-test',sha:integrationHead},base:{ref:'preview',sha:'d'.repeat(40)},labels:[],checks:{total:1,pending:0,successful:1,failed:0,neutral:0,skipped:0,items:[]},workflowRuns:[],
@@ -596,11 +597,20 @@ test('lifecycle advance integrates verified work, proves Preview, prepares promo
   const promotionPull={repository:'pyralisxc/Conductor',pullRequestNumber:20,url:'https://github.test/pull/20',state:'open',draft:false,merged:false,mergeable:true,mergeableState:'clean',head:{ref:'preview',sha:integrationMerge},base:{ref:'main',sha:mainHead},labels:[],checks:{total:1,pending:0,successful:1,failed:0,neutral:0,skipped:0,items:[]},workflowRuns:[],orchestration:{state:'promotion-ready' as const,action:'promotion-gate' as const,shouldAct:true,summary:'ready for owner',resumeWhen:null,transition:{observed:false,previousHeadSha:null,previousState:null,headChanged:null,stateChanged:null,meaningful:null},seal:{requested:false,expectedPreSealCheckpoint:false,exactHeadVerificationRequired:false},signals:{pending:[],actionRequired:[],failed:[]}}};
   const sourceControlMutationProvider:any={id:'github',async getCapabilities(){return[];},async createBranch(){throw new Error('unused');},async bootstrapIntegrationBranch(){throw new Error('unused');},async deleteBranch(){throw new Error('unused');},async createCommit(){throw new Error('unused');},async createPullRequest(){promotionCreated++;return{repository:'pyralisxc/Conductor',pullRequestNumber:20,url:promotionPull.url};},async commentPullRequest(){throw new Error('unused');},async updatePullRequestLabels(){throw new Error('unused');},async mergeIntegrationPullRequest(){merged=true;return{repository:'pyralisxc/Conductor',pullRequestNumber:10,merged:true,mergeCommitSha:integrationMerge,message:'merged'};},async reconcilePreviewPullRequest(){throw new Error('unused');},async promotePullRequest(){throw new Error('Main must not be promoted by lifecycle.advance');}};
   const pullRequestProvider:any={id:'github-pr',async getCapabilities(){return[];},async getPullRequestStatus(input:any){return input.pullRequestNumber===20?promotionPull:integrationPull();}};
-  const workProvider:any={id:'github-work',async getCapabilities(){return[];},async getWorkItemStatus(){return{repository:'pyralisxc/Conductor',issueNumber:169,url:'https://github.test/issues/169',title:'Lifecycle',body:'',state:'open',status:'in-progress',statusSource:'label',kind:'feature',kindSource:'label',origin:'user-feedback',originSource:'label',labels:[],createdAt:'2026-09-27T00:00:00Z',updatedAt:'2026-09-27T00:00:00Z'};},async listWorkItems(){return{repository:'pyralisxc/Conductor',items:[],truncated:false};},async listWorkItemPullRequests(){return[integrationPull()];}};
-  const runtime=new ConductorToolRuntime({sourceControlMutationProvider,pullRequestProvider,workItemCandidateProvider:workProvider,repositoryBootstrapProvider:{id:'github-topology',async getCapabilities(){return[];},async getRepositoryBootstrap(){return{provider:'github' as const,repository:'pyralisxc/Conductor',defaultBranch:'main',defaultHead:mainHead,integrationBranch:'preview' as const,integrationHead:integrationMerge,observedAt:'2026-09-27T00:00:00Z'};}},deploymentProvider:{id:'vercel',async getCapabilities(){return[];},async getDeploymentStatus(){return{provider:'vercel' as const,project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:null,latestProductionAttempt:null,recent:[{id:'dpl_preview',url:null,state:'READY',target:null,createdAt:null,readyAt:null,sourceRevision:integrationMerge,sourceRef:'preview',sourceRepository:'Conductor',aliases:[],errorCode:null,errorMessage:null}],domains:[],observedAt:'2026-09-27T00:00:00Z'};}} as any,mutationExecutor:new IdempotentMutationExecutor({store:new InMemoryIdempotencyStore()})});
+  const workProvider:any={id:'github-work',async getCapabilities(){return[];},getUsageSnapshot(){return{provider:'github-work',calls:lifecycleProviderCalls,duplicateReads:0,requestBodyBytes:0,reportedResponseBytes:lifecycleProviderCalls*100,responsesWithUnknownBytes:0,observedAt:'2026-09-27T00:00:00Z'};},async getWorkItemStatus(){lifecycleProviderCalls++;return{repository:'pyralisxc/Conductor',issueNumber:169,url:'https://github.test/issues/169',title:'Lifecycle',body:'',state:'open',status:'in-progress',statusSource:'label',kind:'feature',kindSource:'label',origin:'user-feedback',originSource:'label',labels:[],createdAt:'2026-09-27T00:00:00Z',updatedAt:'2026-09-27T00:00:00Z'};},async listWorkItems(){return{repository:'pyralisxc/Conductor',items:[],truncated:false};},async listWorkItemPullRequests(){lifecycleProviderCalls++;return[integrationPull()];}};
+  const runtime=new ConductorToolRuntime({providers:[workProvider],sourceControlMutationProvider,pullRequestProvider,workItemCandidateProvider:workProvider,repositoryBootstrapProvider:{id:'github-topology',async getCapabilities(){return[];},async getRepositoryBootstrap(){return{provider:'github' as const,repository:'pyralisxc/Conductor',defaultBranch:'main',defaultHead:mainHead,integrationBranch:'preview' as const,integrationHead:integrationMerge,observedAt:'2026-09-27T00:00:00Z'};}},deploymentProvider:{id:'vercel',async getCapabilities(){return[];},async getDeploymentStatus(){return{provider:'vercel' as const,project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:null,latestProductionAttempt:null,recent:[{id:'dpl_preview',url:null,state:'READY',target:null,createdAt:null,readyAt:null,sourceRevision:integrationMerge,sourceRef:'preview',sourceRepository:'Conductor',aliases:[],errorCode:null,errorMessage:null}],domains:[],observedAt:'2026-09-27T00:00:00Z'};}} as any,mutationExecutor:new IdempotentMutationExecutor({store:new InMemoryIdempotencyStore()})});
   const receipt=await runtime.advanceLifecycle({project:{id:'Conductor',repository:'pyralisxc/Conductor'},issueNumber:169,maxPolls:0,pollIntervalMs:0,idempotencyKey:'lifecycle-test-169'});
   assert.equal(receipt.status,'succeeded'); if(receipt.status!=='succeeded')return;
   assert.equal(receipt.result.stage,'human-gate'); assert.equal(receipt.result.gate?.kind,'human-approval'); assert.equal(receipt.result.gate?.pullRequestNumber,20); assert.equal(receipt.result.previewProof?.deploymentId,'dpl_preview'); assert.equal(promotionCreated,1);
+  assert.equal(typeof receipt.result.elapsedMs, 'number');
+  assert.deepEqual(receipt.result.providerUsage, [{
+    provider: 'github-work',
+    calls: 2,
+    duplicateReads: 0,
+    requestBodyBytes: 0,
+    reportedResponseBytes: 200,
+    responsesWithUnknownBytes: 0,
+  }]);
 });
 
 
@@ -756,10 +766,23 @@ test('lifecycle advance recognizes an exact current Preview head that was alread
 test('evidence bundle enforces concurrency, preserves order, and isolates partial failure', async () => {
   let active = 0;
   let peak = 0;
+  let providerCalls = 0;
   const provider: any = {
     id: 'vercel',
     async getCapabilities() { return []; },
+    getUsageSnapshot() {
+      return {
+        provider: 'vercel',
+        calls: providerCalls,
+        duplicateReads: 0,
+        requestBodyBytes: 0,
+        reportedResponseBytes: providerCalls * 100,
+        responsesWithUnknownBytes: 0,
+        observedAt: '2026-09-27T00:00:00Z',
+      };
+    },
     async getDeploymentStatus(input: any) {
+      providerCalls += 1;
       active += 1;
       peak = Math.max(peak, active);
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -776,7 +799,7 @@ test('evidence bundle enforces concurrency, preserves order, and isolates partia
       };
     },
   };
-  const runtime = new ConductorToolRuntime({ deploymentProvider: provider });
+  const runtime = new ConductorToolRuntime({ providers: [provider], deploymentProvider: provider });
   const receipt = await runtime.evidenceBundle({
     concurrency: 2,
     items: [
@@ -794,6 +817,14 @@ test('evidence bundle enforces concurrency, preserves order, and isolates partia
   assert.equal(receipt.result.items[1]?.error?.code, 'TRANSIENT');
   assert.equal(receipt.result.succeeded, 3);
   assert.equal(receipt.result.failed, 1);
+  assert.deepEqual(receipt.result.providerUsage, [{
+    provider: 'vercel',
+    calls: 4,
+    duplicateReads: 0,
+    requestBodyBytes: 0,
+    reportedResponseBytes: 400,
+    responsesWithUnknownBytes: 0,
+  }]);
 });
 
 test('evidence bundle refuses duplicate keys before provider work', async () => {
