@@ -47,11 +47,13 @@ import type {
   DeploymentProjectStatus,
   DeploymentLogs,
   VercelProjectInput, VercelReadProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput,
+  ProviderUsageSnapshot,
 } from '../runtime/types.js';
 
 export interface RuntimeCapabilityProvider {
   readonly id: string;
   getCapabilities(): Promise<CapabilityAvailability[]>;
+  getUsageSnapshot?(): ProviderUsageSnapshot;
 }
 
 export interface ProjectPreflightProvider extends RuntimeCapabilityProvider {

@@ -68,6 +68,7 @@ import {
   type GitHubCredential,
   type GitHubCredentialProvider,
 } from './github-auth.js';
+import { ProviderUsageTracker } from './usage.js';
 
 interface GitHubRepositoryResponse {
   full_name: string;
@@ -257,7 +258,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
   private readonly allowedOwners: ReadonlyMap<string, string>;
   private readonly apiBaseUrl: string;
   private readonly fetch: typeof globalThis.fetch;
-  private providerCallCount = 0;
+  private readonly usage: ProviderUsageTracker;
   private rateLimit: GitHubRateLimitSnapshot | null = null;
 
   constructor(options: GitHubRuntimeProviderOptions) {
@@ -271,14 +272,18 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     this.allowedOwners = new Map((options.allowedOwners ?? []).map((owner) => [owner.toLowerCase(), owner]));
     this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.github.com').replace(/\/$/, '');
     const rawFetch = options.fetch ?? globalThis.fetch;
+    this.usage = new ProviderUsageTracker(this.id);
     this.fetch = async (input, init) => {
       const guard = this.rateLimitGuard();
       if (guard) throw guard;
-      this.providerCallCount += 1;
-      const response = await rawFetch(input, init);
+      const response = await this.usage.fetch(rawFetch, input, init);
       this.observeRateLimit(response);
       return response;
     };
+  }
+
+  getUsageSnapshot() {
+    return this.usage.snapshot();
   }
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
@@ -2294,7 +2299,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
           used: snapshot.used,
           resetAt: snapshot.resetAt,
           resource: snapshot.resource,
-          providerCallsObserved: this.providerCallCount,
+          providerCallsObserved: this.usage.snapshot().calls,
         },
       }],
     });
@@ -2322,7 +2327,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         resource: snapshot.resource,
         retryAfterSeconds: snapshot.retryAfterSeconds,
         observedAt: snapshot.observedAt,
-        providerCallsObserved: this.providerCallCount,
+        providerCallsObserved: this.usage.snapshot().calls,
       },
     }];
   }

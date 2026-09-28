@@ -756,10 +756,23 @@ test('lifecycle advance recognizes an exact current Preview head that was alread
 test('evidence bundle enforces concurrency, preserves order, and isolates partial failure', async () => {
   let active = 0;
   let peak = 0;
+  let providerCalls = 0;
   const provider: any = {
     id: 'vercel',
     async getCapabilities() { return []; },
+    getUsageSnapshot() {
+      return {
+        provider: 'vercel',
+        calls: providerCalls,
+        duplicateReads: 0,
+        requestBodyBytes: 0,
+        reportedResponseBytes: providerCalls * 100,
+        responsesWithUnknownBytes: 0,
+        observedAt: '2026-09-27T00:00:00Z',
+      };
+    },
     async getDeploymentStatus(input: any) {
+      providerCalls += 1;
       active += 1;
       peak = Math.max(peak, active);
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -776,7 +789,7 @@ test('evidence bundle enforces concurrency, preserves order, and isolates partia
       };
     },
   };
-  const runtime = new ConductorToolRuntime({ deploymentProvider: provider });
+  const runtime = new ConductorToolRuntime({ providers: [provider], deploymentProvider: provider });
   const receipt = await runtime.evidenceBundle({
     concurrency: 2,
     items: [
@@ -794,6 +807,14 @@ test('evidence bundle enforces concurrency, preserves order, and isolates partia
   assert.equal(receipt.result.items[1]?.error?.code, 'TRANSIENT');
   assert.equal(receipt.result.succeeded, 3);
   assert.equal(receipt.result.failed, 1);
+  assert.deepEqual(receipt.result.providerUsage, [{
+    provider: 'vercel',
+    calls: 4,
+    duplicateReads: 0,
+    requestBodyBytes: 0,
+    reportedResponseBytes: 400,
+    responsesWithUnknownBytes: 0,
+  }]);
 });
 
 test('evidence bundle refuses duplicate keys before provider work', async () => {
