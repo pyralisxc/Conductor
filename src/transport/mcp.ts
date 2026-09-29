@@ -33,7 +33,7 @@ const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
   'work.bootstrap', 'repository.audit', 'evidence.bundle', 'development.status', 'pull-request.status', 'source.discover', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
   'repository.acquire', 'lifecycle.advance', 'lifecycle.resume',
-  'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create', 'git.push',
+  'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create', 'git.workflow.commit', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.close', 'pull-request.ready-for-review', 'pull-request.verify.rerun',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
@@ -78,7 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v10'),
+      catalogVersion: z.literal('conductor.catalog.v11'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -809,6 +809,29 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.createCommit(withoutWorkContext(input)));
     });
+
+    if (runtime.workflowCommitEnabled) {
+      server.registerTool('git.workflow.commit', {
+        title: 'Commit a GitHub Actions workflow',
+        description: 'Create or edit one .github/workflows/*.yml|yaml file on an exact work/* branch. Requires provable GitHub App contents:write + workflows:write and returns bounded security-review findings. It never writes Preview/Main directly.',
+        inputSchema: z.object({
+          project: projectSchema,
+          workContext: workContextSchema,
+          branch: z.string().min(6),
+          expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+          message: z.string().min(1).max(500),
+          path: z.string().regex(/^\.github\/workflows\/[^/]+\.(?:ya?ml)$/iu),
+          content: z.string().min(1).max(1024 * 1024),
+          idempotencyKey: z.string().min(8).max(200),
+        }),
+        outputSchema: mutationOutputSchema,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        _meta: { securitySchemes: oauthWriteSecurity },
+      }, async (input, extra) => {
+        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        return result(await runtime.createWorkflowCommit(withoutWorkContext(input)));
+      });
+    }
 
     server.registerTool('pull-request.create', {
       title: 'Open a pull request',

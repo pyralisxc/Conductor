@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v10' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v11' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -33,6 +33,7 @@ export type MutationOperationName =
   | 'git.integration.bootstrap'
   | 'git.branch.delete'
   | 'git.commit.create'
+  | 'git.workflow.commit'
   | 'git.push'
   | 'pull-request.create'
   | 'pull-request.comment.create'
@@ -654,6 +655,38 @@ export interface CreateCommitInput {
   message: string;
   files: CreateCommitFile[];
   idempotencyKey: string;
+}
+
+export type WorkflowReviewSeverity = 'info' | 'warning' | 'high';
+
+export interface WorkflowReviewFinding {
+  code: string;
+  severity: WorkflowReviewSeverity;
+  summary: string;
+  line?: number;
+}
+
+export interface CreateWorkflowCommitInput {
+  project: ProjectReference;
+  branch: string;
+  expectedHeadSha: string;
+  message: string;
+  path: string;
+  content: string;
+  idempotencyKey: string;
+}
+
+export interface WorkflowCommitResult {
+  repository: string;
+  branch: string;
+  commitSha: string;
+  path: string;
+  findings: WorkflowReviewFinding[];
+  permissionSummary: {
+    required: ['contents:write', 'workflows:write'];
+    declaredPermissions: boolean;
+    findingCount: number;
+  };
 }
 
 export interface CreatePullRequestInput {

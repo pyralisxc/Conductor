@@ -64,6 +64,7 @@ import {
   type BootstrapIntegrationBranchInput,
   type DeleteBranchInput,
   type CreateCommitInput,
+  type CreateWorkflowCommitInput,
   type CreatePullRequestInput,
   type CommentPullRequestInput,
   type GetPullRequestStatusInput,
@@ -241,6 +242,12 @@ const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'pull-request.merge.promote', description: 'Promote an exact explicitly approved PR candidate into the repository default branch.', mutates: true },
 ];
 
+const WORKFLOW_MUTATION_DEFINITION: ToolDefinition = {
+  name: 'git.workflow.commit',
+  description: 'Create or edit one GitHub Actions workflow on an exact work/* branch after proving workflows:write and returning explicit security-review findings.',
+  mutates: true,
+};
+
 const CORE_PREFLIGHT_OPERATIONS = new Set<import('./types.js').RuntimeOperationName>([
   'capabilities',
   'preflight_project',
@@ -353,6 +360,10 @@ export class ConductorToolRuntime {
 
   get sourceControlMutationsEnabled(): boolean {
     return Boolean(this.sourceControlMutationProvider && this.mutationExecutor);
+  }
+
+  get workflowCommitEnabled(): boolean {
+    return Boolean(this.sourceControlMutationProvider?.createWorkflowCommit && this.mutationExecutor);
   }
 
   get pullRequestLifecycleMutationsEnabled(): boolean {
@@ -1548,6 +1559,14 @@ export class ConductorToolRuntime {
     });
   }
 
+  async createWorkflowCommit(input: CreateWorkflowCommitInput) {
+    return await this.executeMutation(input, 'git.workflow.commit', async (provider) => {
+      if (!provider.createWorkflowCommit) throw { code: 'TOOL_UNAVAILABLE', message: 'GitHub Actions workflow authoring is not enabled' };
+      const result = await provider.createWorkflowCommit(input);
+      return { result, identifiers: { branch: result.branch, commitSha: result.commitSha } };
+    });
+  }
+
   async createPullRequest(input: CreatePullRequestInput) {
     return await this.executeMutation(input, 'pull-request.create', async (provider) => {
       const result = await provider.createPullRequest(input);
@@ -1636,6 +1655,7 @@ export class ConductorToolRuntime {
       ...(this.vercelMutationEnabled ? VERCEL_MUTATION_DEFINITIONS : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
       ...(this.sourceControlMutationsEnabled ? MUTATION_DEFINITIONS : []),
+      ...(this.workflowCommitEnabled ? [WORKFLOW_MUTATION_DEFINITION] : []),
       ...(this.lifecycleAdvanceEnabled || this.lifecycleResumeEnabled ? LIFECYCLE_MUTATION_DEFINITIONS.filter((item) => item.name === 'lifecycle.advance' ? this.lifecycleAdvanceEnabled : this.lifecycleResumeEnabled) : []),
       ...(this.pullRequestLifecycleMutationsEnabled ? PULL_REQUEST_LIFECYCLE_MUTATION_DEFINITIONS : []),
       ...(this.workItemMutationsEnabled ? WORK_ITEM_MUTATION_DEFINITIONS : []),

