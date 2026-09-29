@@ -135,7 +135,7 @@ test('Vercel account connection resolves only the selected installation and fail
   assert.ok(seen.every(value => value === 'icfg_A:team_A'));
 });
 
-test('unbound repository reads use only one connected team and verified Git linkage; writes remain bound', async () => {
+test('unbound repository reads and bounded writes use one connected team and verified Git linkage', async () => {
   const requests: { path: string; team: string | null; method: string }[] = [];
   let connected = true;
   const instance = new VercelDeploymentProvider({
@@ -153,7 +153,8 @@ test('unbound repository reads use only one connected team and verified Git link
       if (url.pathname === '/v6/deployments') return Response.json({ deployments: [{ id: 'dpl_live', projectId: 'prj_di', target: 'production', readyState: 'READY' }] });
       if (url.pathname === '/v9/projects/prj_di/domains') return Response.json({ domains: [] });
       if (url.pathname === '/v10/projects/prj_di/env') return Response.json({ envs: [{ id: 'env_1', key: 'TOKEN', value: 'private-value', target: ['production'] }] });
-      if (url.pathname === '/v13/deployments/dpl_live') return Response.json({ id: 'dpl_live', projectId: 'prj_di' });
+      if (url.pathname === '/v13/deployments/dpl_live') return Response.json({ id: 'dpl_live', projectId: 'prj_di', target: 'preview', readyState: 'READY' });
+      if (url.pathname === '/v13/deployments' && init?.method === 'POST') return Response.json({ id: 'dpl_retry', readyState: 'BUILDING' });
       if (url.pathname === '/v3/deployments/dpl_live/events') return Response.json([]);
       return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
     },
@@ -165,9 +166,11 @@ test('unbound repository reads use only one connected team and verified Git link
   assert.equal((await instance.getDeploymentLogs({ project, deploymentId: 'dpl_live' })).projectId, 'prj_di');
   assert.doesNotMatch(JSON.stringify(await instance.listEnvironment({ project })), /private-value/u);
   assert.equal(requests.every(request => request.team === 'team_A' && request.method === 'GET'), true);
-  assert.equal((await instance.preflightOperation(project, 'deployment.env.upsert'))?.[0]?.error?.code, 'NOT_FOUND');
-  await assert.rejects(instance.redeploy({ project, deploymentId: 'dpl_live', idempotencyKey: 'read-cannot-write' }), (error: unknown) => (error as { code?: string }).code === 'NOT_FOUND');
-  assert.equal(requests.every(request => request.method === 'GET'), true);
+  assert.notEqual((await instance.preflightOperation(project, 'deployment.env.upsert'))?.[0]?.status, 'blocked');
+  const redeployed = await instance.redeploy({ project, deploymentId: 'dpl_live', idempotencyKey: 'uniquely-linked-redeploy' });
+  assert.equal(redeployed.deploymentId, 'dpl_retry');
+  assert.equal(requests.every(request => request.team === 'team_A'), true);
+  assert.equal(requests.filter(request => request.method === 'POST').length, 1);
   connected = false;
   assert.equal((await instance.preflightOperation(project, 'deployment.status'))?.[0]?.error?.code, 'AUTH_REQUIRED');
 });
