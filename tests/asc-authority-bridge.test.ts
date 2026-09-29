@@ -11,11 +11,13 @@ import {
   ConductorToolRuntime,
   IdempotentMutationExecutor,
   InMemoryIdempotencyStore,
+  type AscDelegationVerifier
+} from '../src/index.js';
+import {
   WorkScopeAuthorizer,
-  type AscDelegationVerifier,
   type WorkScopeGrant,
   type WorkScopeStore
-} from '../src/index.js';
+} from '../src/transport/work-scope.js';
 
 function receipt(input: {
   capabilityId: string;
