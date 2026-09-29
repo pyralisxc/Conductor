@@ -64,6 +64,7 @@ import {
   type BootstrapIntegrationBranchInput,
   type DeleteBranchInput,
   type CreateCommitInput,
+  type CreateWorkflowCommitInput,
   type CreatePullRequestInput,
   type CommentPullRequestInput,
   type GetPullRequestStatusInput,
@@ -94,7 +95,7 @@ import {
   type GetDeploymentLogsInput,
   type DeploymentProjectStatus,
   type DeploymentLogs,
-  type VercelProjectInput, type VercelReadProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput, type VercelVcrRepositoryInput, type VercelVcrCreateInput,
+  type VercelProjectInput, type VercelReadProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput, type VercelVcrRepositoryInput, type VercelVcrCreateInput, type VercelVcrListInput, type VercelVcrImageListInput, type VercelVcrImageDeleteInput,
 } from './types.js';
 import { IdempotentMutationExecutor } from './idempotency.js';
 
@@ -190,6 +191,8 @@ const VERCEL_AUDIT_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.runtime-logs', description: 'Read bounded redacted runtime logs for one exact deployment.', mutates: false },
   { name: 'deployment.env.list', description: 'List project variable metadata without secret values.', mutates: false },
   { name: 'deployment.vcr.get', description: 'Read one exact Vercel Container Registry repository in the bound project.', mutates: false },
+  { name: 'deployment.vcr.list', description: 'List bounded VCR repository metadata for the exact project and report capacity/headroom support explicitly.', mutates: false },
+  { name: 'deployment.vcr.images.list', description: 'List bounded image/tag/digest metadata for one exact VCR repository without downloading image contents.', mutates: false },
 ];
 const VERCEL_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.redeploy', description: 'Redeploy one exact bound deployment.', mutates: true },
@@ -201,6 +204,7 @@ const VERCEL_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.env.update', description: 'Update one exact project environment variable.', mutates: true },
   { name: 'deployment.env.remove', description: 'Remove one exact project environment variable.', mutates: true },
   { name: 'deployment.vcr.create', description: 'Create one exact Vercel Container Registry repository in the bound project.', mutates: true },
+  { name: 'deployment.vcr.image.delete', description: 'Delete one exact VCR image only after Conductor proves exact identity and that no protected current deployment references it; otherwise fail closed.', mutates: true },
 ];
 
 const WORK_ITEM_READ_DEFINITIONS: readonly ToolDefinition[] = [
@@ -240,6 +244,12 @@ const MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'pull-request.merge.reconcile-preview', description: 'Reconcile the exact accepted default-branch ancestry back into Preview with a merge commit.', mutates: true },
   { name: 'pull-request.merge.promote', description: 'Promote an exact explicitly approved PR candidate into the repository default branch.', mutates: true },
 ];
+
+const WORKFLOW_MUTATION_DEFINITION: ToolDefinition = {
+  name: 'git.workflow.commit',
+  description: 'Create or edit one GitHub Actions workflow on an exact work/* branch after proving workflows:write and returning explicit security-review findings.',
+  mutates: true,
+};
 
 const CORE_PREFLIGHT_OPERATIONS = new Set<import('./types.js').RuntimeOperationName>([
   'capabilities',
@@ -353,6 +363,10 @@ export class ConductorToolRuntime {
 
   get sourceControlMutationsEnabled(): boolean {
     return Boolean(this.sourceControlMutationProvider && this.mutationExecutor);
+  }
+
+  get workflowCommitEnabled(): boolean {
+    return Boolean(this.sourceControlMutationProvider?.createWorkflowCommit && this.mutationExecutor);
   }
 
   get pullRequestLifecycleMutationsEnabled(): boolean {
@@ -1189,6 +1203,8 @@ export class ConductorToolRuntime {
   async deploymentRuntimeLogs(input: VercelRuntimeLogsInput) { return this.vercelRead('deployment.runtime-logs', input, (provider, project) => provider.getRuntimeLogs({ ...input, project })); }
   async deploymentEnvironmentList(input: VercelReadProjectInput) { return this.vercelRead('deployment.env.list', input, (provider, project) => provider.listEnvironment({ ...input, project })); }
   async deploymentVcrGet(input: VercelVcrRepositoryInput) { return this.vercelRead('deployment.vcr.get', input, (provider, project) => provider.getVcrRepository({ ...input, project })); }
+  async deploymentVcrList(input: VercelVcrListInput) { return this.vercelRead('deployment.vcr.list', input, (provider, project) => provider.listVcrRepositories({ ...input, project })); }
+  async deploymentVcrImagesList(input: VercelVcrImageListInput) { return this.vercelRead('deployment.vcr.images.list', input, (provider, project) => provider.listVcrImages({ ...input, project })); }
 
   private async vercelMutation<Result>(operation: import('./types.js').MutationOperationName, input: VercelProjectInput & { idempotencyKey: string }, mutate: (provider: VercelOperationsProvider, project: ProjectReference) => Promise<Result>): Promise<ExecutionReceipt<Result>> {
     const project = this.resolveProjectReference(input.project);
@@ -1211,6 +1227,7 @@ export class ConductorToolRuntime {
   async vercelEnvUpdate(input: VercelEnvEditInput) { return this.vercelMutation('deployment.env.update', input, (provider, project) => provider.updateEnvironment({ ...input, project })); }
   async vercelEnvRemove(input: VercelEnvRemoveInput) { return this.vercelMutation('deployment.env.remove', input, (provider, project) => provider.removeEnvironment({ ...input, project })); }
   async vercelVcrCreate(input: VercelVcrCreateInput) { return this.vercelMutation('deployment.vcr.create', input, (provider, project) => provider.createVcrRepository({ ...input, project })); }
+  async vercelVcrImageDelete(input: VercelVcrImageDeleteInput) { return this.vercelMutation('deployment.vcr.image.delete', input, (provider, project) => provider.deleteVcrImage({ ...input, project })); }
 
   async workItemStatus(input: GetWorkItemStatusInput): Promise<ExecutionReceipt<WorkItemRecord>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
@@ -1548,6 +1565,14 @@ export class ConductorToolRuntime {
     });
   }
 
+  async createWorkflowCommit(input: CreateWorkflowCommitInput) {
+    return await this.executeMutation(input, 'git.workflow.commit', async (provider) => {
+      if (!provider.createWorkflowCommit) throw { code: 'TOOL_UNAVAILABLE', message: 'GitHub Actions workflow authoring is not enabled' };
+      const result = await provider.createWorkflowCommit(input);
+      return { result, identifiers: { branch: result.branch, commitSha: result.commitSha } };
+    });
+  }
+
   async createPullRequest(input: CreatePullRequestInput) {
     return await this.executeMutation(input, 'pull-request.create', async (provider) => {
       const result = await provider.createPullRequest(input);
@@ -1636,6 +1661,7 @@ export class ConductorToolRuntime {
       ...(this.vercelMutationEnabled ? VERCEL_MUTATION_DEFINITIONS : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
       ...(this.sourceControlMutationsEnabled ? MUTATION_DEFINITIONS : []),
+      ...(this.workflowCommitEnabled ? [WORKFLOW_MUTATION_DEFINITION] : []),
       ...(this.lifecycleAdvanceEnabled || this.lifecycleResumeEnabled ? LIFECYCLE_MUTATION_DEFINITIONS.filter((item) => item.name === 'lifecycle.advance' ? this.lifecycleAdvanceEnabled : this.lifecycleResumeEnabled) : []),
       ...(this.pullRequestLifecycleMutationsEnabled ? PULL_REQUEST_LIFECYCLE_MUTATION_DEFINITIONS : []),
       ...(this.workItemMutationsEnabled ? WORK_ITEM_MUTATION_DEFINITIONS : []),

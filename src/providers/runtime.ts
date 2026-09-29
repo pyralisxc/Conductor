@@ -8,6 +8,8 @@ import type {
   BootstrapIntegrationBranchInput,
   DeleteBranchInput,
   CreateCommitInput,
+  CreateWorkflowCommitInput,
+  WorkflowCommitResult,
   CreatePullRequestInput,
   CommentPullRequestInput,
   GetPullRequestStatusInput,
@@ -46,7 +48,7 @@ import type {
   GetDeploymentLogsInput,
   DeploymentProjectStatus,
   DeploymentLogs,
-  VercelProjectInput, VercelReadProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput,
+  VercelProjectInput, VercelReadProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput, VercelVcrListInput, VercelVcrImageListInput, VercelVcrImageDeleteInput,
   ProviderUsageSnapshot,
 } from '../runtime/types.js';
 
@@ -124,7 +126,10 @@ export interface VercelOperationsProvider extends DeploymentReadProvider {
   getRuntimeLogs(input: VercelRuntimeLogsInput): Promise<Record<string, unknown>>;
   listEnvironment(input: VercelReadProjectInput): Promise<Record<string, unknown>>;
   getVcrRepository(input: VercelVcrRepositoryInput): Promise<Record<string, unknown>>;
+  listVcrRepositories(input: VercelVcrListInput): Promise<Record<string, unknown>>;
+  listVcrImages(input: VercelVcrImageListInput): Promise<Record<string, unknown>>;
   createVcrRepository(input: VercelVcrCreateInput): Promise<Record<string, unknown>>;
+  deleteVcrImage(input: VercelVcrImageDeleteInput): Promise<Record<string, unknown>>;
   redeploy(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
   createGitDeployment(input: VercelGitDeploymentInput): Promise<Record<string, unknown>>;
   promote(input: VercelDeploymentInput): Promise<Record<string, unknown>>;
@@ -152,6 +157,7 @@ export interface SourceControlMutationProvider extends RuntimeCapabilityProvider
   }>;
   deleteBranch(input: DeleteBranchInput): Promise<{ repository: string; branch: string; commitSha: string; deleted: true; containedIn: string }>;
   createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }>;
+  createWorkflowCommit?(input: CreateWorkflowCommitInput): Promise<WorkflowCommitResult>;
   createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }>;
   commentPullRequest(input: CommentPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; commentId: string; url: string }>;
   updatePullRequestLabels(input: UpdatePullRequestLabelsInput): Promise<{ repository: string; pullRequestNumber: number; labels: string[] }>;

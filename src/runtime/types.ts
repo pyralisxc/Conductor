@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v10' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v11' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -21,7 +21,9 @@ export type ToolOperationName =
   | 'deployment.audit'
   | 'deployment.runtime-logs'
   | 'deployment.env.list'
-  | 'deployment.vcr.get';
+  | 'deployment.vcr.get'
+  | 'deployment.vcr.list'
+  | 'deployment.vcr.images.list';
 
 export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
@@ -33,6 +35,7 @@ export type MutationOperationName =
   | 'git.integration.bootstrap'
   | 'git.branch.delete'
   | 'git.commit.create'
+  | 'git.workflow.commit'
   | 'git.push'
   | 'pull-request.create'
   | 'pull-request.comment.create'
@@ -56,7 +59,8 @@ export type MutationOperationName =
   | 'deployment.env.upsert'
   | 'deployment.env.update'
   | 'deployment.env.remove'
-  | 'deployment.vcr.create';
+  | 'deployment.vcr.create'
+  | 'deployment.vcr.image.delete';
 
 export type RuntimeOperationName =
   | ToolOperationName
@@ -656,6 +660,38 @@ export interface CreateCommitInput {
   idempotencyKey: string;
 }
 
+export type WorkflowReviewSeverity = 'info' | 'warning' | 'high';
+
+export interface WorkflowReviewFinding {
+  code: string;
+  severity: WorkflowReviewSeverity;
+  summary: string;
+  line?: number;
+}
+
+export interface CreateWorkflowCommitInput {
+  project: ProjectReference;
+  branch: string;
+  expectedHeadSha: string;
+  message: string;
+  path: string;
+  content: string;
+  idempotencyKey: string;
+}
+
+export interface WorkflowCommitResult {
+  repository: string;
+  branch: string;
+  commitSha: string;
+  path: string;
+  findings: WorkflowReviewFinding[];
+  permissionSummary: {
+    required: ['contents:write', 'workflows:write'];
+    declaredPermissions: boolean;
+    findingCount: number;
+  };
+}
+
 export interface CreatePullRequestInput {
   project: ProjectReference;
   head: string;
@@ -1191,3 +1227,10 @@ export interface VercelEnvRemoveInput extends VercelProjectInput { envId: string
 export interface VercelRuntimeLogsInput extends VercelReadProjectInput { deploymentId: string; limit?: number }
 export interface VercelVcrRepositoryInput extends VercelProjectInput { name: string }
 export interface VercelVcrCreateInput extends VercelVcrRepositoryInput { idempotencyKey: string }
+export interface VercelVcrListInput extends VercelProjectInput { limit?: number; cursor?: string }
+export interface VercelVcrImageListInput extends VercelVcrRepositoryInput { limit?: number; cursor?: string; untagged?: boolean }
+export interface VercelVcrImageDeleteInput extends VercelVcrRepositoryInput {
+  imageId: string;
+  expectedManifestDigest: string;
+  idempotencyKey: string;
+}

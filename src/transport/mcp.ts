@@ -31,15 +31,15 @@ const errorSchema = z.object({
 
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
-  'work.bootstrap', 'repository.audit', 'evidence.bundle', 'development.status', 'pull-request.status', 'source.discover', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'work-item.status', 'work-item.list',
+  'work.bootstrap', 'repository.audit', 'evidence.bundle', 'development.status', 'pull-request.status', 'source.discover', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'deployment.vcr.list', 'deployment.vcr.images.list', 'work-item.status', 'work-item.list',
   'repository.acquire', 'lifecycle.advance', 'lifecycle.resume',
-  'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create', 'git.push',
+  'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create', 'git.workflow.commit', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
   'pull-request.close', 'pull-request.ready-for-review', 'pull-request.verify.rerun',
   'pull-request.merge.integration', 'pull-request.merge.reconcile-preview', 'pull-request.merge.promote',
   'work-item.create', 'work-item.comment.create', 'work-item.update-status', 'work-item.classification.update', 'work-item.triage.update',
   'deployment.redeploy', 'deployment.git.create', 'deployment.promote', 'deployment.rollback', 'deployment.delete',
-  'deployment.env.upsert', 'deployment.env.update', 'deployment.env.remove', 'deployment.vcr.create',
+  'deployment.env.upsert', 'deployment.env.update', 'deployment.env.remove', 'deployment.vcr.create', 'deployment.vcr.image.delete',
 ]);
 
 const receiptBase = {
@@ -78,7 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v10'),
+      catalogVersion: z.literal('conductor.catalog.v11'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -571,7 +571,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
   if (runtime.deploymentReadEnabled) {
     const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
-    const readTool = (name: 'deployment.audit' | 'deployment.runtime-logs' | 'deployment.env.list' | 'deployment.vcr.get', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any, extra: { authInfo?: AuthInfo }) => Promise<object>) => {
+    const readTool = (name: 'deployment.audit' | 'deployment.runtime-logs' | 'deployment.env.list' | 'deployment.vcr.get' | 'deployment.vcr.list' | 'deployment.vcr.images.list', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any, extra: { authInfo?: AuthInfo }) => Promise<object>) => {
       server.registerTool(name, { title, description, inputSchema, outputSchema: readReceiptSchema, annotations: readOnly, _meta: { securitySchemes: oauthSecurity } },
         async (input, extra) => result(await run(input, extra)));
     };
@@ -579,6 +579,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     readTool('deployment.runtime-logs', 'Read Vercel runtime logs', 'Read bounded redacted runtime logs for one exact bound deployment. A fresh work.bootstrap handle may reuse only the already-proven project identity.', z.object({ project: projectSchema, deploymentId: z.string().min(3), limit: z.number().int().min(1).max(100).default(50), bootstrapEvidence: bootstrapEvidenceSchema }), (input, extra) => runtime.deploymentRuntimeLogs(withBootstrapReadEvidence(input, extra) as any));
     readTool('deployment.env.list', 'List Vercel variable metadata', 'List exact project variable metadata; values are never returned. A fresh work.bootstrap handle may reuse only the already-proven project identity.', z.object({ project: projectSchema, bootstrapEvidence: bootstrapEvidenceSchema }), (input, extra) => runtime.deploymentEnvironmentList(withBootstrapReadEvidence(input, extra) as any));
     readTool('deployment.vcr.get', 'Read exact Vercel Container Registry repository', 'Read one exact project-scoped VCR repository by name. No image contents or credentials are returned.', z.object({ project: projectSchema, name: z.string().min(1).max(128).regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u) }), input => runtime.deploymentVcrGet(input));
+    readTool('deployment.vcr.list', 'List Vercel Container Registry repositories', 'List bounded project-scoped VCR repository metadata and explicitly report whether authoritative capacity/headroom is available.', z.object({ project: projectSchema, limit: z.number().int().min(1).max(100).default(50), cursor: z.string().max(512).optional() }), input => runtime.deploymentVcrList(input));
+    readTool('deployment.vcr.images.list', 'List Vercel Container Registry images', 'List bounded image digest/tag/size/status metadata for one exact project-scoped VCR repository. Image contents are never downloaded.', z.object({ project: projectSchema, name: z.string().min(1).max(128).regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u), limit: z.number().int().min(1).max(100).default(50), cursor: z.string().max(512).optional(), untagged: z.boolean().optional() }), input => runtime.deploymentVcrImagesList(input));
   }
 
   if (runtime.vercelMutationEnabled) {
@@ -588,7 +590,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     const base = { project: projectSchema, idempotencyKey, workContext: workContextSchema };
     const deployment = z.object({ ...base, deploymentId, approvalReference });
     const variable = z.object({ ...base, key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u), value: z.string(), type: z.enum(['plain', 'encrypted', 'sensitive']), target: z.array(z.enum(['production','preview','development'])).min(1).max(3), gitBranch: z.string().optional(), customEnvironmentIds: z.array(z.string()).max(20).optional(), approvalReference });
-    const writeTool = (name: 'deployment.redeploy' | 'deployment.git.create' | 'deployment.promote' | 'deployment.rollback' | 'deployment.delete' | 'deployment.env.upsert' | 'deployment.env.update' | 'deployment.env.remove' | 'deployment.vcr.create', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any) => Promise<object>, destructive = false) => {
+    const writeTool = (name: 'deployment.redeploy' | 'deployment.git.create' | 'deployment.promote' | 'deployment.rollback' | 'deployment.delete' | 'deployment.env.upsert' | 'deployment.env.update' | 'deployment.env.remove' | 'deployment.vcr.create' | 'deployment.vcr.image.delete', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any) => Promise<object>, destructive = false) => {
       server.registerTool(name, { title, description, inputSchema, outputSchema: mutationOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: destructive, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity } }, async (input, extra) => {
@@ -605,6 +607,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     writeTool('deployment.env.update', 'Update exact Vercel environment variable', 'Write-only value with exact variable ID/key and scoped targets.', variable.extend({ envId: z.string().min(3) }), input => runtime.vercelEnvUpdate(input));
     writeTool('deployment.env.remove', 'Remove exact Vercel environment variable', 'Remove exact ID/key after confirming project and production approval if applicable.', z.object({ ...base, envId: z.string().min(3), key: z.string(), approvalReference }), input => runtime.vercelEnvRemove(input), true);
     writeTool('deployment.vcr.create', 'Create Vercel Container Registry repository', 'Create one exact project-scoped VCR repository by name, then read it back from Vercel to verify the result.', z.object({ ...base, name: z.string().min(1).max(128).regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u) }), input => runtime.vercelVcrCreate(input));
+    writeTool('deployment.vcr.image.delete', 'Delete exact Vercel Container Registry image', 'Delete one exact image ID + manifest digest only after Conductor proves it is unreferenced by protected current deployments. Until authoritative reachability is available, the operation fails closed before DELETE.', z.object({ ...base, name: z.string().min(1).max(128).regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u), imageId: z.string().min(1).max(256), expectedManifestDigest: z.string().min(1).max(512) }), input => runtime.vercelVcrImageDelete(input), true);
   }
 
   if (runtime.workItemReadEnabled) {
@@ -809,6 +812,29 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.createCommit(withoutWorkContext(input)));
     });
+
+    if (runtime.workflowCommitEnabled) {
+      server.registerTool('git.workflow.commit', {
+        title: 'Commit a GitHub Actions workflow',
+        description: 'Create or edit one .github/workflows/*.yml|yaml file on an exact work/* branch. Requires provable GitHub App contents:write + workflows:write and returns bounded security-review findings. It never writes Preview/Main directly.',
+        inputSchema: z.object({
+          project: projectSchema,
+          workContext: workContextSchema,
+          branch: z.string().min(6),
+          expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+          message: z.string().min(1).max(500),
+          path: z.string().regex(/^\.github\/workflows\/[^/]+\.(?:ya?ml)$/iu),
+          content: z.string().min(1).max(1024 * 1024),
+          idempotencyKey: z.string().min(8).max(200),
+        }),
+        outputSchema: mutationOutputSchema,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        _meta: { securitySchemes: oauthWriteSecurity },
+      }, async (input, extra) => {
+        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        return result(await runtime.createWorkflowCommit(withoutWorkContext(input)));
+      });
+    }
 
     server.registerTool('pull-request.create', {
       title: 'Open a pull request',
@@ -1093,7 +1119,7 @@ function requireWriteScope(scopes?: string[]): void {
 function writeAction(operation: string): WorkAction | undefined {
   if (operation.startsWith('work-item.')) return ['work-item.status', 'work-item.list'].includes(operation) ? undefined : 'route-work';
   if (operation === 'pull-request.status') return undefined;
-  if (operation.startsWith('deployment.') && !['deployment.status','deployment.logs','deployment.audit','deployment.runtime-logs','deployment.env.list','deployment.vcr.get'].includes(operation)) return 'develop';
+  if (operation.startsWith('deployment.') && !['deployment.status','deployment.logs','deployment.audit','deployment.runtime-logs','deployment.env.list','deployment.vcr.get','deployment.vcr.list','deployment.vcr.images.list'].includes(operation)) return 'develop';
   if (operation.startsWith('lifecycle.')) return 'develop';
   if (operation.startsWith('git.') || operation.startsWith('pull-request.')) return 'develop';
   return undefined;
