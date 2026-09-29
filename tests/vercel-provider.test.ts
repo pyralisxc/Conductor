@@ -172,6 +172,75 @@ test('unbound repository reads use only one connected team and verified Git link
   assert.equal((await instance.preflightOperation(project, 'deployment.status'))?.[0]?.error?.code, 'AUTH_REQUIRED');
 });
 
+test('Vercel repository attestation returns only safe exact connection and project metadata', async () => {
+  const instance = new VercelDeploymentProvider({
+    bindings: [{
+      id: 'connection',
+      project: 'unbound',
+      connectionId: 'icfg_A',
+      teamId: 'team_A'
+    }],
+    tokenResolver: async () => 'installation-token',
+    now: () => new Date('2026-09-29T02:30:00.000Z'),
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v9/projects') {
+        return Response.json({
+          projects: [{
+            id: 'prj_di',
+            name: 'development-intelligence',
+            link: {
+              type: 'github',
+              org: 'pyralisxc',
+              repo: 'Development-Intelligence',
+              productionBranch: 'main'
+            }
+          }],
+          pagination: { next: null }
+        });
+      }
+      if (url.pathname === '/v9/projects/prj_di') {
+        return Response.json({
+          id: 'prj_di',
+          name: 'development-intelligence',
+          link: {
+            type: 'github',
+            org: 'pyralisxc',
+            repo: 'Development-Intelligence',
+            productionBranch: 'main'
+          },
+          token: 'must-not-cross'
+        });
+      }
+      return Response.json({ error: 'unexpected' }, { status: 404 });
+    }
+  });
+
+  const attestation =
+    await instance.attestRepositoryProject({
+      id: 'asc-attestation',
+      repository:
+        'pyralisxc/Development-Intelligence'
+    });
+
+  assert.equal(attestation.connectionId, 'icfg_A');
+  assert.equal(attestation.teamId, 'team_A');
+  assert.equal(attestation.projectId, 'prj_di');
+  assert.equal(
+    attestation.repository,
+    'pyralisxc/development-intelligence'
+  );
+  assert.equal(attestation.productionBranch, 'main');
+  assert.equal(
+    JSON.stringify(attestation).includes('must-not-cross'),
+    false
+  );
+  assert.equal(
+    attestation.capabilities.includes('deployment.read'),
+    true
+  );
+});
+
 test('unbound Vercel discovery rejects ambiguous installations and mismatched or duplicate Git links', async () => {
   const project = { id: 'Development-Intelligence', repository: 'pyralisxc/Development-Intelligence' };
   const bindings = [
