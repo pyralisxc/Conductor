@@ -21,7 +21,9 @@ export type ToolOperationName =
   | 'deployment.audit'
   | 'deployment.runtime-logs'
   | 'deployment.env.list'
-  | 'deployment.vcr.get';
+  | 'deployment.vcr.get'
+  | 'deployment.vcr.list'
+  | 'deployment.vcr.images.list';
 
 export type PreflightIntent = 'inspect' | 'develop' | 'execute';
 
@@ -57,7 +59,8 @@ export type MutationOperationName =
   | 'deployment.env.upsert'
   | 'deployment.env.update'
   | 'deployment.env.remove'
-  | 'deployment.vcr.create';
+  | 'deployment.vcr.create'
+  | 'deployment.vcr.image.delete';
 
 export type RuntimeOperationName =
   | ToolOperationName
@@ -1224,3 +1227,10 @@ export interface VercelEnvRemoveInput extends VercelProjectInput { envId: string
 export interface VercelRuntimeLogsInput extends VercelReadProjectInput { deploymentId: string; limit?: number }
 export interface VercelVcrRepositoryInput extends VercelProjectInput { name: string }
 export interface VercelVcrCreateInput extends VercelVcrRepositoryInput { idempotencyKey: string }
+export interface VercelVcrListInput extends VercelProjectInput { limit?: number; cursor?: string }
+export interface VercelVcrImageListInput extends VercelVcrRepositoryInput { limit?: number; cursor?: string; untagged?: boolean }
+export interface VercelVcrImageDeleteInput extends VercelVcrRepositoryInput {
+  imageId: string;
+  expectedManifestDigest: string;
+  idempotencyKey: string;
+}

@@ -6,6 +6,10 @@ function fixture() {
   const calls: { path: string; method: string; body?: unknown }[] = [];
   let envs: Record<string, unknown>[] = [];
   let vcrRepositories: Record<string, unknown>[] = [];
+  const vcrImages: Record<string, unknown>[] = [
+    { id: 'img_safe', repositoryId: 'vcr_dockerfile', manifestDigest: 'sha256:abc123', sizeInBytes: 1234, status: 'ready', tags: ['latest'], createdAt: 1, updatedAt: 2 },
+    { id: 'img_untagged', repositoryId: 'vcr_dockerfile', manifestDigest: 'sha256:def456', sizeInBytes: 4321, status: 'ready', tags: [], createdAt: 1, updatedAt: 2 },
+  ];
   let production = 'dpl_old';
   const provider = new VercelDeploymentProvider({
     token: 'test-token',
@@ -16,11 +20,24 @@ function fixture() {
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined;
       calls.push({ path: url.pathname, method, body });
       if (url.pathname === '/v9/projects/app') return Response.json({ id: 'prj_app', name: 'app', link: { org: 'owner', repo: 'app', productionBranch: 'main' }, targets: { production: { id: production } } });
+      if (url.pathname === '/v1/vcr/repository' && method === 'GET') {
+        return Response.json({ repositories: vcrRepositories, pagination: { next: null } });
+      }
+      if (url.pathname === '/v1/vcr/repository/dockerfile/images' && method === 'GET') {
+        const onlyUntagged = url.searchParams.get('untagged') === 'true';
+        return Response.json({ images: onlyUntagged ? vcrImages.filter(item => Array.isArray(item.tags) && item.tags.length === 0) : vcrImages, pagination: { next: null } });
+      }
+      if (url.pathname.startsWith('/v1/vcr/repository/dockerfile/images/') && method === 'GET') {
+        const id = decodeURIComponent(url.pathname.split('/').at(-1)!);
+        const found = vcrImages.find(item => item.id === id);
+        return found ? Response.json({ image: found }) : Response.json({ error: { message: 'not found' } }, { status: 404 });
+      }
       if (url.pathname.startsWith('/v1/vcr/repository/') && method === 'GET') {
         const name = decodeURIComponent(url.pathname.split('/').at(-1)!);
         const found = vcrRepositories.find(item => item.name === name);
         return found ? Response.json(found) : Response.json({ error: { message: 'not found' } }, { status: 404 });
       }
+      if (url.pathname.includes('/images/') && method === 'DELETE') throw new Error('VCR image DELETE must not be sent without reachability proof');
       if (url.pathname === '/v1/vcr/repository' && method === 'POST') {
         if (body?.projectId !== 'prj_app' || typeof body?.name !== 'string') return Response.json({ error: { message: 'invalid VCR create' } }, { status: 400 });
         const created = { id: `vcr_${body.name}`, name: body.name, projectId: body.projectId, createdAt: 1, updatedAt: 1 };
@@ -326,6 +343,50 @@ test('VCR repository read and create stay exact-project scoped and verify provid
   await assert.rejects(
     provider.createVcrRepository({ project, name: '../bad', idempotencyKey: 'vcr-invalid-name' }),
     (error: unknown) => (error as { message?: string }).message?.includes('repository name') === true,
+  );
+});
+
+test('VCR inventory is bounded and image deletion fails closed before provider DELETE without reachability proof', async () => {
+  const { provider, calls, project } = fixture();
+  await provider.createVcrRepository({ project, name: 'dockerfile', idempotencyKey: 'vcr-create-before-inventory' });
+
+  const repositories = await provider.listVcrRepositories({ project, limit: 20 });
+  assert.equal((repositories.repositories as Record<string, unknown>[]).length, 1);
+  assert.equal((repositories.capacity as Record<string, unknown>).status, 'unsupported');
+
+  const images = await provider.listVcrImages({ project, name: 'dockerfile', limit: 20 });
+  assert.equal((images.images as Record<string, unknown>[]).length, 2);
+  assert.equal(images.knownBytes, 5555);
+  assert.equal(images.knownBytesScope, 'returned-page-only');
+  assert.equal((images.capacity as Record<string, unknown>).status, 'unsupported');
+
+  const untagged = await provider.listVcrImages({ project, name: 'dockerfile', limit: 20, untagged: true });
+  assert.equal((untagged.images as Record<string, unknown>[]).length, 1);
+  assert.equal((untagged.images as Record<string, unknown>[])[0]?.imageId, 'img_untagged');
+
+  const beforeDeleteCalls = calls.filter(call => call.method === 'DELETE').length;
+  await assert.rejects(
+    provider.deleteVcrImage({
+      project,
+      name: 'dockerfile',
+      imageId: 'img_untagged',
+      expectedManifestDigest: 'sha256:def456',
+      idempotencyKey: 'vcr-delete-fail-closed',
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'TOOL_UNAVAILABLE'
+      && (error as { message?: string }).message?.includes('unreferenced') === true,
+  );
+  assert.equal(calls.filter(call => call.method === 'DELETE').length, beforeDeleteCalls);
+
+  await assert.rejects(
+    provider.deleteVcrImage({
+      project,
+      name: 'dockerfile',
+      imageId: 'img_safe',
+      expectedManifestDigest: 'sha256:wrong',
+      idempotencyKey: 'vcr-delete-digest-mismatch',
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
   );
 });
 
