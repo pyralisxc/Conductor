@@ -8,6 +8,8 @@ import type {
   BootstrapIntegrationBranchInput,
   DeleteBranchInput,
   CreateCommitInput,
+  CreateWorkflowCommitInput,
+  WorkflowCommitResult,
   CreatePullRequestInput,
   CommentPullRequestInput,
   GetPullRequestStatusInput,
@@ -152,6 +154,7 @@ export interface SourceControlMutationProvider extends RuntimeCapabilityProvider
   }>;
   deleteBranch(input: DeleteBranchInput): Promise<{ repository: string; branch: string; commitSha: string; deleted: true; containedIn: string }>;
   createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }>;
+  createWorkflowCommit?(input: CreateWorkflowCommitInput): Promise<WorkflowCommitResult>;
   createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }>;
   commentPullRequest(input: CommentPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; commentId: string; url: string }>;
   updatePullRequestLabels(input: UpdatePullRequestLabelsInput): Promise<{ repository: string; pullRequestNumber: number; labels: string[] }>;

@@ -9,6 +9,9 @@ import type {
   BootstrapIntegrationBranchInput,
   DeleteBranchInput,
   CreateCommitInput,
+  CreateWorkflowCommitInput,
+  WorkflowCommitResult,
+  WorkflowReviewFinding,
   CreatePullRequestInput,
   CommentPullRequestInput,
   GetPullRequestStatusInput,
@@ -1686,6 +1689,50 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
 
   async createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }> {
     const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['git.commit.create']);
+    if (input.files.some((file) => /^\.github\/workflows\//iu.test(file.path))) {
+      throw { code: 'PERMISSION_DENIED', message: 'GitHub Actions workflow files must use the dedicated git.workflow.commit lane' };
+    }
+    return await this.createCommitUsingCredential(repository, credential, input);
+  }
+
+  async createWorkflowCommit(input: CreateWorkflowCommitInput): Promise<WorkflowCommitResult> {
+    const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['git.workflow.commit']);
+    if (credential.kind !== 'app-installation') {
+      throw { code: 'PERMISSION_DENIED', message: 'Workflow authoring requires provable GitHub App workflows:write permission' };
+    }
+    assertWorkBranch(input.branch);
+    assertSha(input.expectedHeadSha, 'expectedHeadSha');
+    const path = workflowRepositoryPath(input.path);
+    if (!input.content.trim()) throw { code: 'CONFLICT', message: 'Workflow content must not be empty' };
+    if (Buffer.byteLength(input.content, 'utf8') > 1024 * 1024) {
+      throw { code: 'PERMISSION_DENIED', message: 'Workflow file exceeds the 1 MiB mutation limit' };
+    }
+    const findings = workflowReviewFindings(input.content);
+    const committed = await this.createCommitUsingCredential(repository, credential, {
+      project: input.project,
+      branch: input.branch,
+      expectedHeadSha: input.expectedHeadSha,
+      message: input.message,
+      files: [{ path, content: input.content }],
+      idempotencyKey: input.idempotencyKey,
+    });
+    return {
+      ...committed,
+      path,
+      findings,
+      permissionSummary: {
+        required: ['contents:write', 'workflows:write'],
+        declaredPermissions: /^\s*permissions\s*:/imu.test(input.content),
+        findingCount: findings.length,
+      },
+    };
+  }
+
+  private async createCommitUsingCredential(
+    repository: string,
+    credential: GitHubCredential,
+    input: CreateCommitInput,
+  ): Promise<{ repository: string; branch: string; commitSha: string }> {
     assertWorkBranch(input.branch);
     assertSha(input.expectedHeadSha, 'expectedHeadSha');
     if (!input.message.trim()) throw { code: 'CONFLICT', message: 'Commit message must not be empty' };
@@ -2661,6 +2708,7 @@ type GitHubWriteOperation =
   | 'git.integration.bootstrap'
   | 'git.branch.delete'
   | 'git.commit.create'
+  | 'git.workflow.commit'
   | 'pull-request.create'
   | 'pull-request.comment.create'
   | 'pull-request.labels.update'
@@ -2717,6 +2765,7 @@ const GITHUB_WRITE_OPERATION_PERMISSIONS: Readonly<Record<
   'git.integration.bootstrap': { contents: 'write' },
   'git.branch.delete': { contents: 'write' },
   'git.commit.create': { contents: 'write' },
+  'git.workflow.commit': { contents: 'write', workflows: 'write' },
   'pull-request.create': { pull_requests: 'write' },
   'pull-request.comment.create': { issues: 'write' },
   'pull-request.labels.update': { issues: 'write' },
@@ -3231,6 +3280,49 @@ function assertPromotionSourceBranch(branch: string): void {
   if (!safeMergeBranch(branch) || !['preview', 'vercel-preview'].includes(branch.toLowerCase())) {
     throw { code: 'PERMISSION_DENIED', message: 'Promotion sources must be preview or vercel-preview' };
   }
+}
+
+function workflowRepositoryPath(value: string): string {
+  const path = validRepositoryPath(value);
+  if (!/^\.github\/workflows\/[^/]+\.(?:ya?ml)$/iu.test(path)) {
+    throw { code: 'PERMISSION_DENIED', message: 'Workflow authoring is limited to .github/workflows/*.yml or *.yaml' };
+  }
+  return path;
+}
+
+function workflowReviewFindings(content: string): WorkflowReviewFinding[] {
+  const findings: WorkflowReviewFinding[] = [];
+  const lines = content.split(/\r?\n/u);
+  const add = (code: string, severity: WorkflowReviewFinding['severity'], summary: string, line?: number) => {
+    if (findings.length >= 50) return;
+    findings.push({ code, severity, summary, ...(line ? { line } : {}) });
+  };
+  lines.forEach((line, index) => {
+    const n = index + 1;
+    if (/\bpull_request_target\b/u.test(line)) add('pull-request-target', 'high', 'pull_request_target executes with elevated base-repository context and requires explicit review.', n);
+    if (/^\s*permissions\s*:\s*write-all\s*$/iu.test(line) || /^\s*[A-Za-z0-9_-]+\s*:\s*write\s*(?:#.*)?$/iu.test(line)) {
+      add('write-permission', 'high', 'Workflow declares a write permission; verify the minimum required scope.', n);
+    } else if (/^\s*permissions\s*:/iu.test(line)) {
+      add('permissions-block', 'info', 'Workflow declares an explicit permissions block; review requested scopes.', n);
+    }
+    if (/\bid-token\s*:\s*write\b/iu.test(line)) add('oidc-write', 'warning', 'Workflow requests OIDC id-token: write.', n);
+    if (/runs-on\s*:\s*(?:\[[^\]]*\bself-hosted\b|self-hosted\b)/iu.test(line)) add('self-hosted-runner', 'high', 'Workflow targets a self-hosted runner.', n);
+    if (/^\s*environment\s*:/iu.test(line)) add('environment-access', /prod(?:uction)?/iu.test(line) ? 'high' : 'warning', 'Workflow declares environment access; verify deployment/environment protections.', n);
+    if (/\$\{\{\s*secrets\./u.test(line)) add('secret-reference', 'warning', 'Workflow references a GitHub secret. Conductor does not read or resolve the secret value.', n);
+    if (/(?:curl|wget)\b.*\|\s*(?:bash|sh)\b/iu.test(line)) add('download-execute', 'high', 'Workflow downloads content and pipes it directly to a shell.', n);
+    const uses = line.match(/^\s*-?\s*uses\s*:\s*([^\s#]+)\s*/iu);
+    if (uses) {
+      const ref = uses[1]!;
+      if (!ref.startsWith('./') && !ref.startsWith('actions/') && !ref.startsWith('github/')) {
+        const at = ref.lastIndexOf('@');
+        const pinned = at > 0 && /^[0-9a-f]{40}$/iu.test(ref.slice(at + 1));
+        add('external-action', pinned ? 'info' : 'warning', pinned
+          ? `Third-party action is pinned to a full commit SHA: ${ref}`
+          : `Third-party action is not pinned to a full commit SHA: ${ref}`, n);
+      }
+    }
+  });
+  return findings;
 }
 
 function assertWorkBranch(branch: string): void {
