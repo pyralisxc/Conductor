@@ -78,7 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v9'),
+      catalogVersion: z.literal('conductor.catalog.v10'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -707,10 +707,12 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     if (runtime.lifecycleResumeEnabled) {
       server.registerTool('lifecycle.resume', {
         title: 'Resume exact approved Main gate',
-        description: 'Resume only a signed human-approval lifecycle gate. Revalidates exact promotion PR head/base and requires a new owner-approved: reference before merging Main.',
+        description: 'Resume only a signed human-approval lifecycle gate. Revalidates exact promotion PR head/base, requires a new owner-approved: reference, and may carry an explicit exact production-blocker override list into the existing audited promotion gate.',
         inputSchema: z.object({
           project: projectSchema, workContext: workContextSchema, gate: z.string().min(20).max(4096),
-          approvalReference: z.string().regex(/^owner-approved:/u).max(500), idempotencyKey: z.string().min(8).max(200),
+          approvalReference: z.string().regex(/^owner-approved:/u).max(500),
+          overrideBlockerIssueNumbers: z.array(z.number().int().positive()).max(100).optional(),
+          idempotencyKey: z.string().min(8).max(200),
         }),
         outputSchema: compositeMutationOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
@@ -726,7 +728,9 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         return result(await runtime.resumeLifecycle({
           project: resolved, issueNumber: gate.issueNumber, gateId: gate.id, pullRequestNumber: gate.pullRequestNumber,
           expectedHeadSha: gate.expectedHeadSha, expectedBaseSha: gate.expectedBaseSha,
-          approvalReference: input.approvalReference, idempotencyKey: input.idempotencyKey,
+          approvalReference: input.approvalReference,
+          overrideBlockerIssueNumbers: input.overrideBlockerIssueNumbers,
+          idempotencyKey: input.idempotencyKey,
         }));
       });
     }

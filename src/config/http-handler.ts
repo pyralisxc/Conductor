@@ -3,6 +3,7 @@ import { createConductorHttpHandler } from '../transport/http.js';
 import { createWorkScopeHttpHandler } from '../transport/work-scope-http.js';
 import { RedisWorkScopeStore, WorkScopeAuthorizer } from '../transport/work-scope.js';
 import { handleOAuthHttpRequest } from '../transport/oauth-http.js';
+import { handleAscAuthorityBridgeRequest } from '../transport/asc-authority-bridge.js';
 import { assertOAuthConfiguration, oauthPublicBaseUrl, SelfHostedAccessTokenVerifier } from '../transport/oauth.js';
 
 /** Shared by Vercel's function and the standalone server so authorization cannot drift. */
@@ -23,6 +24,34 @@ export function createConfiguredHttpHandler() {
     verifier: new SelfHostedAccessTokenVerifier(),
     workScope: store ? new WorkScopeAuthorizer(store) : undefined,
     handleWorkScopeRequest: store ? createWorkScopeHttpHandler(store) : undefined,
-    handleOAuthRequest: handleOAuthHttpRequest,
+    handleOAuthRequest: async (
+      request,
+      response,
+      url,
+    ) => {
+      if (
+        await handleAscAuthorityBridgeRequest(
+          request,
+          response,
+          url,
+          {
+            runtime,
+            ...(store
+              ? {
+                  workScope:
+                    new WorkScopeAuthorizer(store),
+                }
+              : {}),
+          },
+        )
+      ) {
+        return true;
+      }
+      return handleOAuthHttpRequest(
+        request,
+        response,
+        url,
+      );
+    },
   });
 }

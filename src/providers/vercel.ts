@@ -25,6 +25,17 @@ interface VercelProjectBinding {
   runtimeLogsDirect?: boolean;
 }
 
+export interface VercelRepositoryAttestation {
+  readonly connectionId: string;
+  readonly teamId: string | null;
+  readonly repository: string;
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly productionBranch: string | null;
+  readonly capabilities: readonly string[];
+  readonly verifiedAt: string;
+}
+
 interface VercelDeploymentProviderOptions {
   token?: string;
   tokenResolver?: (binding: VercelProjectBinding) => Promise<string | undefined>;
@@ -70,6 +81,36 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
 
   getUsageSnapshot() {
     return this.usage.snapshot();
+  }
+
+  async attestRepositoryProject(
+    project: ProjectReference
+  ): Promise<VercelRepositoryAttestation> {
+    const bound = await this.readProject(project);
+    if (!project.repository || !bound.binding.connectionId) {
+      throw {
+        code: 'NOT_FOUND',
+        source: 'vercel',
+        message: 'Vercel repository attestation requires an exact connected installation and repository',
+      };
+    }
+    const capabilities = (await this.getCapabilities())
+      .filter((item) => item.available)
+      .map((item) => item.capability)
+      .sort();
+    const link = recordField(bound.data, 'link');
+    return Object.freeze({
+      connectionId: bound.binding.connectionId,
+      teamId: bound.binding.teamId ?? null,
+      repository: project.repository.toLowerCase(),
+      projectId: bound.id,
+      projectName:
+        stringField(bound.data, 'name') ?? bound.id,
+      productionBranch:
+        link ? stringField(link, 'productionBranch') : null,
+      capabilities: Object.freeze(capabilities),
+      verifiedAt: this.now().toISOString(),
+    });
   }
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {

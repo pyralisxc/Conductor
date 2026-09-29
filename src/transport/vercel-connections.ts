@@ -1,11 +1,18 @@
-import { createCipheriv, createDecipheriv, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Redis } from '@upstash/redis';
 import { derivedSecret, ownerSessionValid } from './owner-auth.js';
 import { oauthPublicBaseUrl } from './oauth.js';
 import { RedisProviderConnectionCredentialStore } from './provider-connections.js';
+import { providerCredentialVaultFromEnvironment } from './credential-vault.js';
 
 type Installation = { configurationId: string; teamId: string | null; connectedAt: string; token: string };
+
+export interface VercelInstallationMetadata {
+  readonly configurationId: string;
+  readonly teamId: string | null;
+  readonly connectedAt: string;
+}
 const prefix = 'conductor:vercel:connection:v1';
 const stateTtl = 600;
 const csrfTtlSeconds = 15 * 60;
@@ -58,25 +65,130 @@ function configuration(): { redis: Redis; slug: string; clientId: string; client
   return { redis: new Redis({ url, token, enableTelemetry: false }), slug, clientId, clientSecret };
 }
 
-function encrypt(value: Installation): string {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', derivedSecret('vercel-installation'), iv);
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value)), cipher.final()]);
-  return [iv, cipher.getAuthTag(), ciphertext].map(buffer => buffer.toString('base64url')).join('.');
+function installationVault() {
+  return providerCredentialVaultFromEnvironment(
+    'vercel-installation',
+  );
 }
 
-function decrypt(value: string): Installation {
-  const [iv, tag, ciphertext] = value.split('.').map(part => Buffer.from(part, 'base64url'));
-  if (!iv || !tag || !ciphertext) throw new Error('Invalid Vercel connection record');
-  const decipher = createDecipheriv('aes-256-gcm', derivedSecret('vercel-installation'), iv);
-  decipher.setAuthTag(tag);
-  return JSON.parse(Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')) as Installation;
+function parseInstallation(value: string): Installation {
+  let parsed: Partial<Installation>;
+  try {
+    parsed = JSON.parse(value) as Partial<Installation>;
+  } catch {
+    throw new Error('Invalid Vercel connection payload');
+  }
+  if (
+    typeof parsed.configurationId !== 'string' ||
+    !/^icfg_[\w-]+$/u.test(parsed.configurationId) ||
+    (parsed.teamId !== null && typeof parsed.teamId !== 'string') ||
+    typeof parsed.connectedAt !== 'string' ||
+    typeof parsed.token !== 'string' ||
+    !parsed.token
+  ) {
+    throw new Error('Invalid Vercel connection payload');
+  }
+  return {
+    configurationId: parsed.configurationId,
+    teamId: parsed.teamId ?? null,
+    connectedAt: parsed.connectedAt,
+    token: parsed.token,
+  };
+}
+
+function encrypt(value: Installation): string {
+  return installationVault().seal(JSON.stringify(value));
+}
+
+function decrypt(value: string): {
+  installation: Installation;
+  replacement?: string;
+} {
+  const opened = installationVault().open(value);
+  return {
+    installation: parseInstallation(opened.plaintext),
+    ...(opened.replacement
+      ? { replacement: opened.replacement }
+      : {}),
+  };
+}
+
+export async function listVercelInstallationMetadata():
+  Promise<readonly VercelInstallationMetadata[]> {
+  const { redis } = configuration();
+  const ids = (
+    await redis.smembers<string[]>(prefix + ':ids')
+  ).slice().sort();
+
+  const result: VercelInstallationMetadata[] = [];
+  for (const configurationId of ids) {
+    if (!/^icfg_[\w-]+$/u.test(configurationId)) {
+      continue;
+    }
+    const key =
+      prefix + ':installation:' + configurationId;
+    const record = await redis.get<string>(key);
+    if (!record) continue;
+
+    const opened = decrypt(record);
+    if (opened.replacement) {
+      await redis.set(key, opened.replacement);
+    }
+    const installation = opened.installation;
+    if (
+      installation.configurationId !== configurationId
+    ) {
+      throw new Error(
+        'Stored Vercel installation identity mismatch'
+      );
+    }
+    result.push(
+      Object.freeze({
+        configurationId:
+          installation.configurationId,
+        teamId: installation.teamId,
+        connectedAt: installation.connectedAt,
+      })
+    );
+  }
+  return Object.freeze(result);
+}
+
+export async function vercelInstallationMetadata(
+  configurationId: string
+): Promise<VercelInstallationMetadata | undefined> {
+  if (!/^icfg_[\w-]+$/u.test(configurationId)) {
+    throw new Error('Invalid Vercel installation ID');
+  }
+  const { redis } = configuration();
+  const key = prefix + ':installation:' + configurationId;
+  const record = await redis.get<string>(key);
+  if (!record) return undefined;
+  const opened = decrypt(record);
+  if (opened.replacement) {
+    await redis.set(key, opened.replacement);
+  }
+  const installation = opened.installation;
+  if (installation.configurationId !== configurationId) {
+    throw new Error('Stored Vercel installation identity mismatch');
+  }
+  return Object.freeze({
+    configurationId: installation.configurationId,
+    teamId: installation.teamId,
+    connectedAt: installation.connectedAt,
+  });
 }
 
 export async function vercelInstallationToken(configurationId: string, teamId?: string): Promise<string | undefined> {
-  const record = await configuration().redis.get<string>(`${prefix}:installation:${configurationId}`);
+  const { redis } = configuration();
+  const key = prefix + ':installation:' + configurationId;
+  const record = await redis.get<string>(key);
   if (!record) return undefined;
-  const installation = decrypt(record);
+  const opened = decrypt(record);
+  if (opened.replacement) {
+    await redis.set(key, opened.replacement);
+  }
+  const installation = opened.installation;
   if ((installation.teamId ?? undefined) !== teamId) return undefined;
   return installation.token;
 }
@@ -116,9 +228,19 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
   try {
     const { redis, slug, clientId, clientSecret } = configuration();
     if (url.pathname === '/connections/vercel' && req.method === 'GET') {
-      const ids = await redis.smembers<string[]>(`${prefix}:ids`);
-      const records = await Promise.all(ids.map(id => redis.get<string>(`${prefix}:installation:${id}`)));
-      const installations = records.flatMap(record => record ? [decrypt(record)] : []);
+      const ids = await redis.smembers<string[]>(prefix + ':ids');
+      const installations = (
+        await Promise.all(ids.map(async (id) => {
+          const key = prefix + ':installation:' + id;
+          const record = await redis.get<string>(key);
+          if (!record) return undefined;
+          const opened = decrypt(record);
+          if (opened.replacement) {
+            await redis.set(key, opened.replacement);
+          }
+          return opened.installation;
+        }))
+      ).filter((entry): entry is Installation => Boolean(entry));
       const credentialStore = new RedisProviderConnectionCredentialStore(redis);
       const runtimeCredential = await credentialStore.resolve({ provider: 'vercel', connectionId: VERCEL_RUNTIME_CONNECTION_ID });
       const disconnectCsrf = vercelConnectionCsrfToken('disconnect');

@@ -10,6 +10,16 @@ import {
   type GitHubInstallationAttestation,
   type GitHubRepositoryAttestation
 } from '../providers/github-auth.js';
+import {
+  VercelDeploymentProvider,
+  type VercelRepositoryAttestation
+} from '../providers/vercel.js';
+import {
+  listVercelInstallationMetadata,
+  vercelInstallationMetadata,
+  vercelInstallationToken,
+  type VercelInstallationMetadata
+} from './vercel-connections.js';
 
 function json(
   res: ServerResponse,
@@ -90,6 +100,27 @@ function repositoryAttestationFromPath(
   });
 }
 
+export function ascBridgeSecretFromEnvironment(): string {
+  const secret =
+    process.env.CONDUCTOR_ASC_BRIDGE_SECRET?.trim();
+  if (!secret || secret.length < 32) {
+    throw new Error(
+      'CONDUCTOR_ASC_BRIDGE_SECRET must be configured with at least 32 characters'
+    );
+  }
+  return secret;
+}
+
+export function ascBridgeRequestAuthorized(
+  req: IncomingMessage,
+  secret: string
+): boolean {
+  const supplied = bearerToken(req);
+  return Boolean(
+    supplied && safeEqual(supplied, secret)
+  );
+}
+
 export interface AscGitHubAttestationProvider {
   getIdentity(): Promise<GitHubIdentity>;
   getInstallationAttestation(
@@ -101,9 +132,50 @@ export interface AscGitHubAttestationProvider {
   ): Promise<GitHubRepositoryAttestation>;
 }
 
+export interface AscVercelAttestationProvider {
+  listInstallations():
+    Promise<readonly VercelInstallationMetadata[]>;
+  getInstallationMetadata(
+    configurationId: string
+  ): Promise<VercelInstallationMetadata | undefined>;
+  getRepositoryAttestation(
+    repository: string,
+    configurationId: string
+  ): Promise<VercelRepositoryAttestation>;
+}
+
 export interface AscProviderBridgeOptions {
   readonly secret: string;
-  readonly githubApp: AscGitHubAttestationProvider;
+  readonly githubApp?: AscGitHubAttestationProvider;
+  readonly vercel?: AscVercelAttestationProvider;
+}
+
+function isVercelInstallationListPath(
+  pathname: string
+): boolean {
+  return pathname ===
+    '/internal/asc/vercel/installations';
+}
+
+function vercelInstallationFromPath(
+  pathname: string
+): string | undefined {
+  return /^\/internal\/asc\/vercel\/installations\/(icfg_[\w-]+)\/attest$/u.exec(pathname)?.[1];
+}
+
+function vercelRepositoryFromPath(
+  pathname: string
+): { readonly configurationId: string; readonly repository: string } | undefined {
+  const match =
+    /^\/internal\/asc\/vercel\/installations\/(icfg_[\w-]+)\/repositories\/([^/]+)\/([^/]+)\/attest$/u.exec(pathname);
+  if (!match) return undefined;
+  const owner = decodeURIComponent(match[2] ?? '').trim();
+  const repo = decodeURIComponent(match[3] ?? '').trim();
+  if (!owner || !repo || owner.includes('/') || repo.includes('/')) return undefined;
+  return Object.freeze({
+    configurationId: match[1]!,
+    repository: owner + '/' + repo,
+  });
 }
 
 export async function handleAscProviderBridgeRequest(
@@ -122,10 +194,21 @@ export async function handleAscProviderBridgeRequest(
     repositoryAttestationFromPath(
       requestUrl.pathname
     );
+  const vercelInstallationList =
+    isVercelInstallationListPath(
+      requestUrl.pathname
+    );
+  const vercelInstallation =
+    vercelInstallationFromPath(requestUrl.pathname);
+  const vercelRepository =
+    vercelRepositoryFromPath(requestUrl.pathname);
   if (
     !installationId &&
     !appIdentity &&
-    !repositoryAttestation
+    !repositoryAttestation &&
+    !vercelInstallationList &&
+    !vercelInstallation &&
+    !vercelRepository
   ) {
     return false;
   }
@@ -140,17 +223,64 @@ export async function handleAscProviderBridgeRequest(
   }
 
   const resolved = options ?? bridgeFromEnvironment();
-  const supplied = bearerToken(req);
   if (
-    !supplied ||
-    !safeEqual(supplied, resolved.secret)
+    !ascBridgeRequestAuthorized(
+      req,
+      resolved.secret
+    )
   ) {
     json(res, 401, { error: 'unauthorized' });
     return true;
   }
 
   try {
+    if (vercelInstallationList) {
+      if (!resolved.vercel) {
+        throw new Error(
+          'ASC Vercel attestation is not configured'
+        );
+      }
+      json(res, 200, {
+        installations:
+          await resolved.vercel.listInstallations()
+      });
+      return true;
+    }
+
+    if (vercelRepository) {
+      if (!resolved.vercel) {
+        throw new Error('ASC Vercel attestation is not configured');
+      }
+      const attestation =
+        await resolved.vercel.getRepositoryAttestation(
+          vercelRepository.repository,
+          vercelRepository.configurationId
+        );
+      json(res, 200, attestation);
+      return true;
+    }
+
+    if (vercelInstallation) {
+      if (!resolved.vercel) {
+        throw new Error('ASC Vercel attestation is not configured');
+      }
+      const metadata =
+        await resolved.vercel.getInstallationMetadata(
+          vercelInstallation
+        );
+      if (!metadata) {
+        const error = new Error('Vercel installation is not connected') as Error & { status?: number };
+        error.status = 404;
+        throw error;
+      }
+      json(res, 200, metadata);
+      return true;
+    }
+
     if (appIdentity) {
+      if (!resolved.githubApp) {
+        throw new Error('ASC GitHub attestation is not configured');
+      }
       const identity =
         await resolved.githubApp.getIdentity();
       if (
@@ -170,6 +300,9 @@ export async function handleAscProviderBridgeRequest(
     }
 
     if (repositoryAttestation) {
+      if (!resolved.githubApp) {
+        throw new Error('ASC GitHub attestation is not configured');
+      }
       const attestation =
         await resolved.githubApp.getRepositoryAttestation(
           repositoryAttestation.repository,
@@ -183,6 +316,9 @@ export async function handleAscProviderBridgeRequest(
       return true;
     }
 
+    if (!resolved.githubApp) {
+      throw new Error('ASC GitHub attestation is not configured');
+    }
     const attestation =
       await resolved.githubApp.getInstallationAttestation(
         installationId!
@@ -196,8 +332,15 @@ export async function handleAscProviderBridgeRequest(
       typeof (error as { status?: unknown }).status === 'number'
         ? (error as { status: number }).status
         : 502;
+    const vercelRequest = Boolean(
+      vercelInstallationList ||
+      vercelInstallation ||
+      vercelRepository
+    );
     json(res, status, {
-      error: 'github_installation_attestation_failed',
+      error: vercelRequest
+        ? 'vercel_installation_attestation_failed'
+        : 'github_installation_attestation_failed',
       message:
         error instanceof Error
           ? error.message
@@ -206,7 +349,9 @@ export async function handleAscProviderBridgeRequest(
               'message' in error &&
               typeof (error as { message?: unknown }).message === 'string'
             ? (error as { message: string }).message
-            : 'GitHub installation attestation failed',
+            : vercelRequest
+              ? 'Vercel installation attestation failed'
+              : 'GitHub installation attestation failed',
     });
   }
 
@@ -248,30 +393,70 @@ let cachedEnvironmentBridge:
 function bridgeFromEnvironment(): AscProviderBridgeOptions {
   if (cachedEnvironmentBridge) return cachedEnvironmentBridge;
 
-  const secret =
-    process.env.CONDUCTOR_ASC_BRIDGE_SECRET?.trim();
+  const secret = ascBridgeSecretFromEnvironment();
   const appId =
     process.env.CONDUCTOR_GITHUB_APP_ID?.trim();
   const privateKey =
     process.env.CONDUCTOR_GITHUB_APP_PRIVATE_KEY?.trim();
 
-  if (!secret || secret.length < 32) {
+  if ((appId && !privateKey) || (!appId && privateKey)) {
     throw new Error(
-      'CONDUCTOR_ASC_BRIDGE_SECRET must be configured with at least 32 characters'
-    );
-  }
-  if (!appId || !privateKey) {
-    throw new Error(
-      'ASC GitHub attestation requires Conductor GitHub App credentials'
+      'CONDUCTOR_GITHUB_APP_ID and CONDUCTOR_GITHUB_APP_PRIVATE_KEY must be configured together'
     );
   }
 
   cachedEnvironmentBridge = Object.freeze({
     secret,
-    githubApp: new GitHubAppCredentialProvider({
-      appId,
-      privateKey,
-    }),
+    ...(appId && privateKey
+      ? {
+          githubApp: new GitHubAppCredentialProvider({
+            appId,
+            privateKey,
+          }),
+        }
+      : {}),
+    vercel: {
+      listInstallations:
+        listVercelInstallationMetadata,
+      getInstallationMetadata:
+        vercelInstallationMetadata,
+      async getRepositoryAttestation(
+        repository: string,
+        configurationId: string
+      ) {
+        const metadata =
+          await vercelInstallationMetadata(
+            configurationId
+          );
+        if (!metadata) {
+          const error = new Error(
+            'Vercel installation is not connected'
+          ) as Error & { status?: number };
+          error.status = 404;
+          throw error;
+        }
+        const provider =
+          new VercelDeploymentProvider({
+            bindings: [{
+              id: 'asc-vercel-connection',
+              project: 'unbound',
+              connectionId: metadata.configurationId,
+              ...(metadata.teamId
+                ? { teamId: metadata.teamId }
+                : {}),
+            }],
+            tokenResolver: async (binding) =>
+              vercelInstallationToken(
+                binding.connectionId!,
+                binding.teamId
+              ),
+          });
+        return provider.attestRepositoryProject({
+          id: 'asc-vercel-attestation',
+          repository,
+        });
+      },
+    },
   });
   return cachedEnvironmentBridge;
 }

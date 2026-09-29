@@ -1483,7 +1483,9 @@ export class ConductorToolRuntime {
       if (current.orchestration.state !== 'promotion-ready') throw { code: 'CONFLICT', message: `Promotion candidate is no longer promotion-ready; current state is ${current.orchestration.state}` };
       const promoted = await this.promotePullRequest({
         project, pullRequestNumber: input.pullRequestNumber, expectedHeadSha: input.expectedHeadSha, expectedBaseSha: input.expectedBaseSha,
-        approvalReference: input.approvalReference, mergeMethod: 'merge',
+        approvalReference: input.approvalReference,
+        overrideBlockerIssueNumbers: input.overrideBlockerIssueNumbers,
+        mergeMethod: 'merge',
         idempotencyKey: lifecycleSubkey(input.idempotencyKey, `promote:${input.gateId}:${input.pullRequestNumber}`),
       });
       if (promoted.status === 'failed') throw promoted.error;
