@@ -15,6 +15,7 @@ import {
   type VercelRepositoryAttestation
 } from '../providers/vercel.js';
 import {
+  listVercelInstallationMetadata,
   vercelInstallationMetadata,
   vercelInstallationToken,
   type VercelInstallationMetadata
@@ -132,6 +133,8 @@ export interface AscGitHubAttestationProvider {
 }
 
 export interface AscVercelAttestationProvider {
+  listInstallations():
+    Promise<readonly VercelInstallationMetadata[]>;
   getInstallationMetadata(
     configurationId: string
   ): Promise<VercelInstallationMetadata | undefined>;
@@ -145,6 +148,13 @@ export interface AscProviderBridgeOptions {
   readonly secret: string;
   readonly githubApp?: AscGitHubAttestationProvider;
   readonly vercel?: AscVercelAttestationProvider;
+}
+
+function isVercelInstallationListPath(
+  pathname: string
+): boolean {
+  return pathname ===
+    '/internal/asc/vercel/installations';
 }
 
 function vercelInstallationFromPath(
@@ -184,6 +194,10 @@ export async function handleAscProviderBridgeRequest(
     repositoryAttestationFromPath(
       requestUrl.pathname
     );
+  const vercelInstallationList =
+    isVercelInstallationListPath(
+      requestUrl.pathname
+    );
   const vercelInstallation =
     vercelInstallationFromPath(requestUrl.pathname);
   const vercelRepository =
@@ -192,6 +206,7 @@ export async function handleAscProviderBridgeRequest(
     !installationId &&
     !appIdentity &&
     !repositoryAttestation &&
+    !vercelInstallationList &&
     !vercelInstallation &&
     !vercelRepository
   ) {
@@ -219,6 +234,19 @@ export async function handleAscProviderBridgeRequest(
   }
 
   try {
+    if (vercelInstallationList) {
+      if (!resolved.vercel) {
+        throw new Error(
+          'ASC Vercel attestation is not configured'
+        );
+      }
+      json(res, 200, {
+        installations:
+          await resolved.vercel.listInstallations()
+      });
+      return true;
+    }
+
     if (vercelRepository) {
       if (!resolved.vercel) {
         throw new Error('ASC Vercel attestation is not configured');
@@ -305,7 +333,9 @@ export async function handleAscProviderBridgeRequest(
         ? (error as { status: number }).status
         : 502;
     const vercelRequest = Boolean(
-      vercelInstallation || vercelRepository
+      vercelInstallationList ||
+      vercelInstallation ||
+      vercelRepository
     );
     json(res, status, {
       error: vercelRequest
@@ -386,6 +416,8 @@ function bridgeFromEnvironment(): AscProviderBridgeOptions {
         }
       : {}),
     vercel: {
+      listInstallations:
+        listVercelInstallationMetadata,
       getInstallationMetadata:
         vercelInstallationMetadata,
       async getRepositoryAttestation(
