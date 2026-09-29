@@ -614,6 +614,119 @@ test('lifecycle advance integrates verified work, proves Preview, prepares promo
 });
 
 
+test('lifecycle resume carries exact blocker overrides through the human gate and preserves provider metrics', async () => {
+  const headSha = 'a'.repeat(40);
+  const baseSha = 'b'.repeat(40);
+  let calls = 0;
+  const candidate = {
+    repository: 'pyralisxc/Conductor',
+    pullRequestNumber: 208,
+    url: 'https://github.test/pull/208',
+    state: 'open',
+    draft: false,
+    merged: false,
+    mergeable: true,
+    mergeableState: 'clean',
+    head: { ref: 'preview', sha: headSha },
+    base: { ref: 'main', sha: baseSha },
+    labels: [],
+    checks: { total: 1, pending: 0, successful: 1, failed: 0, neutral: 0, skipped: 0, items: [] },
+    workflowRuns: [],
+    orchestration: {
+      state: 'promotion-ready' as const,
+      action: 'promotion-gate' as const,
+      shouldAct: true,
+      summary: 'ready',
+      resumeWhen: null,
+      transition: { observed: false, previousHeadSha: null, previousState: null, headChanged: null, stateChanged: null, meaningful: null },
+      seal: { requested: false, expectedPreSealCheckpoint: false, exactHeadVerificationRequired: false },
+      signals: { pending: [], actionRequired: [], failed: [] },
+    },
+  };
+  const provider: any = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    getUsageSnapshot() {
+      return {
+        provider: 'github',
+        calls,
+        duplicateReads: 0,
+        requestBodyBytes: 0,
+        reportedResponseBytes: calls * 100,
+        responsesWithUnknownBytes: 0,
+        observedAt: '2026-09-29T00:00:00Z',
+      };
+    },
+    async getPullRequestStatus() {
+      calls += 1;
+      return candidate;
+    },
+    async createBranch() { throw new Error('unused'); },
+    async bootstrapIntegrationBranch() { throw new Error('unused'); },
+    async deleteBranch() { throw new Error('unused'); },
+    async createCommit() { throw new Error('unused'); },
+    async createPullRequest() { throw new Error('unused'); },
+    async commentPullRequest() { throw new Error('unused'); },
+    async updatePullRequestLabels() { throw new Error('unused'); },
+    async mergeIntegrationPullRequest() { throw new Error('unused'); },
+    async reconcilePreviewPullRequest() { throw new Error('unused'); },
+    async promotePullRequest(input: any) {
+      calls += 1;
+      const overrides = input.overrideBlockerIssueNumbers ?? [];
+      if (JSON.stringify(overrides) !== JSON.stringify([193, 205])) {
+        throw { code: 'PERMISSION_DENIED', message: 'Exact blocker overrides #193 and #205 are required' };
+      }
+      return {
+        repository: 'pyralisxc/Conductor',
+        pullRequestNumber: 208,
+        merged: true,
+        mergeCommitSha: 'c'.repeat(40),
+        message: 'merged',
+        approvalReference: input.approvalReference,
+        overriddenBlockerIssueNumbers: overrides,
+      };
+    },
+  };
+  const runtime = new ConductorToolRuntime({
+    providers: [provider],
+    sourceControlMutationProvider: provider,
+    pullRequestProvider: provider,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const base = {
+    project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+    issueNumber: 211,
+    gateId: 'gate-211',
+    pullRequestNumber: 208,
+    expectedHeadSha: headSha,
+    expectedBaseSha: baseSha,
+    approvalReference: 'owner-approved:resume-override-test',
+  };
+
+  const missing = await runtime.resumeLifecycle({ ...base, idempotencyKey: 'resume-override-missing' });
+  assert.equal(missing.status, 'failed');
+  if (missing.status === 'failed') assert.equal(missing.error.code, 'PERMISSION_DENIED');
+
+  const partial = await runtime.resumeLifecycle({ ...base, overrideBlockerIssueNumbers: [193], idempotencyKey: 'resume-override-partial' });
+  assert.equal(partial.status, 'failed');
+  if (partial.status === 'failed') assert.equal(partial.error.code, 'PERMISSION_DENIED');
+
+  const exact = await runtime.resumeLifecycle({ ...base, overrideBlockerIssueNumbers: [193, 205], idempotencyKey: 'resume-override-exact' });
+  assert.equal(exact.status, 'succeeded');
+  if (exact.status !== 'succeeded') return;
+  assert.equal(exact.result.stage, 'complete');
+  assert.equal(exact.result.transitions[0]?.operation, 'pull-request.merge.promote');
+  assert.equal(typeof exact.result.elapsedMs, 'number');
+  assert.deepEqual(exact.result.providerUsage, [{
+    provider: 'github',
+    calls: 2,
+    duplicateReads: 0,
+    requestBodyBytes: 0,
+    reportedResponseBytes: 200,
+    responsesWithUnknownBytes: 0,
+  }]);
+});
+
 test('lifecycle advance recognizes an exact current Preview head that was already promoted', async () => {
   const previewHead = 'b'.repeat(40);
   const mainHead = 'c'.repeat(40);
