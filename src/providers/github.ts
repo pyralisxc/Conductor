@@ -539,8 +539,8 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         merged: true,
         mergeable: pull.mergeable ?? null,
         mergeableState: pull.mergeable_state ?? null,
-        head: pull.head,
-        base: pull.base,
+        head: { ref: pull.head.ref, sha: pull.head.sha },
+        base: { ref: pull.base.ref, sha: pull.base.sha },
         labels,
         checks: {
           total: 0,
@@ -618,8 +618,8 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       merged: pull.merged ?? false,
       mergeable: pull.mergeable ?? null,
       mergeableState: pull.mergeable_state ?? null,
-      head: pull.head,
-      base: pull.base,
+      head: { ref: pull.head.ref, sha: pull.head.sha },
+      base: { ref: pull.base.ref, sha: pull.base.sha },
       labels,
       checks: {
         total: items.length,
