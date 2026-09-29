@@ -7,6 +7,7 @@ import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
 import { VercelDeploymentProvider } from '../providers/vercel.js';
 import { VERCEL_RUNTIME_CONNECTION_ID, vercelInstallationToken } from '../transport/vercel-connections.js';
 import { RedisProviderConnectionCredentialStore, RoutedProviderConnectionCredentialResolver } from '../transport/provider-connections.js';
+import { providerCredentialVaultFromEnvironment } from '../transport/credential-vault.js';
 import { IdempotentMutationExecutor } from '../runtime/idempotency.js';
 import { RedisIdempotencyStore } from '../runtime/redis-idempotency.js';
 
@@ -32,6 +33,9 @@ export interface RuntimeEnvironment extends Record<string, string | undefined> {
   DEVINT_MCP_URL?: string;
   DEVINT_AGENT_TOKEN?: string;
   CONDUCTOR_ENABLE_GITHUB_MUTATIONS?: string;
+  CONDUCTOR_PROVIDER_CREDENTIAL_KEY?: string;
+  CONDUCTOR_PROVIDER_CREDENTIAL_PREVIOUS_KEYS_JSON?: string;
+  CONDUCTOR_SESSION_SECRET?: string;
   CONDUCTOR_VERCEL_TOKEN?: string;
   VERCEL_TOKEN?: string;
   UPSTASH_REDIS_REST_URL?: string;
@@ -82,7 +86,17 @@ export function createRuntimeFromEnvironment(
 
   const redisUrl = environment.UPSTASH_REDIS_REST_URL ?? environment.KV_REST_API_URL;
   const redisToken = environment.UPSTASH_REDIS_REST_TOKEN ?? environment.KV_REST_API_TOKEN;
-  const providerCredentialStore = redisUrl && redisToken ? new RedisProviderConnectionCredentialStore({ url: redisUrl, token: redisToken }) : undefined;
+  const providerCredentialStore = redisUrl && redisToken
+    ? new RedisProviderConnectionCredentialStore(
+        { url: redisUrl, token: redisToken },
+        {
+          vault: providerCredentialVaultFromEnvironment(
+            'provider-connection-credential-v1',
+            environment,
+          ),
+        },
+      )
+    : undefined;
   const connectionCredentialResolver = new RoutedProviderConnectionCredentialResolver({
     vercel: async ({ connectionId, accountId }) => connectionId === VERCEL_RUNTIME_CONNECTION_ID
       ? (await providerCredentialStore?.resolve({ provider: 'vercel', connectionId }))?.token
