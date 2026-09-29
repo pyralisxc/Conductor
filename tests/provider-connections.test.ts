@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { RoutedProviderConnectionCredentialResolver } from '../src/transport/provider-connections.js';
+import {
+  RedisProviderConnectionCredentialStore,
+  RoutedProviderConnectionCredentialResolver
+} from '../src/transport/provider-connections.js';
+import {
+  VersionedProviderCredentialVault
+} from '../src/transport/credential-vault.js';
 import { VercelDeploymentProvider } from '../src/providers/vercel.js';
 
 test('provider connection resolver routes explicit providers and multiple accounts without first-match behavior', async () => {
@@ -62,23 +68,21 @@ class MemoryRecordStore {
   async del(key: string): Promise<void> { this.values.delete(key); }
 }
 
-test('encrypted provider connection storage keeps raw credentials out of durable records', async () => {
-  const previous = process.env.CONDUCTOR_SESSION_SECRET;
-  process.env.CONDUCTOR_SESSION_SECRET = 'provider-connection-test-secret-that-is-long-enough';
-  try {
-    const { RedisProviderConnectionCredentialStore } = await import('../src/transport/provider-connections.js');
-    const memory = new MemoryRecordStore();
-    const store = new RedisProviderConnectionCredentialStore(memory);
-    await store.put({ provider: 'stripe', connectionId: 'stripe-live', accountId: 'acct_live', token: 'rk_live_super_secret_value' });
-    assert.equal([...memory.values.values()].some(value => value.includes('rk_live_super_secret_value')), false);
-    assert.equal((await store.resolve({ provider: 'stripe', connectionId: 'stripe-live', accountId: 'acct_live' }))?.token, 'rk_live_super_secret_value');
-    assert.equal(await store.resolve({ provider: 'stripe', connectionId: 'stripe-live', accountId: 'acct_other' }), undefined);
-    await store.delete('stripe', 'stripe-live');
-    assert.equal(await store.resolve({ provider: 'stripe', connectionId: 'stripe-live' }), undefined);
-  } finally {
-    if (previous === undefined) delete process.env.CONDUCTOR_SESSION_SECRET;
-    else process.env.CONDUCTOR_SESSION_SECRET = previous;
-  }
+test('encrypted provider connection storage uses a dedicated vault key without exposing raw credentials', async () => {
+  const memory = new MemoryRecordStore();
+  const store = new RedisProviderConnectionCredentialStore(memory, {
+    vault: new VersionedProviderCredentialVault({
+      legacyPurpose: 'provider-connection-credential-v1',
+      currentKey: 'provider-credential-current-key-that-is-long-enough'
+    })
+  });
+  await store.put({ provider: 'stripe', connectionId: 'stripe-live', accountId: 'acct_live', token: 'rk_live_super_secret_value' });
+  assert.equal([...memory.values.values()].some(value => value.includes('rk_live_super_secret_value')), false);
+  assert.match([...memory.values.values()][0] ?? '', /^v2\./);
+  assert.equal((await store.resolve({ provider: 'stripe', connectionId: 'stripe-live', accountId: 'acct_live' }))?.token, 'rk_live_super_secret_value');
+  assert.equal(await store.resolve({ provider: 'stripe', connectionId: 'stripe-live', accountId: 'acct_other' }), undefined);
+  await store.delete('stripe', 'stripe-live');
+  assert.equal(await store.resolve({ provider: 'stripe', connectionId: 'stripe-live' }), undefined);
 });
 
 test('one shared Vercel runtime credential serves multiple exact project bindings and revokes centrally', async () => {
@@ -128,14 +132,14 @@ test('one shared Vercel runtime credential serves multiple exact project binding
 });
 
 
-test('provider connection store accepts explicit URL/token configuration without eager network access', async () => {
-  const previous = process.env.CONDUCTOR_SESSION_SECRET;
-  process.env.CONDUCTOR_SESSION_SECRET = 'provider-connection-config-test-secret-long-enough';
-  try {
-    const { RedisProviderConnectionCredentialStore } = await import('../src/transport/provider-connections.js');
-    assert.doesNotThrow(() => new RedisProviderConnectionCredentialStore({ url: 'https://example.invalid', token: 'test-token' }));
-  } finally {
-    if (previous === undefined) delete process.env.CONDUCTOR_SESSION_SECRET;
-    else process.env.CONDUCTOR_SESSION_SECRET = previous;
-  }
+test('provider connection store accepts explicit URL/token configuration without eager network access', () => {
+  assert.doesNotThrow(() => new RedisProviderConnectionCredentialStore(
+    { url: 'https://example.invalid', token: 'test-token' },
+    {
+      vault: new VersionedProviderCredentialVault({
+        legacyPurpose: 'provider-connection-credential-v1',
+        currentKey: 'provider-credential-config-key-that-is-long-enough'
+      })
+    }
+  ));
 });
