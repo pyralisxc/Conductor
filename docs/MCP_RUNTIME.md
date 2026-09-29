@@ -135,3 +135,18 @@ The runtime publishes both `catalogVersion` and `catalogDigest`. The digest incl
 Development Intelligence `audit_repository` is attached only as a separate semantic evidence plane when available. Conductor never converts DI findings into provider facts, rankings, mutation authority, or automatic implementation. Without DI, `repository.audit` still succeeds with the provider/source-control baseline when GitHub/work evidence is available.
 
 The audit operation is strictly read-only. It does not create issues, mutate source, select work, or change the active Development OS referent. Routing a warranted audit finding remains a separate `route-work` mutation.
+
+
+## ASC delegated-authority canary
+
+The normal MCP path continues to use Conductor's existing OAuth authorization server. ASC authority is introduced in parallel rather than replacing that path in one step.
+
+Set `CONDUCTOR_ENABLE_ASC_AUTHORITY_CANARY=1` only after configuring `CONDUCTOR_ASC_CONTROL_URL` and the existing `CONDUCTOR_ASC_BRIDGE_SECRET` to match ASC's service-bridge credential. When disabled, the delegated-authority routes return unavailable and the legacy MCP/OAuth workflow is unchanged.
+
+The initial canary exposes only two internal service operations:
+- `POST /internal/asc/authority/source-artifact-read`, which consumes an ASC delegation for `source.read` / `read`;
+- `POST /internal/asc/authority/pull-request-comment`, which consumes an ASC delegation for `pull_request.write` / `mutate`, requires approval provenance, and still runs through Conductor work-scope and idempotent mutation execution.
+
+The caller cannot provide a repository or select a capability/effect. Conductor obtains the exact GitHub repository from ASC's consumed delegation receipt and maps each fixed endpoint to one fixed capability/effect pair. A rejected, expired, replayed, or stale ASC delegation stops before provider execution and is never retried through Conductor's legacy OAuth authority. Returned authority receipts identify `source: asc` without echoing the opaque delegation handle or provider credentials.
+
+This canary deliberately does not expose branch creation, commits, PR creation, merges, Preview reconciliation, Main promotion, deployment mutation, environment mutation, or generic operation dispatch.

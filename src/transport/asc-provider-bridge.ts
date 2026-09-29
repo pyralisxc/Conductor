@@ -90,6 +90,27 @@ function repositoryAttestationFromPath(
   });
 }
 
+export function ascBridgeSecretFromEnvironment(): string {
+  const secret =
+    process.env.CONDUCTOR_ASC_BRIDGE_SECRET?.trim();
+  if (!secret || secret.length < 32) {
+    throw new Error(
+      'CONDUCTOR_ASC_BRIDGE_SECRET must be configured with at least 32 characters'
+    );
+  }
+  return secret;
+}
+
+export function ascBridgeRequestAuthorized(
+  req: IncomingMessage,
+  secret: string
+): boolean {
+  const supplied = bearerToken(req);
+  return Boolean(
+    supplied && safeEqual(supplied, secret)
+  );
+}
+
 export interface AscGitHubAttestationProvider {
   getIdentity(): Promise<GitHubIdentity>;
   getInstallationAttestation(
@@ -140,10 +161,11 @@ export async function handleAscProviderBridgeRequest(
   }
 
   const resolved = options ?? bridgeFromEnvironment();
-  const supplied = bearerToken(req);
   if (
-    !supplied ||
-    !safeEqual(supplied, resolved.secret)
+    !ascBridgeRequestAuthorized(
+      req,
+      resolved.secret
+    )
   ) {
     json(res, 401, { error: 'unauthorized' });
     return true;
@@ -248,18 +270,12 @@ let cachedEnvironmentBridge:
 function bridgeFromEnvironment(): AscProviderBridgeOptions {
   if (cachedEnvironmentBridge) return cachedEnvironmentBridge;
 
-  const secret =
-    process.env.CONDUCTOR_ASC_BRIDGE_SECRET?.trim();
+  const secret = ascBridgeSecretFromEnvironment();
   const appId =
     process.env.CONDUCTOR_GITHUB_APP_ID?.trim();
   const privateKey =
     process.env.CONDUCTOR_GITHUB_APP_PRIVATE_KEY?.trim();
 
-  if (!secret || secret.length < 32) {
-    throw new Error(
-      'CONDUCTOR_ASC_BRIDGE_SECRET must be configured with at least 32 characters'
-    );
-  }
   if (!appId || !privateKey) {
     throw new Error(
       'ASC GitHub attestation requires Conductor GitHub App credentials'

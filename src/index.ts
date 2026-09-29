@@ -20,3 +20,5 @@ export * from './transport/owner-auth.js';
 export * from './transport/provider-connections.js';
 export * from './transport/mcp.js';
 export * from './transport/http.js';
+
+export * from './transport/asc-authority-bridge.js';
