@@ -135,19 +135,11 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     operation: RuntimeOperationName,
   ): Promise<OperationPreflightCheck[] | undefined> {
     if (!operation.startsWith('deployment.')) return undefined;
-    const explicit = this.bindings.get(project.id);
-    if (!explicit && !isDeploymentRead(operation)) {
-      const error = normalizeToolError({
-        code: 'NOT_FOUND',
-        source: 'vercel',
-        message: `No Vercel deployment binding is configured for ${project.id}`,
-      }, 'NOT_FOUND', 'vercel');
-      return [{ provider: 'vercel', status: 'blocked', summary: error.message, error, diagnostics: error.diagnostics }];
-    }
+    const explicitlyBound = this.bindings.has(project.id);
     try {
-      const { binding, data: resolved } = explicit
-        ? await this.boundProject(project)
-        : await this.readProject(project);
+      const { binding, data: resolved } = isDeploymentRead(operation)
+        ? await this.readProject(project)
+        : await this.mutationProject(project);
       const environmentOperation = operation === 'deployment.env.list' || operation.startsWith('deployment.env.');
       const vcrOperation = operation === 'deployment.vcr.get' || operation === 'deployment.vcr.create';
       if (environmentOperation) {
@@ -160,7 +152,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
         status: operation === 'deployment.runtime-logs'
           ? runtimeRoute === 'none' ? 'unavailable' : 'degraded'
           : operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit' || operation === 'deployment.env.list' ? 'ready' : 'degraded',
-        summary: `Vercel project ${resolved.name} (${resolved.id}) is ${explicit ? 'bound' : 'uniquely linked for read access'} for ${operation}`,
+        summary: `Vercel project ${resolved.name} (${resolved.id}) is ${explicitlyBound ? 'bound' : 'uniquely linked and verified'} for ${operation}`,
         diagnostics: [{ level: 'info', source: 'vercel', message: operation === 'deployment.runtime-logs'
           ? runtimeRoute === 'shared-connection'
             ? 'Project identity is verified through the bound installation; runtime request-log reads use the shared owner connection, while each exact deployment read remains authoritative for provider health.'
@@ -376,9 +368,15 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     throw { code: 'NOT_FOUND', source: 'vercel', message: 'No unique, fully verified Vercel project matches the requested repository in the connected installation' };
   }
 
+  private async mutationProject(project: ProjectReference): Promise<{ binding: VercelProjectBinding; id: string; data: JsonRecord }> {
+    return this.bindings.has(project.id)
+      ? await this.boundProject(project)
+      : await this.readProject(project);
+  }
+
   private async exactDeployment(project: ProjectReference, deploymentId: string, readOnly = false, readEvidence?: VercelReadEvidence) {
     if (!/^dpl_[A-Za-z0-9]+$/u.test(deploymentId)) throw { code: 'CONFLICT', source: 'vercel', message: 'An exact deployment ID is required' };
-    const bound = readOnly ? await this.readProject(project, readEvidence) : await this.boundProject(project);
+    const bound = readOnly ? await this.readProject(project, readEvidence) : await this.mutationProject(project);
     const detail = await this.getJson(`/v13/deployments/${encodeURIComponent(deploymentId)}`, scopeQuery(bound.binding), bound.binding);
     if (stringField(detail, 'projectId') !== bound.id) {
       throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'Deployment is outside the bound project' };
@@ -410,7 +408,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       throw { code: 'CONFLICT', source: 'vercel', message: 'Exact Git repository, ref, and full SHA are required' };
     }
     if (input.target === 'production') this.requireProductionApproval(input.approvalReference);
-    const bound = await this.boundProject(input.project);
+    const bound = await this.mutationProject(input.project);
     const link = recordField(bound.data, 'link');
     const [org, repo] = input.repository.split('/');
     const linkedRepo = stringField(link ?? {}, 'repo');
@@ -506,7 +504,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
 
   async createVcrRepository(input: VercelVcrCreateInput): Promise<Record<string, unknown>> {
     assertVcrRepositoryName(input.name);
-    const bound = await this.boundProject(input.project);
+    const bound = await this.mutationProject(input.project);
     try {
       const existing = await this.readVcrRepository(bound, input.name);
       return { ...existing, created: false, verified: true };
@@ -552,7 +550,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   }
 
   private async exactEnvironment(project: ProjectReference, envId: string, key: string) {
-    const bound = await this.boundProject(project);
+    const bound = await this.mutationProject(project);
     const listed = await this.listEnvironment({ project });
     const variables = listed.variables as Record<string, unknown>[];
     const variable = variables.find(item => item.id === envId && item.key === key);
@@ -563,7 +561,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   async upsertEnvironment(input: VercelEnvInput): Promise<Record<string, unknown>> {
     validateEnvInput(input);
     if (input.target.includes('production')) this.requireProductionApproval(input.approvalReference);
-    const bound = await this.boundProject(input.project);
+    const bound = await this.mutationProject(input.project);
     const existing = await this.listEnvironment(input);
     const sameKey = (existing.variables as JsonRecord[]).filter(item => item.key === input.key);
     if (sameKey.some(item => JSON.stringify(item.target) !== JSON.stringify(input.target) || item.gitBranch !== (input.gitBranch ?? null) || JSON.stringify(item.customEnvironmentIds) !== JSON.stringify(input.customEnvironmentIds ?? []))) {

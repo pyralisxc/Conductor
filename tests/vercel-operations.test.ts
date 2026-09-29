@@ -135,6 +135,55 @@ test('exact Git source must match the linked project and full SHA', async () => 
   assert.equal('target' in body, false);
 });
 
+test('uniquely linked connected Vercel project supports bounded mutations without a duplicate explicit project binding', async () => {
+  const calls: Array<{ path: string; method: string }> = [];
+  const provider = new VercelDeploymentProvider({
+    bindings: [{ id: 'shared-installation', project: 'seed', teamId: 'team_1', connectionId: 'icfg_1' }],
+    tokenResolver: async () => 'installation-token',
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      calls.push({ path: url.pathname, method });
+      if (url.pathname === '/v9/projects' && method === 'GET') {
+        return Response.json({
+          projects: [{ id: 'prj_app', name: 'app', link: { type: 'github', org: 'owner', repo: 'app', productionBranch: 'main' } }],
+          pagination: { next: null },
+        });
+      }
+      if (url.pathname === '/v9/projects/prj_app' && method === 'GET') {
+        return Response.json({ id: 'prj_app', name: 'app', link: { type: 'github', org: 'owner', repo: 'app', productionBranch: 'main' } });
+      }
+      if (url.pathname === '/v13/deployments/dpl_preview' && method === 'GET') {
+        return Response.json({ id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: 'preview' });
+      }
+      if (url.pathname === '/v13/deployments' && method === 'POST') {
+        return Response.json({ id: 'dpl_new', readyState: 'BUILDING' });
+      }
+      return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
+    },
+  });
+  const project = { id: 'CardForge', repository: 'owner/app' };
+
+  const preflight = (await provider.preflightOperation(project, 'deployment.redeploy'))?.[0];
+  assert.notEqual(preflight?.status, 'blocked');
+
+  const redeployed = await provider.redeploy({ project, deploymentId: 'dpl_preview', idempotencyKey: 'unbound-redeploy' });
+  assert.equal(redeployed.projectId, 'prj_app');
+  assert.equal(redeployed.deploymentId, 'dpl_new');
+
+  const created = await provider.createGitDeployment({
+    project,
+    repository: 'owner/app',
+    ref: 'preview',
+    sha: 'a'.repeat(40),
+    target: 'preview',
+    idempotencyKey: 'unbound-git-deploy',
+  });
+  assert.equal(created.projectId, 'prj_app');
+  assert.equal(created.sourceRevision, 'a'.repeat(40));
+  assert.equal(calls.some(call => call.path === '/v9/projects' && call.method === 'GET'), true);
+});
+
 test('explicit repository binding blocks a mismatched Vercel project before deployment writes', async () => {
   const calls: string[] = [];
   const provider = new VercelDeploymentProvider({
