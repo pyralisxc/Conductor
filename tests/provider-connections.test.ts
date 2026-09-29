@@ -143,3 +143,86 @@ test('provider connection store accepts explicit URL/token configuration without
     }
   ));
 });
+
+
+test('VCR keeps project identity on the installation while using the shared owner credential for registry API calls', async () => {
+  const runtimeConnectionId = 'vercel-runtime-primary';
+  let exists = false;
+  const authorization = new Map<string, string>();
+  const resolver = new RoutedProviderConnectionCredentialResolver({
+    vercel: async ({ connectionId, accountId }) => {
+      if (connectionId === runtimeConnectionId) return 'runtime-direct-token';
+      if (connectionId === 'icfg_di' && accountId === 'team_di') return 'installation-di';
+      return undefined;
+    },
+  });
+  const provider = new VercelDeploymentProvider({
+    credentialResolver: resolver,
+    runtimeConnectionId,
+    bindings: [{ id: 'di', project: 'prj_di', repository: 'owner/di', teamId: 'team_di', connectionId: 'icfg_di' }],
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      authorization.set(`${method} ${url.pathname}`, (init?.headers as Record<string, string>).Authorization);
+      if (url.pathname === '/v9/projects/prj_di') {
+        return Response.json({ id: 'prj_di', name: 'di', link: { type: 'github', org: 'owner', repo: 'di' } });
+      }
+      if (url.pathname === '/v1/vcr/repository/dockerfile' && method === 'GET') {
+        return exists
+          ? Response.json({ id: 'vcr_dockerfile', name: 'dockerfile', projectId: 'prj_di' })
+          : Response.json({ error: { message: 'not found' } }, { status: 404 });
+      }
+      if (url.pathname === '/v1/vcr/repository' && method === 'POST') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        assert.deepEqual(body, { projectId: 'prj_di', name: 'dockerfile' });
+        exists = true;
+        return Response.json({ id: 'vcr_dockerfile', name: 'dockerfile', projectId: 'prj_di' }, { status: 201 });
+      }
+      if (url.pathname === '/v1/vcr/repository' && method === 'GET') {
+        return Response.json({ repositories: [{ id: 'vcr_dockerfile', name: 'dockerfile', projectId: 'prj_di' }] });
+      }
+      if (url.pathname === '/v1/vcr/repository/dockerfile/images' && method === 'GET') {
+        return Response.json({ images: [] });
+      }
+      return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
+    },
+  });
+  const project = { id: 'di', repository: 'owner/di' };
+  const created = await provider.createVcrRepository({ project, name: 'dockerfile', idempotencyKey: 'create-vcr-dockerfile' });
+  assert.equal(created.verified, true);
+  await provider.listVcrRepositories({ project, limit: 10 });
+  await provider.listVcrImages({ project, name: 'dockerfile', limit: 10 });
+
+  assert.equal(authorization.get('GET /v9/projects/prj_di'), 'Bearer installation-di');
+  assert.equal(authorization.get('POST /v1/vcr/repository'), 'Bearer runtime-direct-token');
+  assert.equal(authorization.get('GET /v1/vcr/repository/dockerfile'), 'Bearer runtime-direct-token');
+  assert.equal(authorization.get('GET /v1/vcr/repository'), 'Bearer runtime-direct-token');
+  assert.equal(authorization.get('GET /v1/vcr/repository/dockerfile/images'), 'Bearer runtime-direct-token');
+});
+
+test('VCR falls back to the bound installation when no shared owner credential exists', async () => {
+  const authorization = new Map<string, string>();
+  const resolver = new RoutedProviderConnectionCredentialResolver({
+    vercel: async ({ connectionId, accountId }) =>
+      connectionId === 'icfg_di' && accountId === 'team_di' ? 'installation-di' : undefined,
+  });
+  const provider = new VercelDeploymentProvider({
+    credentialResolver: resolver,
+    runtimeConnectionId: 'vercel-runtime-primary',
+    bindings: [{ id: 'di', project: 'prj_di', repository: 'owner/di', teamId: 'team_di', connectionId: 'icfg_di' }],
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      authorization.set(url.pathname, (init?.headers as Record<string, string>).Authorization);
+      if (url.pathname === '/v9/projects/prj_di') {
+        return Response.json({ id: 'prj_di', name: 'di', link: { type: 'github', org: 'owner', repo: 'di' } });
+      }
+      if (url.pathname === '/v1/vcr/repository/dockerfile') {
+        return Response.json({ id: 'vcr_dockerfile', name: 'dockerfile', projectId: 'prj_di' });
+      }
+      return Response.json({ error: { message: 'unexpected' } }, { status: 404 });
+    },
+  });
+  await provider.getVcrRepository({ project: { id: 'di', repository: 'owner/di' }, name: 'dockerfile' });
+  assert.equal(authorization.get('/v9/projects/prj_di'), 'Bearer installation-di');
+  assert.equal(authorization.get('/v1/vcr/repository/dockerfile'), 'Bearer installation-di');
+});

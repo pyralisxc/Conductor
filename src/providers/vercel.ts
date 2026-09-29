@@ -147,6 +147,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
         await this.listEnvironment({ project });
       }
       const runtimeRoute = operation === 'deployment.runtime-logs' ? await this.runtimeCredentialRoute(binding) : undefined;
+      const vcrCredential = vcrOperation ? await this.vcrCredentialRoute(binding) : undefined;
       return [{
         provider: 'vercel',
         status: operation === 'deployment.runtime-logs'
@@ -166,7 +167,9 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
               ? 'Environment metadata read verified.'
               : 'Environment metadata read verified; write permission cannot be proven without a mutation.'
             : vcrOperation
-              ? 'Vercel project binding is verified. VCR repository permission is proven only by the exact repository read or create operation.'
+              ? vcrCredential === 'runtime'
+                ? 'Vercel project identity is verified through the bound installation; VCR API requests use the shared owner credential, while exact provider reads remain authoritative.'
+                : 'Vercel project identity is verified through the bound installation; no shared owner credential is available, so VCR requests use the bound installation and provider denial remains explicit.'
             : operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit'
               ? 'Project binding and read credential verified; operation-specific provider access is confirmed only by the read itself.'
               : 'Vercel project binding and read credential verified; write permission cannot be proven without a mutation.' }],
@@ -510,7 +513,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       projectId: bound.id,
       limit: String(limit),
       ...(input.cursor ? { cursor: input.cursor } : {}),
-    }, bound.binding);
+    }, bound.binding, await this.vcrCredentialRoute(bound.binding));
     const raw = [...arrayField(payload, 'repositories'), ...arrayField(payload, 'data')];
     const repositories = raw.slice(0, limit).flatMap((value) => {
       const item = record(value);
@@ -554,6 +557,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
         ...(typeof input.untagged === 'boolean' ? { untagged: input.untagged ? 'true' : 'false' } : {}),
       },
       bound.binding,
+      await this.vcrCredentialRoute(bound.binding),
     );
     const raw = [...arrayField(payload, 'images'), ...arrayField(payload, 'data')];
     const images = raw.slice(0, limit).flatMap((value) => {
@@ -613,7 +617,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     await this.request('/v1/vcr/repository', scopeQuery(bound.binding), bound.binding, {
       method: 'POST',
       body: { projectId: bound.id, name: input.name },
-    });
+    }, await this.vcrCredentialRoute(bound.binding));
     const verified = await this.readVcrRepository(bound, input.name);
     return { ...verified, created: true, verified: true };
   }
@@ -628,6 +632,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       `/v1/vcr/repository/${encodeURIComponent(input.name)}/images/${encodeURIComponent(input.imageId)}`,
       { ...scopeQuery(bound.binding), projectId: bound.id },
       bound.binding,
+      undefined,
+      await this.vcrCredentialRoute(bound.binding),
     );
     const payload = await response.json().catch(() => null);
     const envelope = record(payload);
@@ -653,6 +659,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       `/v1/vcr/repository/${encodeURIComponent(name)}`,
       { ...scopeQuery(bound.binding), projectId: bound.id },
       bound.binding,
+      undefined,
+      await this.vcrCredentialRoute(bound.binding),
     );
     const payload = await response.json().catch(() => null);
     const envelope = record(payload);
@@ -900,6 +908,10 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     throw { code: 'AUTH_REQUIRED', source: 'vercel', message: 'Direct Vercel runtime-log access requires an active owner runtime connection' };
   }
 
+  private async vcrCredentialRoute(binding: VercelProjectBinding): Promise<'binding' | 'runtime'> {
+    return await this.runtimeCredentialRoute(binding) === 'none' ? 'binding' : 'runtime';
+  }
+
   private async getProject(binding: VercelProjectBinding): Promise<JsonRecord> {
     return await this.getJson(
       `/v9/projects/${encodeURIComponent(binding.project)}`,
@@ -907,8 +919,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     );
   }
 
-  private async getJson(path: string, query: Record<string, string>, binding: VercelProjectBinding): Promise<JsonRecord> {
-    const response = await this.request(path, query, binding);
+  private async getJson(path: string, query: Record<string, string>, binding: VercelProjectBinding, credential: 'binding' | 'runtime' = 'binding'): Promise<JsonRecord> {
+    const response = await this.request(path, query, binding, undefined, credential);
     const body = await response.json().catch(() => null);
     if (!body || typeof body !== 'object') {
       throw { code: 'COMMAND_FAILED', source: 'vercel', message: `Vercel returned a non-JSON response for ${path}` };
