@@ -113,6 +113,47 @@ function decrypt(value: string): {
   };
 }
 
+export async function listVercelInstallationMetadata():
+  Promise<readonly VercelInstallationMetadata[]> {
+  const { redis } = configuration();
+  const ids = (
+    await redis.smembers<string[]>(prefix + ':ids')
+  ).slice().sort();
+
+  const result: VercelInstallationMetadata[] = [];
+  for (const configurationId of ids) {
+    if (!/^icfg_[\w-]+$/u.test(configurationId)) {
+      continue;
+    }
+    const key =
+      prefix + ':installation:' + configurationId;
+    const record = await redis.get<string>(key);
+    if (!record) continue;
+
+    const opened = decrypt(record);
+    if (opened.replacement) {
+      await redis.set(key, opened.replacement);
+    }
+    const installation = opened.installation;
+    if (
+      installation.configurationId !== configurationId
+    ) {
+      throw new Error(
+        'Stored Vercel installation identity mismatch'
+      );
+    }
+    result.push(
+      Object.freeze({
+        configurationId:
+          installation.configurationId,
+        teamId: installation.teamId,
+        connectedAt: installation.connectedAt,
+      })
+    );
+  }
+  return Object.freeze(result);
+}
+
 export async function vercelInstallationMetadata(
   configurationId: string
 ): Promise<VercelInstallationMetadata | undefined> {
