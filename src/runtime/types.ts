@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v9' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v10' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -525,6 +525,7 @@ export interface ResumeLifecycleInput {
   expectedHeadSha: string;
   expectedBaseSha: string;
   approvalReference: string;
+  overrideBlockerIssueNumbers?: number[];
   idempotencyKey: string;
 }
 
