@@ -140,6 +140,11 @@ test('ASC authority source canary derives repository only from the consumed dele
 });
 
 test('ASC authority mutation canary retains Conductor work scope and idempotent mutation execution', async () => {
+  const previousSessionSecret =
+    process.env.CONDUCTOR_SESSION_SECRET;
+  process.env.CONDUCTOR_SESSION_SECRET =
+    'x'.repeat(40);
+
   let mutationCalls = 0;
   let providerRepository = '';
   const provider: SourceControlMutationProvider = {
@@ -232,6 +237,13 @@ test('ASC authority mutation canary retains Conductor work scope and idempotent 
     'owner-verified:asc-61'
   );
   assert.equal(result.execution.status, 'succeeded');
+
+  if (previousSessionSecret === undefined) {
+    delete process.env.CONDUCTOR_SESSION_SECRET;
+  } else {
+    process.env.CONDUCTOR_SESSION_SECRET =
+      previousSessionSecret;
+  }
 });
 
 test('ASC authority rejection stops before provider execution with no legacy fallback', async () => {
