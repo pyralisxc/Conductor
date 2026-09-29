@@ -389,8 +389,8 @@ function bridgeFromEnvironment(): AscProviderBridgeOptions {
       getInstallationMetadata:
         vercelInstallationMetadata,
       async getRepositoryAttestation(
-        repository,
-        configurationId
+        repository: string,
+        configurationId: string
       ) {
         const metadata =
           await vercelInstallationMetadata(
