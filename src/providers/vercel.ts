@@ -9,7 +9,7 @@ import type {
   GetDeploymentStatusInput,
   OperationPreflightCheck,
   ProjectReference,
-  VercelProjectInput, VercelReadProjectInput, VercelReadEvidence, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput,
+  VercelProjectInput, VercelReadProjectInput, VercelReadEvidence, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput, VercelVcrListInput, VercelVcrImageListInput, VercelVcrImageDeleteInput,
   RuntimeOperationName,
 } from '../runtime/types.js';
 import type { VercelOperationsProvider, OperationPreflightProvider } from './runtime.js';
@@ -141,7 +141,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
         ? await this.readProject(project)
         : await this.mutationProject(project);
       const environmentOperation = operation === 'deployment.env.list' || operation.startsWith('deployment.env.');
-      const vcrOperation = operation === 'deployment.vcr.get' || operation === 'deployment.vcr.create';
+      const vcrOperation = operation.startsWith('deployment.vcr.');
       if (environmentOperation) {
         // Project read access does not imply access to project environment variables.
         await this.listEnvironment({ project });
@@ -502,6 +502,104 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     return await this.readVcrRepository(bound, input.name);
   }
 
+  async listVcrRepositories(input: VercelVcrListInput): Promise<Record<string, unknown>> {
+    const bound = await this.readProject(input.project);
+    const limit = clamp(input.limit ?? 50, 1, 100);
+    const payload = await this.getJson('/v1/vcr/repository', {
+      ...scopeQuery(bound.binding),
+      projectId: bound.id,
+      limit: String(limit),
+      ...(input.cursor ? { cursor: input.cursor } : {}),
+    }, bound.binding);
+    const raw = [...arrayField(payload, 'repositories'), ...arrayField(payload, 'data')];
+    const repositories = raw.slice(0, limit).flatMap((value) => {
+      const item = record(value);
+      if (!item) return [];
+      const name = stringField(item, 'name');
+      const projectId = stringField(item, 'projectId') ?? stringField(recordField(item, 'project') ?? {}, 'id');
+      if (!name || (projectId && projectId !== bound.id)) return [];
+      return [{
+        repositoryId: stringField(item, 'id') ?? stringField(item, 'uid'),
+        name,
+        createdAt: item.createdAt ?? null,
+        updatedAt: item.updatedAt ?? null,
+      }];
+    });
+    return {
+      provider: 'vercel',
+      projectId: bound.id,
+      repositories,
+      truncated: raw.length > limit,
+      nextCursor: stringField(payload, 'nextCursor') ?? stringField(recordField(payload, 'pagination') ?? {}, 'next'),
+      capacity: {
+        status: 'unsupported',
+        reason: 'Vercel VCR project quota/headroom is not exposed authoritatively by this provider API; Conductor does not estimate it.',
+      },
+      observedAt: this.now().toISOString(),
+    };
+  }
+
+  async listVcrImages(input: VercelVcrImageListInput): Promise<Record<string, unknown>> {
+    assertVcrRepositoryName(input.name);
+    const bound = await this.readProject(input.project);
+    await this.readVcrRepository(bound, input.name);
+    const limit = clamp(input.limit ?? 50, 1, 100);
+    const payload = await this.getJson(
+      `/v1/vcr/repository/${encodeURIComponent(input.name)}/images`,
+      {
+        ...scopeQuery(bound.binding),
+        projectId: bound.id,
+        limit: String(limit),
+        ...(input.cursor ? { cursor: input.cursor } : {}),
+        ...(typeof input.untagged === 'boolean' ? { untagged: input.untagged ? 'true' : 'false' } : {}),
+      },
+      bound.binding,
+    );
+    const raw = [...arrayField(payload, 'images'), ...arrayField(payload, 'data')];
+    const images = raw.slice(0, limit).flatMap((value) => {
+      const item = record(value);
+      if (!item) return [];
+      const id = stringField(item, 'id') ?? stringField(item, 'uid');
+      const repositoryId = stringField(item, 'repositoryId') ?? stringField(recordField(item, 'repository') ?? {}, 'id');
+      const manifestDigest = stringField(item, 'manifestDigest') ?? stringField(item, 'digest');
+      if (!id || !manifestDigest) return [];
+      const tags = arrayField(item, 'tags').slice(0, 50).flatMap(tag => {
+        if (typeof tag === 'string') return [tag];
+        const value = record(tag);
+        return value ? [stringField(value, 'name') ?? stringField(value, 'tag')].filter((entry): entry is string => Boolean(entry)) : [];
+      });
+      return [{
+        imageId: id,
+        repositoryId,
+        manifestDigest,
+        sizeInBytes: typeof item.sizeInBytes === 'number' ? item.sizeInBytes : (typeof item.size === 'number' ? item.size : null),
+        status: stringField(item, 'status'),
+        kind: stringField(item, 'kind'),
+        platform: stringField(item, 'platform'),
+        architecture: stringField(item, 'architecture') ?? stringField(item, 'arch'),
+        tags,
+        createdAt: item.createdAt ?? null,
+        updatedAt: item.updatedAt ?? null,
+      }];
+    });
+    const knownBytes = images.reduce((sum, image) => sum + (typeof image.sizeInBytes === 'number' ? image.sizeInBytes : 0), 0);
+    return {
+      provider: 'vercel',
+      projectId: bound.id,
+      repository: input.name,
+      images,
+      truncated: raw.length > limit,
+      nextCursor: stringField(payload, 'nextCursor') ?? stringField(recordField(payload, 'pagination') ?? {}, 'next'),
+      knownBytes,
+      knownBytesScope: 'returned-page-only',
+      capacity: {
+        status: 'unsupported',
+        reason: 'Vercel VCR project quota/headroom is not exposed authoritatively by this provider API; Conductor does not estimate it.',
+      },
+      observedAt: this.now().toISOString(),
+    };
+  }
+
   async createVcrRepository(input: VercelVcrCreateInput): Promise<Record<string, unknown>> {
     assertVcrRepositoryName(input.name);
     const bound = await this.mutationProject(input.project);
@@ -518,6 +616,33 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     });
     const verified = await this.readVcrRepository(bound, input.name);
     return { ...verified, created: true, verified: true };
+  }
+
+  async deleteVcrImage(input: VercelVcrImageDeleteInput): Promise<Record<string, unknown>> {
+    assertVcrRepositoryName(input.name);
+    if (!input.imageId.trim()) throw { code: 'CONFLICT', source: 'vercel', message: 'VCR image ID must not be empty' };
+    if (!input.expectedManifestDigest.trim()) throw { code: 'CONFLICT', source: 'vercel', message: 'VCR image deletion requires an exact expected manifest digest' };
+    const bound = await this.mutationProject(input.project);
+    await this.readVcrRepository(bound, input.name);
+    const response = await this.request(
+      `/v1/vcr/repository/${encodeURIComponent(input.name)}/images/${encodeURIComponent(input.imageId)}`,
+      { ...scopeQuery(bound.binding), projectId: bound.id },
+      bound.binding,
+    );
+    const payload = await response.json().catch(() => null);
+    const envelope = record(payload);
+    const image = envelope ? (recordField(envelope, 'image') ?? envelope) : null;
+    const id = image ? (stringField(image, 'id') ?? stringField(image, 'uid')) : null;
+    const manifestDigest = image ? (stringField(image, 'manifestDigest') ?? stringField(image, 'digest')) : null;
+    if (id !== input.imageId || manifestDigest !== input.expectedManifestDigest) {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'Exact VCR image ID/digest no longer matches provider state' };
+    }
+
+    throw {
+      code: 'TOOL_UNAVAILABLE',
+      source: 'vercel',
+      message: 'VCR image deletion is fail-closed: Conductor cannot yet prove this exact digest is unreferenced by current production/Preview deployments. No DELETE request was sent.',
+    };
   }
 
   private async readVcrRepository(
@@ -845,7 +970,8 @@ function scopeQuery(binding: VercelProjectBinding): Record<string, string> {
 
 function isDeploymentRead(operation: RuntimeOperationName): boolean {
   return operation === 'deployment.status' || operation === 'deployment.logs' || operation === 'deployment.audit'
-    || operation === 'deployment.runtime-logs' || operation === 'deployment.env.list' || operation === 'deployment.vcr.get';
+    || operation === 'deployment.runtime-logs' || operation === 'deployment.env.list'
+    || operation === 'deployment.vcr.get' || operation === 'deployment.vcr.list' || operation === 'deployment.vcr.images.list';
 }
 
 function assertVcrRepositoryName(name: string): void {

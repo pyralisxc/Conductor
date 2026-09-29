@@ -95,7 +95,7 @@ import {
   type GetDeploymentLogsInput,
   type DeploymentProjectStatus,
   type DeploymentLogs,
-  type VercelProjectInput, type VercelReadProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput, type VercelVcrRepositoryInput, type VercelVcrCreateInput,
+  type VercelProjectInput, type VercelReadProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput, type VercelVcrRepositoryInput, type VercelVcrCreateInput, type VercelVcrListInput, type VercelVcrImageListInput, type VercelVcrImageDeleteInput,
 } from './types.js';
 import { IdempotentMutationExecutor } from './idempotency.js';
 
@@ -191,6 +191,8 @@ const VERCEL_AUDIT_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.runtime-logs', description: 'Read bounded redacted runtime logs for one exact deployment.', mutates: false },
   { name: 'deployment.env.list', description: 'List project variable metadata without secret values.', mutates: false },
   { name: 'deployment.vcr.get', description: 'Read one exact Vercel Container Registry repository in the bound project.', mutates: false },
+  { name: 'deployment.vcr.list', description: 'List bounded VCR repository metadata for the exact project and report capacity/headroom support explicitly.', mutates: false },
+  { name: 'deployment.vcr.images.list', description: 'List bounded image/tag/digest metadata for one exact VCR repository without downloading image contents.', mutates: false },
 ];
 const VERCEL_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.redeploy', description: 'Redeploy one exact bound deployment.', mutates: true },
@@ -202,6 +204,7 @@ const VERCEL_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.env.update', description: 'Update one exact project environment variable.', mutates: true },
   { name: 'deployment.env.remove', description: 'Remove one exact project environment variable.', mutates: true },
   { name: 'deployment.vcr.create', description: 'Create one exact Vercel Container Registry repository in the bound project.', mutates: true },
+  { name: 'deployment.vcr.image.delete', description: 'Delete one exact VCR image only after Conductor proves exact identity and that no protected current deployment references it; otherwise fail closed.', mutates: true },
 ];
 
 const WORK_ITEM_READ_DEFINITIONS: readonly ToolDefinition[] = [
@@ -1200,6 +1203,8 @@ export class ConductorToolRuntime {
   async deploymentRuntimeLogs(input: VercelRuntimeLogsInput) { return this.vercelRead('deployment.runtime-logs', input, (provider, project) => provider.getRuntimeLogs({ ...input, project })); }
   async deploymentEnvironmentList(input: VercelReadProjectInput) { return this.vercelRead('deployment.env.list', input, (provider, project) => provider.listEnvironment({ ...input, project })); }
   async deploymentVcrGet(input: VercelVcrRepositoryInput) { return this.vercelRead('deployment.vcr.get', input, (provider, project) => provider.getVcrRepository({ ...input, project })); }
+  async deploymentVcrList(input: VercelVcrListInput) { return this.vercelRead('deployment.vcr.list', input, (provider, project) => provider.listVcrRepositories({ ...input, project })); }
+  async deploymentVcrImagesList(input: VercelVcrImageListInput) { return this.vercelRead('deployment.vcr.images.list', input, (provider, project) => provider.listVcrImages({ ...input, project })); }
 
   private async vercelMutation<Result>(operation: import('./types.js').MutationOperationName, input: VercelProjectInput & { idempotencyKey: string }, mutate: (provider: VercelOperationsProvider, project: ProjectReference) => Promise<Result>): Promise<ExecutionReceipt<Result>> {
     const project = this.resolveProjectReference(input.project);
@@ -1222,6 +1227,7 @@ export class ConductorToolRuntime {
   async vercelEnvUpdate(input: VercelEnvEditInput) { return this.vercelMutation('deployment.env.update', input, (provider, project) => provider.updateEnvironment({ ...input, project })); }
   async vercelEnvRemove(input: VercelEnvRemoveInput) { return this.vercelMutation('deployment.env.remove', input, (provider, project) => provider.removeEnvironment({ ...input, project })); }
   async vercelVcrCreate(input: VercelVcrCreateInput) { return this.vercelMutation('deployment.vcr.create', input, (provider, project) => provider.createVcrRepository({ ...input, project })); }
+  async vercelVcrImageDelete(input: VercelVcrImageDeleteInput) { return this.vercelMutation('deployment.vcr.image.delete', input, (provider, project) => provider.deleteVcrImage({ ...input, project })); }
 
   async workItemStatus(input: GetWorkItemStatusInput): Promise<ExecutionReceipt<WorkItemRecord>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
