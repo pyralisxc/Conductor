@@ -95,6 +95,8 @@ interface GitHubPullRequestResponse {
   merged?: boolean;
   mergeable?: boolean | null;
   mergeable_state?: string | null;
+  merge_commit_sha?: string | null;
+  merged_at?: string | null;
   head: { ref: string; sha: string };
   base: { ref: string; sha: string };
   labels?: Array<{ name?: string | null }>;
@@ -1629,7 +1631,39 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       }
     }
     if (!containedIn) {
-      throw { code: 'CONFLICT', message: `Branch ${input.branch} head ${input.expectedHeadSha} is not proven contained in Preview or the repository default branch` };
+      const mergedCandidates = await this.request<GitHubPullRequestResponse[]>(
+        repository,
+        `/pulls?state=closed&head=${encodeURIComponent(`${owner}:${input.branch}`)}&per_page=20`,
+        {},
+        credential,
+      );
+      for (const candidate of mergedCandidates) {
+        if (candidate.head.sha !== input.expectedHeadSha || !integrationBases.includes(candidate.base.ref)) continue;
+        const pull = await this.request<GitHubPullRequestResponse>(
+          repository,
+          `/pulls/${candidate.number}`,
+          {},
+          credential,
+        );
+        const mergeCommitSha = pull.merge_commit_sha;
+        if (pull.merged !== true || !mergeCommitSha || !/^[0-9a-f]{40}$/iu.test(mergeCommitSha)) continue;
+        const base = pull.base.ref;
+        if (!integrationBases.includes(base)) continue;
+        const response = await this.fetch(
+          `${this.apiBaseUrl}/repos/${encodeRepository(repository)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(mergeCommitSha)}`,
+          { headers: this.headers(credential.token) },
+        );
+        if (response.status === 404) continue;
+        if (!response.ok) throw await githubResponseError(response);
+        const comparison = await response.json() as { status?: string };
+        if (comparison.status === 'behind' || comparison.status === 'identical') {
+          containedIn = `${base} via merged PR #${pull.number}`;
+          break;
+        }
+      }
+    }
+    if (!containedIn) {
+      throw { code: 'CONFLICT', message: `Branch ${input.branch} head ${input.expectedHeadSha} is not proven contained in Preview/default by ancestry or an exact merged-PR result` };
     }
 
     const ref = await this.request<{ object: { sha: string } }>(
