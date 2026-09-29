@@ -387,6 +387,9 @@ test('GitHub provider deletes only exact integrated development branches', async
   let refSha = expected;
   let openPullRequest = false;
   let comparisonStatus = 'behind';
+  let mergedPullRequest = false;
+  let mergeCommitContained = false;
+  const mergeCommitSha = 'c'.repeat(40);
   let deleteCalls = 0;
   const requests: string[] = [];
   const provider = new GitHubRuntimeProvider({
@@ -400,10 +403,19 @@ test('GitHub provider deletes only exact integrated development branches', async
         return Response.json({ full_name: 'pyralisxc/Conductor', default_branch: 'main', permissions: { push: true } });
       }
       if (method === 'GET' && url.pathname === '/repos/pyralisxc/Conductor/pulls') {
-        return Response.json(openPullRequest ? [{ number: 12, html_url: 'https://example.test/12', state: 'open', head: { ref: 'work/old', sha: expected }, base: { ref: 'preview', sha: 'b'.repeat(40) } }] : []);
+        if (url.searchParams.get('state') === 'open') {
+          return Response.json(openPullRequest ? [{ number: 12, html_url: 'https://example.test/12', state: 'open', head: { ref: 'work/old', sha: expected }, base: { ref: 'preview', sha: 'b'.repeat(40) } }] : []);
+        }
+        if (url.searchParams.get('state') === 'closed' && mergedPullRequest) {
+          return Response.json([{ number: 13, html_url: 'https://example.test/13', state: 'closed', merged_at: '2026-09-29T00:00:00Z', head: { ref: 'work/old', sha: expected }, base: { ref: 'preview', sha: 'b'.repeat(40) }, merge_commit_sha: mergeCommitSha }]);
+        }
+        return Response.json([]);
+      }
+      if (method === 'GET' && url.pathname === '/repos/pyralisxc/Conductor/pulls/13') {
+        return Response.json({ number: 13, html_url: 'https://example.test/13', state: 'closed', merged: true, merged_at: '2026-09-29T00:00:00Z', head: { ref: 'work/old', sha: expected }, base: { ref: 'preview', sha: 'b'.repeat(40) }, merge_commit_sha: mergeCommitSha });
       }
       if (method === 'GET' && url.pathname.startsWith('/repos/pyralisxc/Conductor/compare/')) {
-        return Response.json({ status: comparisonStatus });
+        return Response.json({ status: url.pathname.endsWith(`...${mergeCommitSha}`) && mergeCommitContained ? 'behind' : comparisonStatus });
       }
       if (method === 'GET' && url.pathname === '/repos/pyralisxc/Conductor/git/ref/heads/work/old') {
         return Response.json({ object: { sha: refSha } });
@@ -449,6 +461,18 @@ test('GitHub provider deletes only exact integrated development branches', async
     (error: unknown) => (error as { message?: string }).message?.includes('not proven contained') === true,
   );
   assert.equal(deleteCalls, 1);
+
+  mergedPullRequest = true;
+  mergeCommitContained = true;
+  const squashDeleted = await provider.deleteBranch({
+    project,
+    branch: 'work/old',
+    expectedHeadSha: expected,
+    idempotencyKey: 'delete-squash-integrated-work',
+  });
+  assert.equal(squashDeleted.deleted, true);
+  assert.equal(squashDeleted.containedIn, 'preview via merged PR #13');
+  assert.equal(deleteCalls, 2);
 });
 
 test('GitHub provider opens work pull requests against explicit repository-native targets', async () => {
@@ -580,8 +604,8 @@ test('GitHub provider returns exact PR identity plus checks and workflow runs', 
         merged: false,
         mergeable: true,
         mergeable_state: 'clean',
-        head: { ref: 'work/cf-cleanup', sha: headSha },
-        base: { ref: 'vercel-preview', sha: baseSha },
+        head: { ref: 'work/cf-cleanup', sha: headSha, user: { login: 'owner' }, repo: { id: 1, full_name: 'pyralisxc/CardForge', noisy: true } },
+        base: { ref: 'vercel-preview', sha: baseSha, user: { login: 'owner' }, repo: { id: 1, full_name: 'pyralisxc/CardForge', noisy: true } },
         labels: [{ name: 'seal-b' }],
       });
       if (url.includes(`/commits/${headSha}/check-runs`)) return Response.json({
@@ -601,8 +625,10 @@ test('GitHub provider returns exact PR identity plus checks and workflow runs', 
     project: { id: 'pyralisxc/CardForge' },
     pullRequestNumber: 12,
   });
-  assert.equal(status.head.sha, headSha);
-  assert.equal(status.base.sha, baseSha);
+  assert.deepEqual(status.head, { ref: 'work/cf-cleanup', sha: headSha });
+  assert.deepEqual(status.base, { ref: 'vercel-preview', sha: baseSha });
+  assert.equal('repo' in (status.head as unknown as Record<string, unknown>), false);
+  assert.equal('user' in (status.base as unknown as Record<string, unknown>), false);
   assert.deepEqual(status.labels, ['seal-b']);
   assert.equal(status.checks.total, 2);
   assert.equal(status.checks.pending, 1);
