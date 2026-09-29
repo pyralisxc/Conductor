@@ -7,6 +7,12 @@ import { RedisProviderConnectionCredentialStore } from './provider-connections.j
 import { providerCredentialVaultFromEnvironment } from './credential-vault.js';
 
 type Installation = { configurationId: string; teamId: string | null; connectedAt: string; token: string };
+
+export interface VercelInstallationMetadata {
+  readonly configurationId: string;
+  readonly teamId: string | null;
+  readonly connectedAt: string;
+}
 const prefix = 'conductor:vercel:connection:v1';
 const stateTtl = 600;
 const csrfTtlSeconds = 15 * 60;
@@ -105,6 +111,31 @@ function decrypt(value: string): {
       ? { replacement: opened.replacement }
       : {}),
   };
+}
+
+export async function vercelInstallationMetadata(
+  configurationId: string
+): Promise<VercelInstallationMetadata | undefined> {
+  if (!/^icfg_[\w-]+$/u.test(configurationId)) {
+    throw new Error('Invalid Vercel installation ID');
+  }
+  const { redis } = configuration();
+  const key = prefix + ':installation:' + configurationId;
+  const record = await redis.get<string>(key);
+  if (!record) return undefined;
+  const opened = decrypt(record);
+  if (opened.replacement) {
+    await redis.set(key, opened.replacement);
+  }
+  const installation = opened.installation;
+  if (installation.configurationId !== configurationId) {
+    throw new Error('Stored Vercel installation identity mismatch');
+  }
+  return Object.freeze({
+    configurationId: installation.configurationId,
+    teamId: installation.teamId,
+    connectedAt: installation.connectedAt,
+  });
 }
 
 export async function vercelInstallationToken(configurationId: string, teamId?: string): Promise<string | undefined> {
