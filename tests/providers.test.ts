@@ -604,8 +604,8 @@ test('GitHub provider returns exact PR identity plus checks and workflow runs', 
         merged: false,
         mergeable: true,
         mergeable_state: 'clean',
-        head: { ref: 'work/cf-cleanup', sha: headSha },
-        base: { ref: 'vercel-preview', sha: baseSha },
+        head: { ref: 'work/cf-cleanup', sha: headSha, user: { login: 'owner' }, repo: { id: 1, full_name: 'pyralisxc/CardForge', noisy: true } },
+        base: { ref: 'vercel-preview', sha: baseSha, user: { login: 'owner' }, repo: { id: 1, full_name: 'pyralisxc/CardForge', noisy: true } },
         labels: [{ name: 'seal-b' }],
       });
       if (url.includes(`/commits/${headSha}/check-runs`)) return Response.json({
@@ -625,8 +625,10 @@ test('GitHub provider returns exact PR identity plus checks and workflow runs', 
     project: { id: 'pyralisxc/CardForge' },
     pullRequestNumber: 12,
   });
-  assert.equal(status.head.sha, headSha);
-  assert.equal(status.base.sha, baseSha);
+  assert.deepEqual(status.head, { ref: 'work/cf-cleanup', sha: headSha });
+  assert.deepEqual(status.base, { ref: 'vercel-preview', sha: baseSha });
+  assert.equal('repo' in (status.head as unknown as Record<string, unknown>), false);
+  assert.equal('user' in (status.base as unknown as Record<string, unknown>), false);
   assert.deepEqual(status.labels, ['seal-b']);
   assert.equal(status.checks.total, 2);
   assert.equal(status.checks.pending, 1);
