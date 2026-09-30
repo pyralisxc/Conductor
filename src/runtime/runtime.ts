@@ -1295,62 +1295,91 @@ export class ConductorToolRuntime {
       };
     }
 
-    let status: DeploymentProjectStatus;
-    try {
-      status = await this.deploymentProvider.getDeploymentStatus({ project, limit: 50 });
-    } catch (error) {
-      const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', 'vercel');
-      return {
-        status: normalized.code === 'NOT_FOUND' ? 'unavailable' : 'error',
-        sourceRevision: input.sha,
-        error: {
-          code: normalized.code,
-          message: normalized.message,
-          retryable: normalized.retryable,
-          source: normalized.source,
-        },
-      };
-    }
+    const configuredGraceMs = Number(process.env.CONDUCTOR_PRODUCTION_HANDOFF_GRACE_MS ?? 2500);
+    const observationGraceMs = Number.isFinite(configuredGraceMs)
+      ? Math.min(Math.max(Math.trunc(configuredGraceMs), 0), 10_000)
+      : 2500;
+    const observationAttempts = observationGraceMs > 0 ? 5 : 1;
+    const observationDelayMs = observationAttempts > 1
+      ? Math.ceil(observationGraceMs / (observationAttempts - 1))
+      : 0;
 
-    const productionBranch = status.project.productionBranch;
-    if (!productionBranch) {
-      return {
-        status: 'error',
-        sourceRevision: input.sha,
-        error: {
-          code: 'CONFLICT',
-          message: 'Bound Vercel project does not declare a production branch',
-          retryable: false,
-          source: 'vercel',
-        },
-      };
-    }
+    let productionBranch: string | null = null;
+    for (let attempt = 0; attempt < observationAttempts; attempt += 1) {
+      let status: DeploymentProjectStatus;
+      try {
+        status = await this.deploymentProvider.getDeploymentStatus({ project, limit: 50 });
+      } catch (error) {
+        const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', 'vercel');
+        return {
+          status: normalized.code === 'NOT_FOUND' ? 'unavailable' : 'error',
+          sourceRevision: input.sha,
+          error: {
+            code: normalized.code,
+            message: normalized.message,
+            retryable: normalized.retryable,
+            source: normalized.source,
+          },
+        };
+      }
 
-    const exact = [status.production, status.latestProductionAttempt, ...status.recent]
-      .filter((item): item is NonNullable<typeof item> => Boolean(item))
-      .find((item) =>
-        item.sourceRevision === input.sha
-        && item.sourceRef === productionBranch
-        && item.target === 'production'
-      );
+      const observedProductionBranch = status.project.productionBranch;
+      if (!observedProductionBranch) {
+        return {
+          status: 'error',
+          sourceRevision: input.sha,
+          error: {
+            code: 'CONFLICT',
+            message: 'Bound Vercel project does not declare a production branch',
+            retryable: false,
+            source: 'vercel',
+          },
+        };
+      }
+      if (productionBranch && productionBranch !== observedProductionBranch) {
+        return {
+          status: 'error',
+          sourceRevision: input.sha,
+          error: {
+            code: 'CONFLICT',
+            message: `Vercel production branch changed during promotion handoff from ${productionBranch} to ${observedProductionBranch}`,
+            retryable: false,
+            source: 'vercel',
+          },
+        };
+      }
+      productionBranch = observedProductionBranch;
 
-    if (exact) {
-      const deploymentState = exact.state ?? 'unknown';
-      return {
-        status: 'observed',
-        deploymentId: exact.id,
-        deploymentState,
-        sourceRevision: input.sha,
-        sourceRef: productionBranch,
-        ready: deploymentState.toUpperCase() === 'READY',
-        failed: lifecycleDeploymentFailed(deploymentState),
-      };
+      const exact = [status.production, status.latestProductionAttempt, ...status.recent]
+        .filter((item): item is NonNullable<typeof item> => Boolean(item))
+        .find((item) =>
+          item.sourceRevision === input.sha
+          && item.sourceRef === productionBranch
+          && item.target === 'production'
+        );
+
+      if (exact) {
+        const deploymentState = exact.state ?? 'unknown';
+        return {
+          status: 'observed',
+          deploymentId: exact.id,
+          deploymentState,
+          sourceRevision: input.sha,
+          sourceRef: productionBranch,
+          ready: deploymentState.toUpperCase() === 'READY',
+          failed: lifecycleDeploymentFailed(deploymentState),
+          observationAttempts: attempt + 1,
+          observationGraceMs,
+        };
+      }
+
+      if (attempt + 1 < observationAttempts) await lifecycleDelay(observationDelayMs);
     }
 
     const created = await this.vercelCreateGitDeployment({
       project,
       repository: input.repository,
-      ref: productionBranch,
+      ref: productionBranch!,
       sha: input.sha,
       target: 'production',
       approvalReference: input.approvalReference,
@@ -1360,7 +1389,7 @@ export class ConductorToolRuntime {
       return {
         status: 'error',
         sourceRevision: input.sha,
-        sourceRef: productionBranch,
+        sourceRef: productionBranch!,
         error: created.error,
       };
     }
@@ -1372,10 +1401,12 @@ export class ConductorToolRuntime {
       deploymentId: typeof value.deploymentId === 'string' ? value.deploymentId : undefined,
       deploymentState,
       sourceRevision: input.sha,
-      sourceRef: productionBranch,
+      sourceRef: productionBranch!,
       ready: deploymentState.toUpperCase() === 'READY',
       failed: lifecycleDeploymentFailed(deploymentState),
       replayed: created.idempotency?.replayed ?? false,
+      observationAttempts,
+      observationGraceMs,
     };
   }
 
