@@ -78,7 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v12'),
+      catalogVersion: z.literal('conductor.catalog.v13'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -637,7 +637,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
   if (runtime.vercelMutationEnabled) {
     const idempotencyKey = z.string().min(8).max(200);
     const deploymentId = z.string().regex(/^dpl_[A-Za-z0-9]+$/u);
-    const approvalReference = z.string().optional().describe('Exact owner approval for production actions; must begin owner-approved:');
+    const approvalReference = z.string().min(16).max(500).regex(/^owner-approved:/u).optional().describe('Exact owner approval for production actions; must begin owner-approved: and include a non-empty approval reference.');
     const base = { project: projectSchema, idempotencyKey, workContext: workContextSchema };
     const deployment = z.object({ ...base, deploymentId, approvalReference });
     const variable = z.object({ ...base, key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u), value: z.string(), type: z.enum(['plain', 'encrypted', 'sensitive']), target: z.array(z.enum(['production','preview','development'])).min(1).max(3), gitBranch: z.string().optional(), customEnvironmentIds: z.array(z.string()).max(20).optional(), approvalReference });

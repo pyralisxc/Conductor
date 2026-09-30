@@ -342,6 +342,10 @@ test('work bootstrap composes catalog freshness, topology, work state and provid
   assert.match(first.result.catalogDigest, /^[0-9a-f]{64}$/u);
   assert.equal(first.result.clientCatalog.freshness, 'unknown');
   assert.deepEqual(first.result.topology, topology);
+  assert.equal(first.result.workflow.status, 'ready');
+  assert.equal(first.result.workflow.proofBoundary, 'repository-ci');
+  assert.equal(first.result.workflow.integrationBranch, 'preview');
+  assert.equal(first.result.workflow.setupGate, null);
   assert.equal(first.result.intelligence.status, 'degraded');
 
   const current = await runtime.workBootstrap({ project: { id: 'Conductor', repository: 'pyralisxc/Conductor' }, clientCatalogDigest: first.result.catalogDigest });
@@ -356,6 +360,103 @@ test('work bootstrap composes catalog freshness, topology, work state and provid
   }
 });
 
+
+test('work bootstrap surfaces a self-describing Preview bootstrap gate when integration topology is missing', async () => {
+  const workProvider: WorkItemCandidateReadProvider = {
+    id: 'github-work',
+    async getCapabilities() { return []; },
+    async getWorkItemStatus() { throw new Error('unused'); },
+    async listWorkItems() { return { repository: 'pyralisxc/Development-OS', items: [], truncated: false }; },
+    async listWorkItemPullRequests() { return []; },
+  };
+  const githubPreflight: ProjectPreflightProvider = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    async preflightProject() {
+      return [
+        { check: 'repository.access' as const, status: 'ready' as const, provider: 'github', summary: 'ready', diagnostics: [] },
+        { check: 'github.read' as const, status: 'ready' as const, provider: 'github', summary: 'ready', diagnostics: [] },
+      ];
+    },
+  };
+  const runtime = new ConductorToolRuntime({
+    providers: [githubPreflight],
+    workItemProvider: workProvider as any,
+    workItemCandidateProvider: workProvider,
+    repositoryBootstrapProvider: {
+      id: 'github-bootstrap',
+      async getCapabilities() { return []; },
+      async getRepositoryBootstrap() {
+        return {
+          provider: 'github' as const,
+          repository: 'pyralisxc/Development-OS',
+          defaultBranch: 'main',
+          defaultHead: 'f'.repeat(40),
+          integrationBranch: null,
+          integrationHead: null,
+          observedAt: '2026-09-30T00:00:00.000Z',
+        };
+      },
+    },
+  });
+  const receipt = await runtime.workBootstrap({ project: { id: 'development-os', repository: 'pyralisxc/Development-OS' } });
+  assert.equal(receipt.status, 'succeeded'); if (receipt.status !== 'succeeded') return;
+  assert.equal(receipt.result.workflow.status, 'setup-required');
+  assert.equal(receipt.result.workflow.proofBoundary, 'repository-ci');
+  assert.deepEqual(receipt.result.workflow.setupGate?.allowedBranches, ['preview', 'vercel-preview']);
+  assert.equal(receipt.result.workflow.setupGate?.expectedDefaultHead, 'f'.repeat(40));
+  assert.match(receipt.result.workflow.setupGate?.protectedConcern ?? '', /silently establish branch policy/iu);
+  assert.match(receipt.result.workflow.setupGate?.afterApproval ?? '', /git\.integration\.bootstrap/iu);
+});
+
+test('work bootstrap reports hosted-preview only when a live deployment binding is proven', async () => {
+  const workProvider: WorkItemCandidateReadProvider = {
+    id: 'github-work',
+    async getCapabilities() { return []; },
+    async getWorkItemStatus() { throw new Error('unused'); },
+    async listWorkItems() { return { repository: 'pyralisxc/CardForge', items: [], truncated: false }; },
+    async listWorkItemPullRequests() { return []; },
+  };
+  const runtime = new ConductorToolRuntime({
+    workItemProvider: workProvider as any,
+    workItemCandidateProvider: workProvider,
+    repositoryBootstrapProvider: {
+      id: 'github-bootstrap',
+      async getCapabilities() { return []; },
+      async getRepositoryBootstrap() {
+        return {
+          provider: 'github' as const,
+          repository: 'pyralisxc/CardForge',
+          defaultBranch: 'main',
+          defaultHead: 'a'.repeat(40),
+          integrationBranch: 'vercel-preview' as const,
+          integrationHead: 'b'.repeat(40),
+          observedAt: '2026-09-30T00:00:00.000Z',
+        };
+      },
+    },
+    deploymentProvider: {
+      id: 'vercel',
+      async getCapabilities() { return []; },
+      async getDeploymentStatus() {
+        return {
+          provider: 'vercel' as const,
+          project: { id: 'prj_cardforge', name: 'card-forge', productionBranch: 'main', teamId: 'team_owner' },
+          production: null,
+          latestProductionAttempt: null,
+          recent: [],
+          domains: [],
+          observedAt: '2026-09-30T00:00:00.000Z',
+        };
+      },
+    } as any,
+  });
+  const receipt = await runtime.workBootstrap({ project: { id: 'cardforge', repository: 'pyralisxc/CardForge' } });
+  assert.equal(receipt.status, 'succeeded'); if (receipt.status !== 'succeeded') return;
+  assert.equal(receipt.result.workflow.status, 'ready');
+  assert.equal(receipt.result.workflow.proofBoundary, 'hosted-preview');
+  assert.equal(receipt.result.workflow.integrationBranch, 'vercel-preview');
+});
 
 test('development status bounds active work candidate fan-out to four concurrent reads', async () => {
   let activeReads = 0;
