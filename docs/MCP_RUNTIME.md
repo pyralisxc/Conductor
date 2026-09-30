@@ -168,3 +168,8 @@ Every `external-wait` lifecycle gate includes the exact resume condition plus op
 Preparing Main now seals the release candidate in GitHub-native PR metadata. The promotion PR body records the exact Preview SHA, exact default-branch base SHA, and exact canonical work-item batch. The GitHub adapter can find the unique open Preview-to-Main candidate repository-wide and compares the live PR head/base to that seal.
 
 While a sealed release candidate is open, ordinary lifecycle advancement does not integrate additional work into Preview. Complete or close the release first, or explicitly prepare a new release after the old candidate is closed. If Preview/Main move out of band and the live PR no longer matches the seal, lifecycle reports the candidate as stale and will not present a Main owner gate. This prevents a moving Preview branch from silently expanding a declared release batch.
+
+
+### Iterative canonical work
+
+One canonical issue may legitimately require multiple successive work-to-Preview pull requests as acceptance testing reveals follow-up gaps. `lifecycle.advance` treats multiple **merged** integration PRs as historical transport evidence for that durable work identity and continues to prove the current repository Preview head/deployment. Multiple **open** integration PRs remain a conflict because the next mutation target would be ambiguous. Merged transport never implies semantic issue completion.
