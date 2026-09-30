@@ -346,7 +346,7 @@ test('VCR repository read and create stay exact-project scoped and verify provid
   );
 });
 
-test('VCR inventory is bounded and image deletion fails closed before provider DELETE without reachability proof', async () => {
+test('VCR inventory is bounded and ambiguous image deletion remains fail-closed', async () => {
   const { provider, calls, project } = fixture();
   await provider.createVcrRepository({ project, name: 'dockerfile', idempotencyKey: 'vcr-create-before-inventory' });
 
@@ -388,6 +388,75 @@ test('VCR inventory is bounded and image deletion fails closed before provider D
     }),
     (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
   );
+});
+
+test('VCR deletes only a SHA-tagged image proven outside current Production, latest Preview, and active builds', async () => {
+  const prodSha = 'a'.repeat(40);
+  const previewSha = 'b'.repeat(40);
+  const oldSha = 'c'.repeat(40);
+  let oldExists = true;
+  const calls: { path: string; method: string }[] = [];
+  const provider = new VercelDeploymentProvider({
+    token: 'test-token',
+    bindings: [{ id: 'app', project: 'app', repository: 'owner/app', teamId: 'team_1' }],
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      calls.push({ path: url.pathname, method });
+      if (url.pathname === '/v9/projects/app') return Response.json({
+        id: 'prj_app',
+        name: 'app',
+        link: { type: 'github', org: 'owner', repo: 'app', productionBranch: 'main' },
+        targets: { production: { id: 'dpl_prod' } },
+      });
+      if (url.pathname === '/v1/vcr/repository/dockerfile') return Response.json({ id: 'vcr_dockerfile', name: 'dockerfile', projectId: 'prj_app' });
+      if (url.pathname === '/v1/vcr/repository/dockerfile/images/img_old' && method === 'GET') {
+        return oldExists
+          ? Response.json({ image: { id: 'img_old', repositoryId: 'vcr_dockerfile', manifestDigest: 'sha256:old', tags: [oldSha.slice(0, 12)] } })
+          : Response.json({ error: { message: 'not found' } }, { status: 404 });
+      }
+      if (url.pathname === '/v1/vcr/repository/dockerfile/images/img_old' && method === 'DELETE') {
+        oldExists = false;
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname === '/v1/vcr/repository/dockerfile/images/img_preview' && method === 'GET') {
+        return Response.json({ image: { id: 'img_preview', repositoryId: 'vcr_dockerfile', manifestDigest: 'sha256:preview', tags: [previewSha.slice(0, 12)] } });
+      }
+      if (url.pathname === '/v6/deployments') return Response.json({ deployments: [
+        { id: 'dpl_prod', projectId: 'prj_app', readyState: 'READY', target: 'production', createdAt: 3, meta: { githubCommitSha: prodSha, githubCommitRef: 'main', githubCommitRepo: 'owner/app' } },
+        { id: 'dpl_preview', projectId: 'prj_app', readyState: 'READY', target: null, createdAt: 2, meta: { githubCommitSha: previewSha, githubCommitRef: 'preview', githubCommitRepo: 'owner/app' } },
+        { id: 'dpl_old', projectId: 'prj_app', readyState: 'READY', target: null, createdAt: 1, meta: { githubCommitSha: oldSha, githubCommitRef: 'preview', githubCommitRepo: 'owner/app' } },
+      ] });
+      if (url.pathname === '/v9/projects/prj_app/domains') return Response.json({ domains: [] });
+      return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
+    },
+  });
+  const project = { id: 'app', repository: 'owner/app' };
+
+  await assert.rejects(
+    provider.deleteVcrImage({
+      project,
+      name: 'dockerfile',
+      imageId: 'img_preview',
+      expectedManifestDigest: 'sha256:preview',
+      idempotencyKey: 'vcr-delete-protected-preview',
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'CONFLICT'
+      && (error as { message?: string }).message?.includes('protected') === true,
+  );
+  assert.equal(calls.some(call => call.path.endsWith('/img_preview') && call.method === 'DELETE'), false);
+
+  const deleted = await provider.deleteVcrImage({
+    project,
+    name: 'dockerfile',
+    imageId: 'img_old',
+    expectedManifestDigest: 'sha256:old',
+    idempotencyKey: 'vcr-delete-old-safe',
+  });
+  assert.equal(deleted.deleted, true);
+  assert.equal(deleted.verified, true);
+  assert.equal(oldExists, false);
+  assert.equal(calls.filter(call => call.path.endsWith('/img_old') && call.method === 'DELETE').length, 1);
 });
 
 test('VCR create is durably idempotent through the runtime', async () => {
