@@ -1270,8 +1270,8 @@ test('lifecycle resume waits for exact Production deployment and completes from 
   const deployment:any={
     id:'vercel',async getCapabilities(){return[];},
     async getDeploymentStatus(){
-      const exact={id:'dpl_exact',url:null,state:ready?'READY':'BUILDING',target:'production',createdAt:null,readyAt:null,sourceRevision:mergeSha,sourceRef:'main',sourceRepository:'Conductor',aliases:[],errorCode:null,errorMessage:null};
-      return{provider:'vercel',project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:ready?exact:null,latestProductionAttempt:merged?exact:null,recent:merged?[exact]:[],domains:[],observedAt:'2026-09-30T00:00:00Z'};
+      const exact=createCalls>0?{id:'dpl_exact',url:null,state:ready?'READY':'BUILDING',target:'production',createdAt:null,readyAt:null,sourceRevision:mergeSha,sourceRef:'main',sourceRepository:'Conductor',aliases:[],errorCode:null,errorMessage:null}:null;
+      return{provider:'vercel',project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:ready?exact:null,latestProductionAttempt:exact,recent:exact?[exact]:[],domains:[],observedAt:'2026-09-30T00:00:00Z'};
     },
     async createGitDeployment(input:any){createCalls+=1;return{provider:'vercel',projectId:'prj',deploymentId:'dpl_exact',sourceRevision:input.sha,sourceRef:input.ref,target:'production',state:'BUILDING'};},
   };
