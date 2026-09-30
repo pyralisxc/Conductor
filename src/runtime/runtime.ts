@@ -1393,10 +1393,31 @@ export class ConductorToolRuntime {
       if (input.promotionWorkItemNumbers && !input.preparePromotion) {
         throw { code: 'CONFLICT', message: 'promotionWorkItemNumbers requires preparePromotion=true' };
       }
-      const promotionWorkItemNumbers = [...new Set([input.issueNumber, ...(input.promotionWorkItemNumbers ?? [])])].sort((a, b) => a - b);
-      if (promotionWorkItemNumbers.some((number) => !Number.isSafeInteger(number) || number < 1) || promotionWorkItemNumbers.length > 20) {
+      const requestedPromotionWorkItemNumbers = input.promotionWorkItemNumbers
+        ? [...new Set(input.promotionWorkItemNumbers)].sort((a, b) => a - b)
+        : null;
+      if (requestedPromotionWorkItemNumbers
+        && (requestedPromotionWorkItemNumbers.some((number) => !Number.isSafeInteger(number) || number < 1)
+          || requestedPromotionWorkItemNumbers.length > 20)) {
         throw { code: 'CONFLICT', message: 'promotionWorkItemNumbers must contain at most 20 positive issue numbers' };
       }
+      const sameWorkItems = (left: number[], right: number[]) =>
+        left.length === right.length && left.every((number, index) => number === right[index]);
+      const releaseInventory = async (
+        expectedBaseSha: string,
+        expectedHeadSha: string,
+        integrationBranch: 'preview' | 'vercel-preview',
+      ) => {
+        if (!this.pullRequestProvider!.getPreviewReleaseInventory) {
+          throw { code: 'TOOL_UNAVAILABLE', message: 'Release preparation requires provider-derived Main-to-Preview inventory' };
+        }
+        return await this.pullRequestProvider!.getPreviewReleaseInventory({
+          project,
+          expectedBaseSha,
+          expectedHeadSha,
+          integrationBranch,
+        });
+      };
 
       const transitions: LifecycleTransitionRecord[] = [];
       const work = await this.workItemCandidateProvider!.getWorkItemStatus({ project, issueNumber: input.issueNumber });
@@ -1509,13 +1530,35 @@ export class ConductorToolRuntime {
             transitions,
           );
         }
-        if (sealedBatch.length !== promotionWorkItemNumbers.length
-          || sealedBatch.some((number, index) => number !== promotionWorkItemNumbers[index])) {
+        const inventory = await releaseInventory(
+          repositoryPromotion.seal.expectedBaseSha,
+          repositoryPromotion.seal.expectedHeadSha,
+          repositoryPromotion.pullRequest.head.ref as 'preview' | 'vercel-preview',
+        );
+        if (!sameWorkItems(sealedBatch, inventory.workItemNumbers)) {
+          return lifecycleProjection(
+            project,
+            input.issueNumber,
+            'verification-failed',
+            `Release candidate PR #${repositoryPromotion.pullRequest.pullRequestNumber} is sealed for ${sealedBatch.map((number) => `#${number}`).join(', ')}, but GitHub-derived Main-to-Preview inventory is ${inventory.workItemNumbers.map((number) => `#${number}`).join(', ') || 'empty'}.`,
+            transitions,
+          );
+        }
+        if (!sealedBatch.includes(input.issueNumber)) {
           return lifecycleProjection(
             project,
             input.issueNumber,
             'action-required',
-            `Release candidate PR #${repositoryPromotion.pullRequest.pullRequestNumber} is already sealed for ${sealedBatch.map((number) => `#${number}`).join(', ')}; requested release batch ${promotionWorkItemNumbers.map((number) => `#${number}`).join(', ')} differs. Close/reseal explicitly rather than silently changing release identity.`,
+            `Canonical issue #${input.issueNumber} is not part of sealed release candidate PR #${repositoryPromotion.pullRequest.pullRequestNumber}.`,
+            transitions,
+          );
+        }
+        if (requestedPromotionWorkItemNumbers && !sameWorkItems(sealedBatch, requestedPromotionWorkItemNumbers)) {
+          return lifecycleProjection(
+            project,
+            input.issueNumber,
+            'action-required',
+            `Release candidate PR #${repositoryPromotion.pullRequest.pullRequestNumber} is provider-derived as ${sealedBatch.map((number) => `#${number}`).join(', ')}; caller assertion ${requestedPromotionWorkItemNumbers.map((number) => `#${number}`).join(', ')} differs.`,
             transitions,
           );
         }
@@ -1667,6 +1710,43 @@ export class ConductorToolRuntime {
           input.issueNumber,
           'preview-ready',
           `Preview ${topology.integrationBranch}@${topology.integrationHead} is READY. Main promotion was intentionally not prepared; accumulate and battle-test the desired release batch before requesting promotion.`,
+          transitions,
+          previewProof,
+        );
+      }
+
+      const inventory = await releaseInventory(
+        topology.defaultHead,
+        topology.integrationHead,
+        topology.integrationBranch,
+      );
+      const promotionWorkItemNumbers = inventory.workItemNumbers;
+      if (promotionWorkItemNumbers.length < 1) {
+        return lifecycleProjection(
+          project,
+          input.issueNumber,
+          'action-required',
+          'GitHub-derived Main-to-Preview release inventory contains no canonical work items.',
+          transitions,
+          previewProof,
+        );
+      }
+      if (!promotionWorkItemNumbers.includes(input.issueNumber)) {
+        return lifecycleProjection(
+          project,
+          input.issueNumber,
+          'action-required',
+          `Canonical issue #${input.issueNumber} is not present in the GitHub-derived release inventory: ${promotionWorkItemNumbers.map((number) => `#${number}`).join(', ')}.`,
+          transitions,
+          previewProof,
+        );
+      }
+      if (requestedPromotionWorkItemNumbers && !sameWorkItems(promotionWorkItemNumbers, requestedPromotionWorkItemNumbers)) {
+        return lifecycleProjection(
+          project,
+          input.issueNumber,
+          'action-required',
+          `Caller release assertion ${requestedPromotionWorkItemNumbers.map((number) => `#${number}`).join(', ')} does not match GitHub-derived release inventory ${promotionWorkItemNumbers.map((number) => `#${number}`).join(', ')}.`,
           transitions,
           previewProof,
         );

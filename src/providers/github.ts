@@ -18,6 +18,8 @@ import type {
   PullRequestStatus,
   OpenPromotionCandidate,
   PromotionCandidateSeal,
+  GetPreviewReleaseInventoryInput,
+  PreviewReleaseInventory,
   GetSourceArtifactInput,
   SourceArtifactRead,
   DiscoverSourceInput,
@@ -106,6 +108,13 @@ interface GitHubPullRequestResponse {
   head: { ref: string; sha: string };
   base: { ref: string; sha: string };
   labels?: Array<{ name?: string | null }>;
+}
+
+interface GitHubCompareResponse {
+  status?: string;
+  ahead_by?: number;
+  total_commits?: number;
+  commits?: Array<{ sha: string }>;
 }
 
 interface GitHubIssueResponse {
@@ -293,6 +302,16 @@ function parsePromotionSeal(body: string | null | undefined): PromotionCandidate
   } catch {
     return null;
   }
+}
+
+function parseCanonicalWorkItemNumbers(body: string | null | undefined): number[] {
+  if (!body) return [];
+  const line = body.split(/\r?\n/u).find((value) => value.trim().startsWith('Canonical Conductor work:'));
+  if (!line) return [];
+  const numbers = [...line.matchAll(/#(\d+)/gu)]
+    .map((match) => Number(match[1]))
+    .filter((number) => Number.isSafeInteger(number) && number > 0);
+  return [...new Set(numbers)].sort((a, b) => a - b);
 }
 
 export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, RepositoryAcquisitionProvider, RepositoryAuditReadProvider, SourceControlMutationProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
@@ -557,6 +576,101 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         normalized.diagnostics,
       )];
     }
+  }
+
+  async getPreviewReleaseInventory(input: GetPreviewReleaseInventoryInput): Promise<PreviewReleaseInventory> {
+    const { repository, credential } = await this.readableRepository(
+      input.project,
+      GITHUB_READ_OPERATION_PERMISSIONS['pull-request.status'],
+    );
+    assertSha(input.expectedBaseSha, 'expectedBaseSha');
+    assertSha(input.expectedHeadSha, 'expectedHeadSha');
+    assertPromotionSourceBranch(input.integrationBranch);
+
+    const metadata = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+    const defaultBranch = metadata.default_branch?.trim();
+    if (!defaultBranch) throw { code: 'NOT_FOUND', message: 'Repository default branch is unavailable' };
+
+    const comparison = await this.request<GitHubCompareResponse>(
+      repository,
+      `/compare/${encodeURIComponent(input.expectedBaseSha)}...${encodeURIComponent(input.expectedHeadSha)}?per_page=100&page=1`,
+      {},
+      credential,
+    );
+    const aheadBy = Number.isSafeInteger(comparison.ahead_by) ? comparison.ahead_by! : comparison.commits?.length ?? 0;
+    const commits = (comparison.commits ?? []).map((commit) => commit.sha.toLowerCase());
+    if (!['ahead', 'identical'].includes(comparison.status ?? '')) {
+      throw { code: 'CONFLICT', message: `Preview head ${input.expectedHeadSha} is not a clean descendant of Main base ${input.expectedBaseSha}` };
+    }
+    if (aheadBy > 100 || commits.length !== aheadBy) {
+      throw { code: 'CONFLICT', message: `Release delta contains ${aheadBy} commit(s); exact release inventory is bounded to 100 commits` };
+    }
+    if (commits.some((sha) => !/^[0-9a-f]{40}$/u.test(sha))) {
+      throw { code: 'CONFLICT', message: 'GitHub compare returned an invalid release commit identity' };
+    }
+
+    const remaining = new Set(commits);
+    const pullRequests: PreviewReleaseInventory['pullRequests'] = [];
+    const workItems = new Set<number>();
+    for (let page = 1; page <= 5 && remaining.size > 0; page++) {
+      const pulls = await this.request<GitHubPullRequestResponse[]>(
+        repository,
+        `/pulls?state=closed&base=${encodeURIComponent(input.integrationBranch)}&sort=updated&direction=desc&per_page=100&page=${page}`,
+        {},
+        credential,
+      );
+      for (const pull of pulls) {
+        const mergeCommitSha = pull.merge_commit_sha?.toLowerCase();
+        if (!pull.merged_at || !mergeCommitSha || !remaining.has(mergeCommitSha)) continue;
+        if (pull.base.ref.toLowerCase() !== input.integrationBranch.toLowerCase()) continue;
+        if (pull.head.ref === defaultBranch) {
+          remaining.delete(mergeCommitSha);
+          pullRequests.push({
+            pullRequestNumber: pull.number,
+            mergeCommitSha,
+            role: 'reconciliation',
+            workItemNumbers: [],
+          });
+          continue;
+        }
+        const canonical = parseCanonicalWorkItemNumbers(pull.body);
+        if (canonical.length < 1) {
+          throw {
+            code: 'CONFLICT',
+            message: `Release commit ${mergeCommitSha} from PR #${pull.number} has no canonical work-item metadata; refusing incomplete release accounting`,
+          };
+        }
+        remaining.delete(mergeCommitSha);
+        canonical.forEach((number) => workItems.add(number));
+        pullRequests.push({
+          pullRequestNumber: pull.number,
+          mergeCommitSha,
+          role: 'integration',
+          workItemNumbers: canonical,
+        });
+      }
+      if (pulls.length < 100) break;
+    }
+    if (remaining.size > 0) {
+      throw {
+        code: 'CONFLICT',
+        message: `Release delta contains unattributed Preview commit(s): ${[...remaining].slice(0, 10).join(', ')}`,
+      };
+    }
+    const workItemNumbers = [...workItems].sort((a, b) => a - b);
+    if (workItemNumbers.length > 20) {
+      throw { code: 'CONFLICT', message: `Release inventory contains ${workItemNumbers.length} canonical work items; split the release into a smaller accepted batch` };
+    }
+    return {
+      repository,
+      defaultBranch,
+      integrationBranch: input.integrationBranch,
+      expectedBaseSha: input.expectedBaseSha.toLowerCase(),
+      expectedHeadSha: input.expectedHeadSha.toLowerCase(),
+      commitShas: commits,
+      workItemNumbers,
+      pullRequests: pullRequests.sort((left, right) => left.pullRequestNumber - right.pullRequestNumber),
+    };
   }
 
   async findOpenPromotionPullRequest(project: ProjectReference): Promise<OpenPromotionCandidate | null> {
