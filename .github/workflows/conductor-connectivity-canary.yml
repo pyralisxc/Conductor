@@ -1,0 +1,16 @@
+name: Conductor Connectivity Canary
+
+on:
+  pull_request:
+    branches:
+      - preview
+
+permissions:
+  contents: read
+
+jobs:
+  connectivity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm Conductor workflow authoring
+        run: echo "Conductor workflow authoring canary succeeded"
