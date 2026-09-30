@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v11' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v12' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -489,6 +489,16 @@ export interface DevelopmentStatusProjection {
 
 export type LifecycleGateKind = 'external-wait' | 'human-approval';
 
+export interface OwnerGateExplanation {
+  action: string;
+  whyOwnerGate: string;
+  protectedConcern: string;
+  authorizes: string[];
+  doesNotAuthorize: string[];
+  evidence: string[];
+  afterApproval: string;
+}
+
 export interface LifecycleGateSpec {
   kind: LifecycleGateKind;
   allowedNextOperation: 'lifecycle.advance' | 'lifecycle.resume';
@@ -501,11 +511,17 @@ export interface LifecycleGateSpec {
   integrationBranch?: 'preview' | 'vercel-preview';
   integrationHead?: string;
   deploymentId?: string;
+  ownerGate?: OwnerGateExplanation;
+  secondaryStewardship?: {
+    status: 'optional';
+    constraint: 'bounded-non-conflicting-separately-authorized';
+    guidance: string;
+  };
 }
 
 export interface LifecycleTransitionRecord {
   operation: RuntimeOperationName;
-  status: 'observed' | 'performed' | 'replayed';
+  status: 'observed' | 'performed' | 'replayed' | 'skipped';
   summary: string;
   pullRequestNumber?: number;
   commitSha?: string;
@@ -518,6 +534,8 @@ export interface AdvanceLifecycleInput {
   issueNumber: number;
   maxPolls?: number;
   pollIntervalMs?: number;
+  preparePromotion?: boolean;
+  promotionWorkItemNumbers?: number[];
   idempotencyKey: string;
 }
 
@@ -537,7 +555,7 @@ export interface LifecycleAdvanceProjection {
   contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
   project: ProjectReference;
   issueNumber: number;
-  stage: 'action-required' | 'external-wait' | 'verification-failed' | 'human-gate' | 'complete';
+  stage: 'action-required' | 'external-wait' | 'verification-failed' | 'preview-ready' | 'human-gate' | 'complete';
   summary: string;
   transitions: LifecycleTransitionRecord[];
   elapsedMs: number;

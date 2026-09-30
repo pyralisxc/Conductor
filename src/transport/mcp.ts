@@ -5,7 +5,7 @@ import { CONDUCTOR_WRITE_SCOPE } from './auth.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { ProjectReference } from '../runtime/types.js';
 import type { WorkAction, WorkScopeAuthorizer } from './work-scope.js';
-import { clientFingerprint, issueBootstrapEvidence, verifyBootstrapEvidence, issueLifecycleGate, verifyLifecycleGate } from './work-scope.js';
+import { clientFingerprint, issueBootstrapEvidence, verifyBootstrapEvidence, issueLifecycleGate, verifyLifecycleGate, issueWorkScopeApprovalGate, verifyWorkScopeApprovalGate } from './work-scope.js';
 
 const diagnosticSchema = z.object({
   level: z.enum(['info', 'warning', 'error']),
@@ -78,7 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v11'),
+      catalogVersion: z.literal('conductor.catalog.v12'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -259,6 +259,57 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     const clientId = extra.authInfo?.clientId;
     if (!clientId) throw new Error('Authenticated client identity is required');
     return { content: [{ type: 'text', text: JSON.stringify(workScope.begin(clientId, repository)) }] };
+  });
+
+
+  if (workScope) server.registerTool('work-scope.request', {
+    title: 'Request additional repository development scope',
+    description: 'Create a signed self-describing human gate for an exact additional repository set without changing the active repository. This does not grant authority by itself; the owner must explicitly approve the returned exact scope in chat before work-scope.approve may apply it.',
+    inputSchema: z.object({
+      workContext: workContextSchema,
+      developRepositories: z.array(z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u)).min(1).max(20),
+      durationMinutes: z.number().int().min(15).max(720).default(240),
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    _meta: { securitySchemes: oauthWriteSecurity },
+  }, async (input, extra) => {
+    requireWriteScope(extra.authInfo?.scopes);
+    const clientId = extra.authInfo?.clientId;
+    if (!clientId) throw new Error('Authenticated client identity is required');
+    const issued = issueWorkScopeApprovalGate(clientId, input);
+    const result = {
+      stage: 'human-gate',
+      summary: issued.gate.reason,
+      gate: issued.gate,
+      continuation: { handle: issued.handle, expiresAt: issued.expiresAt, gateId: issued.gateId },
+    };
+    return { structuredContent: result, content: [{ type: 'text', text: JSON.stringify(result) }] };
+  });
+
+  if (workScope) server.registerTool('work-scope.approve', {
+    title: 'Approve exact additional repository development scope',
+    description: 'Apply only a signed additional-repository gate after fresh explicit owner approval. The grant is bound to this exact work context and cannot change the active repository or authorize Main/production/destructive actions.',
+    inputSchema: z.object({
+      workContext: workContextSchema,
+      gate: z.string().min(20).max(4096),
+      approvalReference: z.string().regex(/^owner-approved:/u).max(500),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: { securitySchemes: oauthWriteSecurity },
+  }, async (input, extra) => {
+    requireWriteScope(extra.authInfo?.scopes);
+    const clientId = extra.authInfo?.clientId;
+    if (!clientId) throw new Error('Authenticated client identity is required');
+    const gate = verifyWorkScopeApprovalGate(input.gate, clientId, input.workContext);
+    const grant = await workScope.approveAdditionalScope(clientId, input.workContext, gate);
+    const result = {
+      status: 'approved',
+      approvalReference: input.approvalReference,
+      gateId: gate.id,
+      grant,
+      doesNotAuthorize: gate.doesNotAuthorize,
+    };
+    return { structuredContent: result, content: [{ type: 'text', text: JSON.stringify(result) }] };
   });
 
 
@@ -681,10 +732,12 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     if (runtime.lifecycleAdvanceEnabled) {
       server.registerTool('lifecycle.advance', {
         title: 'Advance work until the next gate',
-        description: 'Advance one canonical issue through deterministic already-authorized PR verification, Preview integration, bounded Preview deployment proof, and promotion-candidate preparation. Stops on external wait, failure, ambiguity, completion, or a signed human Main gate. Never promotes Main.',
+        description: 'Advance one canonical issue through deterministic already-authorized PR verification, Preview integration, safe merged-branch cleanup, and bounded Preview deployment proof. Stops at READY Preview by default. Main promotion preparation is explicit and may carry a release-batch issue set; Main itself still requires a signed human gate.',
         inputSchema: z.object({
           project: projectSchema, workContext: workContextSchema, issueNumber: z.number().int().positive(),
           maxPolls: z.number().int().min(0).max(4).default(2), pollIntervalMs: z.number().int().min(0).max(1500).default(500),
+          preparePromotion: z.boolean().default(false),
+          promotionWorkItemNumbers: z.array(z.number().int().positive()).max(20).optional(),
           idempotencyKey: z.string().min(8).max(200), continuation: z.string().min(20).max(4096).optional(),
         }),
         outputSchema: compositeMutationOutputSchema,
