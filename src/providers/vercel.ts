@@ -628,26 +628,106 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     if (!input.expectedManifestDigest.trim()) throw { code: 'CONFLICT', source: 'vercel', message: 'VCR image deletion requires an exact expected manifest digest' };
     const bound = await this.mutationProject(input.project);
     await this.readVcrRepository(bound, input.name);
+    const credential = await this.vcrCredentialRoute(bound.binding);
+    const imagePath = `/v1/vcr/repository/${encodeURIComponent(input.name)}/images/${encodeURIComponent(input.imageId)}`;
     const response = await this.request(
-      `/v1/vcr/repository/${encodeURIComponent(input.name)}/images/${encodeURIComponent(input.imageId)}`,
+      imagePath,
       { ...scopeQuery(bound.binding), projectId: bound.id },
       bound.binding,
       undefined,
-      await this.vcrCredentialRoute(bound.binding),
+      credential,
     );
     const payload = await response.json().catch(() => null);
     const envelope = record(payload);
     const image = envelope ? (recordField(envelope, 'image') ?? envelope) : null;
     const id = image ? (stringField(image, 'id') ?? stringField(image, 'uid')) : null;
     const manifestDigest = image ? (stringField(image, 'manifestDigest') ?? stringField(image, 'digest')) : null;
+    const tags = image ? stringArray(image.tags) : [];
     if (id !== input.imageId || manifestDigest !== input.expectedManifestDigest) {
       throw { code: 'CONFLICT', source: 'vercel', message: 'Exact VCR image ID/digest no longer matches provider state' };
     }
+    if (tags.length === 0 || tags.some(tag => !/^[0-9a-f]{7,40}$/iu.test(tag))) {
+      throw {
+        code: 'TOOL_UNAVAILABLE',
+        source: 'vercel',
+        message: 'VCR image deletion requires only immutable-looking Git SHA tags; untagged or mutable/ambiguous tags remain fail-closed.',
+      };
+    }
 
-    throw {
-      code: 'TOOL_UNAVAILABLE',
-      source: 'vercel',
-      message: 'VCR image deletion is fail-closed: Conductor cannot yet prove this exact digest is unreferenced by current production/Preview deployments. No DELETE request was sent.',
+    const deploymentStatus = await this.getDeploymentStatus({ project: input.project, limit: 50 });
+    const latestPreview = deploymentStatus.recent.find(item =>
+      item.state === 'READY'
+      && ['preview', 'vercel-preview'].includes(item.sourceRef?.toLowerCase() ?? '')
+    ) ?? null;
+    const active = deploymentStatus.recent.filter(item => {
+      const state = item.state?.toUpperCase() ?? '';
+      return state !== '' && !['READY', 'ERROR', 'CANCELED', 'CANCELLED', 'DELETED'].includes(state);
+    });
+    const protectedById = new Map<string, DeploymentRecord>();
+    for (const item of [deploymentStatus.production, latestPreview, ...active]) {
+      if (item) protectedById.set(item.id, item);
+    }
+    const protectedDeployments = [...protectedById.values()];
+    for (const deployment of protectedDeployments) {
+      if (!deployment.sourceRevision) {
+        throw {
+          code: 'TOOL_UNAVAILABLE',
+          source: 'vercel',
+          message: `VCR image deletion cannot prove reachability because protected deployment ${deployment.id} has no source revision.`,
+        };
+      }
+      const revision = deployment.sourceRevision.toLowerCase();
+      if (tags.some(tag => revision.startsWith(tag.toLowerCase()))) {
+        throw {
+          code: 'CONFLICT',
+          source: 'vercel',
+          message: `VCR image is protected by current/active deployment ${deployment.id} at source revision ${deployment.sourceRevision}.`,
+        };
+      }
+    }
+
+    await this.request(
+      imagePath,
+      { ...scopeQuery(bound.binding), projectId: bound.id },
+      bound.binding,
+      { method: 'DELETE' },
+      credential,
+    );
+
+    let verifiedRemoved = false;
+    try {
+      await this.request(
+        imagePath,
+        { ...scopeQuery(bound.binding), projectId: bound.id },
+        bound.binding,
+        undefined,
+        credential,
+      );
+    } catch (error) {
+      if ((error as { status?: number }).status === 404) verifiedRemoved = true;
+      else throw error;
+    }
+    if (!verifiedRemoved) {
+      throw { code: 'COMMAND_FAILED', source: 'vercel', message: 'VCR image deletion was not verified by provider readback' };
+    }
+
+    return {
+      provider: 'vercel',
+      projectId: bound.id,
+      repository: input.name,
+      imageId: input.imageId,
+      manifestDigest,
+      tags,
+      deleted: true,
+      verified: true,
+      protectedDeployments: protectedDeployments.map(item => ({
+        deploymentId: item.id,
+        sourceRevision: item.sourceRevision,
+        sourceRef: item.sourceRef,
+        target: item.target,
+        state: item.state,
+      })),
+      observedAt: this.now().toISOString(),
     };
   }
 
