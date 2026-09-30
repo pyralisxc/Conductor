@@ -1,19 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clientFingerprint, issueBootstrapEvidence, issueLifecycleGate, parseWorkScopeGrant, verifyBootstrapEvidence, verifyLifecycleGate, WorkScopeAuthorizer, type WorkScopeGrant, type WorkScopeStore } from '../src/transport/work-scope.js';
+import { clientFingerprint, issueBootstrapEvidence, issueLifecycleGate, issueWorkScopeApprovalGate, parseWorkScopeGrant, verifyBootstrapEvidence, verifyLifecycleGate, verifyWorkScopeApprovalGate, WorkScopeAuthorizer, type ContextWorkScopeGrant, type WorkScopeGrant, type WorkScopeStore } from '../src/transport/work-scope.js';
 
 process.env.CONDUCTOR_SESSION_SECRET = 'test-work-context-secret-long-enough-for-hmac';
 
 function fixture() {
   const grants = new Map<string, WorkScopeGrant>();
+  const contextGrants = new Map<string, ContextWorkScopeGrant>();
   const store: WorkScopeStore = {
     async get(id) { const grant = grants.get(id); return grant && grant.expiresAt > Date.now() ? grant : null; },
     async set(id, grant) { grants.set(id, grant); },
     async delete(id) { grants.delete(id); },
+    async getContext(id) { const grant = contextGrants.get(id); return grant && grant.expiresAt > Date.now() ? grant : null; },
+    async setContext(id, grant) { contextGrants.set(id, grant); },
+    async deleteContext(id) { contextGrants.delete(id); },
   };
   const authorizer = new WorkScopeAuthorizer(store);
   const auth = { clientId: 'owner-approved-client', scopes: ['conductor.read', 'conductor.write'], token: 'test' };
-  return { grants, store, authorizer, auth };
+  return { grants, contextGrants, store, authorizer, auth };
 }
 
 test('a declared repository permits its code work while issue routing remains broad', async () => {
@@ -107,4 +111,30 @@ test('lifecycle gates are client/repository/issue bound and carry exact continua
   assert.equal(value.id, issued.gateId);
   assert.equal(value.pullRequestNumber, 200);
   assert.throws(() => verifyLifecycleGate(issued.handle, 'other-client', { repository: 'pyralisxc/Conductor', projectId: 'Conductor' }), /mismatched/);
+});
+
+
+test('chat-native additional repository approval is exact-context-bound and does not change routing semantics', async () => {
+  const { authorizer, auth } = fixture();
+  const first = authorizer.begin(auth.clientId, 'pyralisxc/CardForge').workContext;
+  const second = authorizer.begin(auth.clientId, 'pyralisxc/Conductor').workContext;
+  const issued = issueWorkScopeApprovalGate(auth.clientId, {
+    workContext: first,
+    developRepositories: ['pyralisxc/Development-Intelligence'],
+    durationMinutes: 60,
+  });
+  assert.equal(issued.gate.primaryRepository, 'pyralisxc/cardforge');
+  assert.deepEqual(issued.gate.developRepositories, ['pyralisxc/development-intelligence']);
+  assert.match(issued.gate.protectedConcern, /silently expand/iu);
+  const gate = verifyWorkScopeApprovalGate(issued.handle, auth.clientId, first);
+  const grant = await authorizer.approveAdditionalScope(auth.clientId, first, gate);
+  assert.deepEqual(grant.developRepositories, ['pyralisxc/development-intelligence']);
+
+  await authorizer.assertAllowed(auth, 'develop', { id: 'di', repository: 'pyralisxc/Development-Intelligence' }, first);
+  await assert.rejects(
+    authorizer.assertAllowed(auth, 'develop', { id: 'di', repository: 'pyralisxc/Development-Intelligence' }, second),
+    /outside/,
+  );
+  await authorizer.assertAllowed(auth, 'route-work', { id: 'other', repository: 'pyralisxc/Other' });
+  assert.throws(() => verifyWorkScopeApprovalGate(issued.handle, 'different-client', first), /mismatched|Invalid/);
 });

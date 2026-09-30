@@ -14,6 +14,7 @@ import type {
   CommentPullRequestInput,
   GetPullRequestStatusInput,
   PullRequestStatus,
+  OpenPromotionCandidate,
   GetSourceArtifactInput,
   SourceArtifactRead,
   DiscoverSourceInput,
@@ -88,6 +89,7 @@ export interface RepositorySemanticAuditProvider extends RuntimeCapabilityProvid
 
 export interface PullRequestReadProvider extends RuntimeCapabilityProvider {
   getPullRequestStatus(input: GetPullRequestStatusInput): Promise<PullRequestStatus>;
+  findOpenPromotionPullRequest?(project: ProjectReference): Promise<OpenPromotionCandidate | null>;
 }
 
 export interface SourceArtifactReadProvider extends RuntimeCapabilityProvider {

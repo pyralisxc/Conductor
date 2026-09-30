@@ -16,6 +16,8 @@ import type {
   CommentPullRequestInput,
   GetPullRequestStatusInput,
   PullRequestStatus,
+  OpenPromotionCandidate,
+  PromotionCandidateSeal,
   GetSourceArtifactInput,
   SourceArtifactRead,
   DiscoverSourceInput,
@@ -100,6 +102,7 @@ interface GitHubPullRequestResponse {
   mergeable_state?: string | null;
   merge_commit_sha?: string | null;
   merged_at?: string | null;
+  body?: string | null;
   head: { ref: string; sha: string };
   base: { ref: string; sha: string };
   labels?: Array<{ name?: string | null }>;
@@ -254,6 +257,42 @@ interface GitHubRateLimitSnapshot {
   resource: string | null;
   retryAfterSeconds: number | null;
   observedAt: string;
+}
+
+const RELEASE_SEAL_PREFIX = '<!-- conductor-release-seal:';
+const RELEASE_SEAL_SUFFIX = ' -->';
+
+function parsePromotionSeal(body: string | null | undefined): PromotionCandidateSeal | null {
+  if (!body) return null;
+  const start = body.indexOf(RELEASE_SEAL_PREFIX);
+  if (start < 0) return null;
+  const end = body.indexOf(RELEASE_SEAL_SUFFIX, start + RELEASE_SEAL_PREFIX.length);
+  if (end < 0) return null;
+  const raw = body.slice(start + RELEASE_SEAL_PREFIX.length, end);
+  try {
+    const value = JSON.parse(raw) as { v?: unknown; head?: unknown; base?: unknown; workItems?: unknown };
+    if (value.v !== 1
+      || typeof value.head !== 'string'
+      || !/^[0-9a-f]{40}$/iu.test(value.head)
+      || typeof value.base !== 'string'
+      || !/^[0-9a-f]{40}$/iu.test(value.base)
+      || !Array.isArray(value.workItems)
+      || value.workItems.length < 1
+      || value.workItems.length > 20
+      || value.workItems.some((number) => !Number.isSafeInteger(number) || number < 1)) {
+      return null;
+    }
+    const workItemNumbers = [...new Set(value.workItems as number[])].sort((a, b) => a - b);
+    if (workItemNumbers.length !== value.workItems.length) return null;
+    return {
+      version: 1,
+      expectedHeadSha: value.head.toLowerCase(),
+      expectedBaseSha: value.base.toLowerCase(),
+      workItemNumbers,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export class GitHubRuntimeProvider implements ProjectPreflightProvider, OperationPreflightProvider, RepositoryAcquisitionProvider, RepositoryAuditReadProvider, SourceControlMutationProvider, PullRequestReadProvider, SourceArtifactReadProvider, CiReadProvider, WorkItemCandidateReadProvider, WorkItemMutationProvider {
@@ -518,6 +557,49 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         normalized.diagnostics,
       )];
     }
+  }
+
+  async findOpenPromotionPullRequest(project: ProjectReference): Promise<OpenPromotionCandidate | null> {
+    const { repository, credential } = await this.readableRepository(
+      project,
+      GITHUB_READ_OPERATION_PERMISSIONS['pull-request.status'],
+    );
+    const metadata = await this.request<GitHubRepositoryResponse>(repository, '', {}, credential);
+    const defaultBranch = metadata.default_branch?.trim();
+    if (!defaultBranch) throw { code: 'NOT_FOUND', message: 'Repository default branch is unavailable' };
+
+    const owner = repository.split('/')[0]!;
+    const candidates = (
+      await Promise.all(['preview', 'vercel-preview'].map((head) =>
+        this.request<GitHubPullRequestResponse[]>(
+          repository,
+          `/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}&base=${encodeURIComponent(defaultBranch)}&per_page=2`,
+          {},
+          credential,
+        )
+      ))
+    ).flat().filter((pull) =>
+      ['preview', 'vercel-preview'].includes(pull.head.ref.toLowerCase())
+      && pull.base.ref === defaultBranch
+    );
+    if (candidates.length > 1) {
+      throw { code: 'CONFLICT', message: 'Multiple open Preview-to-Main promotion pull requests exist; release identity is ambiguous' };
+    }
+    const raw = candidates[0];
+    if (!raw) return null;
+
+    const pullRequest = await this.getPullRequestStatus({
+      project,
+      pullRequestNumber: raw.number,
+    });
+    const seal = parsePromotionSeal(raw.body);
+    const sealState = !seal
+      ? 'unsealed'
+      : seal.expectedHeadSha === pullRequest.head.sha.toLowerCase()
+        && seal.expectedBaseSha === pullRequest.base.sha.toLowerCase()
+        ? 'current'
+        : 'stale';
+    return { pullRequest, seal, sealState };
   }
 
   async getPullRequestStatus(input: GetPullRequestStatusInput): Promise<PullRequestStatus> {

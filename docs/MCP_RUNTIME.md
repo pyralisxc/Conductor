@@ -100,7 +100,7 @@ Deploy behind HTTPS or build the included container. Confirm `/health`, both dis
 ## Deliberate limits
 
 - No anonymous or static shared-secret mode.
-- No arbitrary shell, generic provider dispatch, force-push, or general repository-admin tool. Repository acquisition is limited to an exact public snapshot into an already-authorized empty destination and does not create/delete repositories or grant code-work scope. Exact branch cleanup is limited to already-integrated `work/*`, `repair/*`, or `audit/*` heads with an unchanged expected SHA, no open pull request, active repository work scope, and durable idempotency; protected/accepted branches and bulk cleanup are refused.
+- No arbitrary shell, generic provider dispatch, force-push, or general repository-admin tool. Repository acquisition is limited to an exact public snapshot into an already-authorized empty destination and does not create/delete repositories or grant code-work scope. Exact branch cleanup is limited to already-integrated `work/*`, `repair/*`, or `audit/*` heads with an unchanged expected SHA, no open pull request, active repository work scope, and durable idempotency; protected/accepted branches and bulk cleanup are refused. `lifecycle.advance` now invokes that same exact cleanup proof after it integrates a work PR; cleanup failure is reported as deferred maintenance and does not invalidate a successful integration.
 - Vercel writes are exact-project, idempotent, and gated; production traffic, production-variable changes, and historical-production deployment deletion require exact owner approval. Deployment cleanup is one exact terminal deployment at a time, never current production and never an active build. There is no bulk cleanup, delete-by-URL, alias mutation, or secret-value read tool.
 - Vercel Integration API installation tokens do not expose the runtime-log endpoint in the published integration scope map. Report that lane as unavailable for connected installations; only an explicit direct Vercel access-token binding may attempt it, and direct-token preflight is not permission proof until an exact read succeeds.
 - Pull-request creation remains bounded: ordinary proposals require `work/*` heads, while the only accepted non-work proposal is `preview`/`vercel-preview` → the provider-native repository default branch after GitHub default-branch re-read. Merge is separately bounded to pull requests with exact head/base SHAs. Integration merge rejects `main`, `master`, and the repository default branch. Preview reconciliation accepts only repository-default-branch → `preview`/`vercel-preview` for Main-only changes. Default-branch promotion accepts only an exact `preview`/`vercel-preview` candidate, requires a caller-supplied owner approval reference, and uses a merge commit; the runtime does not infer approval.
@@ -118,7 +118,7 @@ Ordinary technical understanding remains in Development Intelligence. A developm
 
 ## One-call development bootstrap
 
-A fresh or resumed development conversation should prefer `work.bootstrap` over separately calling `work-scope.begin`, `capabilities`, and `development.status` when the tool is present. The bootstrap call establishes a new client-bound work context for the exact resolved repository and returns a compact repository topology, inspect preflight/work projection, Development Intelligence posture, bounded deployment posture, and the current runtime tool-catalog digest.
+A fresh or resumed development conversation should prefer `work.bootstrap` over separately calling `work-scope.begin`, `capabilities`, and `development.status` when the tool is present. Additional repository code/deployment work should not be obtained by silently rebinding the active repository: `work-scope.request` creates a signed self-describing owner gate for an exact additional repository set, and `work-scope.approve` applies that grant only to the current signed work context after fresh `owner-approved:` approval. The `/work-scope` page remains a legacy/admin break-glass path. The bootstrap call establishes a new client-bound work context for the exact resolved repository and returns a compact repository topology, inspect preflight/work projection, Development Intelligence posture, bounded deployment posture, and the current runtime tool-catalog digest.
 
 Clients should retain the returned `catalogDigest` only as ephemeral conversation context and echo it as `clientCatalogDigest` on a later bootstrap. A mismatch is reported as `stale-client-schema`; refresh or reconnect the client before concluding that a newly absent tool is not implemented. Exact `preflight_operation` remains authoritative for whether a visible operation can execute against one project.
 
@@ -128,9 +128,9 @@ Bootstrap also returns a short-lived HMAC-signed evidence handle bound to the au
 The runtime publishes both `catalogVersion` and `catalogDigest`. The digest includes the explicit catalog revision as well as exposed operation identities. Any MCP input/output schema change that matters to callers must bump `TOOL_CATALOG_VERSION`; this is deliberate so changing an existing tool schema cannot remain invisible merely because its operation name is unchanged.
 
 
-## Repository audit and Slack Stewardship baseline
+## Repository audit and Wait Stewardship baseline
 
-`repository.audit` is the read-only provider-facts audit surface used by Slack Stewardship and no-DI baseline development. It composes bounded GitHub topology, sampled active PR/check/workflow state, durable-work classification hygiene, inspect preflight, and configured Vercel posture in one model-visible call. Independent read lanes are executed concurrently where safe and partial provider gaps stay explicit.
+`repository.audit` is the read-only provider-facts audit surface commonly useful during optional Wait Stewardship and no-DI baseline development. It composes bounded GitHub topology, sampled active PR/check/workflow state, durable-work classification hygiene, inspect preflight, and configured Vercel posture in one model-visible call. Independent read lanes are executed concurrently where safe and partial provider gaps stay explicit.
 
 Development Intelligence `audit_repository` is attached only as a separate semantic evidence plane when available. Conductor never converts DI findings into provider facts, rankings, mutation authority, or automatic implementation. Without DI, `repository.audit` still succeeds with the provider/source-control baseline when GitHub/work evidence is available.
 
@@ -150,3 +150,19 @@ The initial canary exposes only two internal service operations:
 The caller cannot provide a repository or select a capability/effect. Conductor obtains the exact GitHub repository from ASC's consumed delegation receipt and maps each fixed endpoint to one fixed capability/effect pair. A rejected, expired, replayed, or stale ASC delegation stops before provider execution and is never retried through Conductor's legacy OAuth authority. Returned authority receipts identify `source: asc` without echoing the opaque delegation handle or provider credentials.
 
 This canary deliberately does not expose branch creation, commits, PR creation, merges, Preview reconciliation, Main promotion, deployment mutation, environment mutation, or generic operation dispatch.
+
+
+## Preview completion, release batching, and Wait Stewardship
+
+`lifecycle.advance` treats issue completion in Preview and release preparation as separate mechanics. Ordinary advancement integrates the exact work PR, attempts safe merged-head cleanup, and proves the exact Preview deployment. When Preview is READY it returns `stage: preview-ready` by default and does not create a Main PR. This lets multiple canonical issues accumulate into one coherent Preview release candidate.
+
+Main preparation is explicit with `preparePromotion: true`. The caller may provide `promotionWorkItemNumbers` so the one Preview-to-Main promotion PR carries the exact canonical issue batch. Main remains a separate signed human gate; preparation never implies acceptance.
+
+Every `external-wait` lifecycle gate includes the exact resume condition plus optional Wait Stewardship guidance. The primary referent remains active. Secondary stewardship is optional, bounded, non-conflicting, and separately authorized; Conductor does not select or execute secondary work itself.
+
+
+### Sealed release candidates
+
+Preparing Main now seals the release candidate in GitHub-native PR metadata. The promotion PR body records the exact Preview SHA, exact default-branch base SHA, and exact canonical work-item batch. The GitHub adapter can find the unique open Preview-to-Main candidate repository-wide and compares the live PR head/base to that seal.
+
+While a sealed release candidate is open, ordinary lifecycle advancement does not integrate additional work into Preview. Complete or close the release first, or explicitly prepare a new release after the old candidate is closed. If Preview/Main move out of band and the live PR no longer matches the seal, lifecycle reports the candidate as stale and will not present a Main owner gate. This prevents a moving Preview branch from silently expanding a declared release batch.
