@@ -1209,3 +1209,87 @@ test('Main promotion reuses an exact existing Production deployment and keeps mi
   assert.match(JSON.stringify(unavailable.diagnostics), /Git promotion succeeded/u);
 });
 
+
+
+test('promotion replay can recover Vercel handoff after Git already succeeded', async () => {
+  const headSha='a'.repeat(40), baseSha='b'.repeat(40), mergeSha='c'.repeat(40);
+  let mergeCalls=0, statusReads=0, createCalls=0;
+  const source:any={
+    id:'github', async getCapabilities(){return[];},
+    async createBranch(){throw new Error('unused');},async bootstrapIntegrationBranch(){throw new Error('unused');},
+    async deleteBranch(){throw new Error('unused');},async createCommit(){throw new Error('unused');},
+    async createPullRequest(){throw new Error('unused');},async commentPullRequest(){throw new Error('unused');},
+    async updatePullRequestLabels(){throw new Error('unused');},async mergeIntegrationPullRequest(){throw new Error('unused');},
+    async reconcilePreviewPullRequest(){throw new Error('unused');},
+    async promotePullRequest(input:any){mergeCalls+=1;return{repository:'pyralisxc/Conductor',pullRequestNumber:239,merged:true,mergeCommitSha:mergeSha,message:'merged',approvalReference:input.approvalReference,overriddenBlockerIssueNumbers:[]};},
+  };
+  const deployment:any={
+    id:'vercel',async getCapabilities(){return[];},
+    async getDeploymentStatus(){
+      statusReads+=1;
+      if(statusReads===1) throw {code:'TRANSIENT',source:'vercel',message:'temporary provider read failure'};
+      return{provider:'vercel',project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:null,latestProductionAttempt:null,recent:[],domains:[],observedAt:'2026-09-30T00:00:00Z'};
+    },
+    async createGitDeployment(input:any){createCalls+=1;return{provider:'vercel',projectId:'prj',deploymentId:'dpl_recovered',sourceRevision:input.sha,sourceRef:input.ref,target:'production',state:'BUILDING'};},
+  };
+  const runtime=new ConductorToolRuntime({sourceControlMutationProvider:source,deploymentProvider:deployment,mutationExecutor:new IdempotentMutationExecutor({store:new InMemoryIdempotencyStore()})});
+  const input={project:{id:'Conductor',repository:'pyralisxc/Conductor'},pullRequestNumber:239,expectedHeadSha:headSha,expectedBaseSha:baseSha,approvalReference:'owner-approved:user approved exact release',mergeMethod:'merge' as const,idempotencyKey:'promotion-handoff-recovery'};
+  const first=await runtime.promotePullRequest(input);
+  assert.equal(first.status,'succeeded'); if(first.status!=='succeeded')return;
+  assert.equal((first.result as any).productionHandoff.status,'error');
+  assert.equal(mergeCalls,1);
+  assert.equal(createCalls,0);
+
+  const replay=await runtime.promotePullRequest(input);
+  assert.equal(replay.status,'succeeded'); if(replay.status!=='succeeded')return;
+  assert.equal(replay.idempotency?.replayed,true);
+  assert.equal((replay.result as any).productionHandoff.status,'created');
+  assert.equal((replay.result as any).productionHandoff.deploymentId,'dpl_recovered');
+  assert.equal(mergeCalls,1);
+  assert.equal(createCalls,1);
+});
+
+test('lifecycle resume waits for exact Production deployment and completes from the merged PR', async () => {
+  const headSha='d'.repeat(40),baseSha='e'.repeat(40),mergeSha='f'.repeat(40);
+  let merged=false,ready=false,mergeCalls=0,createCalls=0;
+  const pullStatus=()=>({
+    repository:'pyralisxc/Conductor',pullRequestNumber:239,url:'https://github.test/pull/239',
+    state:merged?'closed':'open',draft:false,merged,mergeCommitSha:merged?mergeSha:null,mergeable:true,mergeableState:'clean',
+    head:{ref:'preview',sha:headSha},base:{ref:'main',sha:baseSha},labels:[],
+    checks:{total:1,pending:0,successful:1,failed:0,neutral:0,skipped:0,items:[]},workflowRuns:[],
+    orchestration:{state:merged?'merged' as const:'promotion-ready' as const,action:merged?'none' as const:'promotion-gate' as const,shouldAct:!merged,summary:merged?'merged':'ready',resumeWhen:null,transition:{observed:false,previousHeadSha:null,previousState:null,headChanged:null,stateChanged:null,meaningful:null},seal:{requested:false,expectedPreSealCheckpoint:false,exactHeadVerificationRequired:false},signals:{pending:[],actionRequired:[],failed:[]}},
+  });
+  const source:any={
+    id:'github',async getCapabilities(){return[];},async createBranch(){throw new Error('unused');},async bootstrapIntegrationBranch(){throw new Error('unused');},
+    async deleteBranch(){throw new Error('unused');},async createCommit(){throw new Error('unused');},async createPullRequest(){throw new Error('unused');},
+    async commentPullRequest(){throw new Error('unused');},async updatePullRequestLabels(){throw new Error('unused');},async mergeIntegrationPullRequest(){throw new Error('unused');},
+    async reconcilePreviewPullRequest(){throw new Error('unused');},
+    async promotePullRequest(input:any){mergeCalls+=1;merged=true;return{repository:'pyralisxc/Conductor',pullRequestNumber:239,merged:true,mergeCommitSha:mergeSha,message:'merged',approvalReference:input.approvalReference,overriddenBlockerIssueNumbers:[]};},
+  };
+  const pull:any={id:'github-pr',async getCapabilities(){return[];},async getPullRequestStatus(){return pullStatus();}};
+  const deployment:any={
+    id:'vercel',async getCapabilities(){return[];},
+    async getDeploymentStatus(){
+      const exact=createCalls>0?{id:'dpl_exact',url:null,state:ready?'READY':'BUILDING',target:'production',createdAt:null,readyAt:null,sourceRevision:mergeSha,sourceRef:'main',sourceRepository:'Conductor',aliases:[],errorCode:null,errorMessage:null}:null;
+      return{provider:'vercel',project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:ready?exact:null,latestProductionAttempt:exact,recent:exact?[exact]:[],domains:[],observedAt:'2026-09-30T00:00:00Z'};
+    },
+    async createGitDeployment(input:any){createCalls+=1;return{provider:'vercel',projectId:'prj',deploymentId:'dpl_exact',sourceRevision:input.sha,sourceRef:input.ref,target:'production',state:'BUILDING'};},
+  };
+  const runtime=new ConductorToolRuntime({sourceControlMutationProvider:source,pullRequestProvider:pull,deploymentProvider:deployment,mutationExecutor:new IdempotentMutationExecutor({store:new InMemoryIdempotencyStore()})});
+  const input={project:{id:'Conductor',repository:'pyralisxc/Conductor'},issueNumber:239,gateId:'gate-239',pullRequestNumber:239,expectedHeadSha:headSha,expectedBaseSha:baseSha,approvalReference:'owner-approved:user approved exact release',idempotencyKey:'lifecycle-production-wait'};
+
+  const waiting=await runtime.resumeLifecycle(input);
+  assert.equal(waiting.status,'succeeded'); if(waiting.status!=='succeeded')return;
+  assert.equal(waiting.result.stage,'external-wait');
+  assert.equal(waiting.result.gate?.deploymentId,'dpl_exact');
+  assert.equal(mergeCalls,1);
+  assert.equal(createCalls,1);
+
+  ready=true;
+  const completed=await runtime.resumeLifecycle(input);
+  assert.equal(completed.status,'succeeded'); if(completed.status!=='succeeded')return;
+  assert.equal(completed.result.stage,'complete');
+  assert.match(completed.result.summary,/Vercel Production handoff completed/u);
+  assert.equal(mergeCalls,1);
+  assert.equal(createCalls,1);
+});
