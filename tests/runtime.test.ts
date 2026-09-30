@@ -18,6 +18,8 @@ import type {
   RepositoryAcquisitionProvider,
 } from '../src/index.js';
 
+process.env.CONDUCTOR_PRODUCTION_HANDOFF_GRACE_MS = '0';
+
 const project: ProjectReference = {
   id: 'cardforge',
   repository: 'pyralisxc/CardForge',
@@ -1122,6 +1124,86 @@ test('Main promotion creates or observes the exact Vercel Production deployment 
   assert.equal(replay.idempotency?.replayed, true);
   assert.equal(mergeCalls, 1);
   assert.equal(createdInputs.length, 1);
+});
+
+test('Main promotion observes a native Vercel Git deployment during the bounded grace window instead of creating a duplicate', async () => {
+  const previousGrace = process.env.CONDUCTOR_PRODUCTION_HANDOFF_GRACE_MS;
+  process.env.CONDUCTOR_PRODUCTION_HANDOFF_GRACE_MS = '4';
+  try {
+    const mergeSha = '9'.repeat(40);
+    let statusReads = 0;
+    let createCalls = 0;
+    const source: any = {
+      id: 'github',
+      async getCapabilities() { return []; },
+      async createBranch() { throw new Error('unused'); },
+      async bootstrapIntegrationBranch() { throw new Error('unused'); },
+      async deleteBranch() { throw new Error('unused'); },
+      async createCommit() { throw new Error('unused'); },
+      async createPullRequest() { throw new Error('unused'); },
+      async commentPullRequest() { throw new Error('unused'); },
+      async updatePullRequestLabels() { throw new Error('unused'); },
+      async mergeIntegrationPullRequest() { throw new Error('unused'); },
+      async reconcilePreviewPullRequest() { throw new Error('unused'); },
+      async promotePullRequest(input: any) {
+        return {
+          repository: 'pyralisxc/Development-Intelligence',
+          pullRequestNumber: input.pullRequestNumber,
+          merged: true,
+          mergeCommitSha: mergeSha,
+          message: 'merged',
+          approvalReference: input.approvalReference,
+          overriddenBlockerIssueNumbers: [],
+        };
+      },
+    };
+    const deployment: any = {
+      id: 'vercel',
+      async getCapabilities() { return []; },
+      async getDeploymentStatus() {
+        statusReads += 1;
+        const exact = statusReads >= 3
+          ? { id: 'dpl_native', url: null, state: 'INITIALIZING', target: 'production', createdAt: null, readyAt: null, sourceRevision: mergeSha, sourceRef: 'main', sourceRepository: 'Development-Intelligence', aliases: [], errorCode: null, errorMessage: null }
+          : null;
+        return {
+          provider: 'vercel',
+          project: { id: 'prj_di', name: 'development-intelligence', productionBranch: 'main', teamId: 'team' },
+          production: null,
+          latestProductionAttempt: exact,
+          recent: exact ? [exact] : [],
+          domains: [],
+          observedAt: '2026-09-30T00:00:00Z',
+        };
+      },
+      async createGitDeployment() {
+        createCalls += 1;
+        throw new Error('fallback must not race native Git deployment');
+      },
+    };
+    const runtime = new ConductorToolRuntime({
+      sourceControlMutationProvider: source,
+      deploymentProvider: deployment,
+      mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+    });
+    const result = await runtime.promotePullRequest({
+      project: { id: 'Development-Intelligence', repository: 'pyralisxc/Development-Intelligence' },
+      pullRequestNumber: 250,
+      expectedHeadSha: 'a'.repeat(40),
+      expectedBaseSha: 'b'.repeat(40),
+      approvalReference: 'owner-approved:user approved exact release',
+      mergeMethod: 'merge',
+      idempotencyKey: 'promotion-native-grace-window',
+    });
+    assert.equal(result.status, 'succeeded');
+    if (result.status !== 'succeeded') return;
+    assert.equal((result.result as any).productionHandoff.status, 'observed');
+    assert.equal((result.result as any).productionHandoff.deploymentId, 'dpl_native');
+    assert.equal((result.result as any).productionHandoff.observationAttempts, 3);
+    assert.equal(createCalls, 0);
+  } finally {
+    if (previousGrace === undefined) delete process.env.CONDUCTOR_PRODUCTION_HANDOFF_GRACE_MS;
+    else process.env.CONDUCTOR_PRODUCTION_HANDOFF_GRACE_MS = previousGrace;
+  }
 });
 
 test('Main promotion reuses an exact existing Production deployment and keeps missing Vercel binding non-fatal', async () => {
