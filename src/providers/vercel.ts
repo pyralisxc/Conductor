@@ -388,7 +388,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   }
 
   private requireProductionApproval(reference?: string): void {
-    if (!reference || !/^owner-approved:[A-Za-z0-9._:/-]{8,180}$/u.test(reference)) {
+    const normalized = reference?.trim() ?? '';
+    if (!/^owner-approved:[^\r\n]{8,480}$/u.test(normalized)) {
       throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'Exact owner approval reference is required for production changes' };
     }
   }
@@ -436,7 +437,17 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     this.requireProductionApproval(input.approvalReference);
     const bound = await this.exactDeployment(input.project, input.deploymentId);
     if (stringField(bound.detail, 'readyState') !== 'READY') throw { code: 'CONFLICT', source: 'vercel', message: 'Target deployment must be READY' };
-    if (mode === 'rollback' && stringField(bound.detail, 'target') !== 'production') throw { code: 'CONFLICT', source: 'vercel', message: 'Rollback target must be a prior production deployment' };
+    const deploymentTarget = stringField(bound.detail, 'target');
+    if (mode === 'rollback' && deploymentTarget !== 'production') throw { code: 'CONFLICT', source: 'vercel', message: 'Rollback target must be a prior production deployment' };
+    if (mode === 'promote' && deploymentTarget !== 'production') {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'Vercel promotion requires a READY production-target deployment; create the exact Git revision with target=production before promoting traffic' };
+    }
+    const currentProject = await this.getProject(bound.binding);
+    const currentTarget = recordField(recordField(currentProject, 'targets') ?? {}, 'production');
+    const currentProduction = currentTarget ? (stringField(currentTarget, 'id') ?? stringField(currentTarget, 'uid')) : null;
+    if (mode === 'promote' && currentProduction === input.deploymentId) {
+      return { provider: 'vercel', projectId: bound.id, deploymentId: input.deploymentId, action: mode, productionDeploymentId: currentProduction, verified: true, alreadyCurrent: true, observedAt: this.now().toISOString() };
+    }
     const path = mode === 'promote'
       ? `/v10/projects/${encodeURIComponent(bound.id)}/promote/${encodeURIComponent(input.deploymentId)}`
       : `/v1/projects/${encodeURIComponent(bound.id)}/rollback/${encodeURIComponent(input.deploymentId)}`;

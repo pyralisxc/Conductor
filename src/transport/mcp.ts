@@ -637,7 +637,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
   if (runtime.vercelMutationEnabled) {
     const idempotencyKey = z.string().min(8).max(200);
     const deploymentId = z.string().regex(/^dpl_[A-Za-z0-9]+$/u);
-    const approvalReference = z.string().optional().describe('Exact owner approval for production actions; must begin owner-approved:');
+    const approvalReference = z.string().optional().describe('Exact owner approval for production actions; trimmed value must begin owner-approved: and may contain ordinary human-readable text.');
     const base = { project: projectSchema, idempotencyKey, workContext: workContextSchema };
     const deployment = z.object({ ...base, deploymentId, approvalReference });
     const variable = z.object({ ...base, key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u), value: z.string(), type: z.enum(['plain', 'encrypted', 'sensitive']), target: z.array(z.enum(['production','preview','development'])).min(1).max(3), gitBranch: z.string().optional(), customEnvironmentIds: z.array(z.string()).max(20).optional(), approvalReference });

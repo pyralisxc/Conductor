@@ -80,9 +80,16 @@ test('Vercel operations scope exact deployments and require production approval'
   const deployed = await provider.redeploy({ project, deploymentId: 'dpl_preview', idempotencyKey: 'redeploy-preview' });
   assert.equal(deployed.deploymentId, 'dpl_new');
   await assert.rejects(provider.promote({ project, deploymentId: 'dpl_preview', idempotencyKey: 'need-approval' }), (error: unknown) => (error as { message?: string }).message?.includes('approval') === true);
-  const promoted = await provider.promote({ project, deploymentId: 'dpl_preview', approvalReference: 'owner-approved:exact-preview-commit', idempotencyKey: 'promote-preview' });
+  await assert.rejects(
+    provider.promote({ project, deploymentId: 'dpl_preview', approvalReference: 'owner-approved: exact preview commit', idempotencyKey: 'promote-preview' }),
+    (error: unknown) => (error as { message?: string }).message?.includes('production-target deployment') === true,
+  );
+  const promoteCallsBefore = calls.filter(call => call.path.includes('/promote/')).length;
+  const promoted = await provider.promote({ project, deploymentId: 'dpl_old', approvalReference: 'owner-approved: exact current production', idempotencyKey: 'promote-current-production' });
   assert.equal(promoted.verified, true);
-  const rolled = await provider.rollback({ project, deploymentId: 'dpl_old', approvalReference: 'owner-approved:exact-old-commit', idempotencyKey: 'rollback-old' });
+  assert.equal(promoted.alreadyCurrent, true);
+  assert.equal(calls.filter(call => call.path.includes('/promote/')).length, promoteCallsBefore);
+  const rolled = await provider.rollback({ project, deploymentId: 'dpl_old', approvalReference: 'owner-approved: exact old commit', idempotencyKey: 'rollback-old' });
   assert.equal(rolled.verified, true);
 });
 
