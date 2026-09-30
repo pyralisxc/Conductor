@@ -159,3 +159,10 @@ This canary deliberately does not expose branch creation, commits, PR creation, 
 Main preparation is explicit with `preparePromotion: true`. The caller may provide `promotionWorkItemNumbers` so the one Preview-to-Main promotion PR carries the exact canonical issue batch. Main remains a separate signed human gate; preparation never implies acceptance.
 
 Every `external-wait` lifecycle gate includes the exact resume condition plus optional Wait Stewardship guidance. The primary referent remains active. Secondary stewardship is optional, bounded, non-conflicting, and separately authorized; Conductor does not select or execute secondary work itself.
+
+
+### Sealed release candidates
+
+Preparing Main now seals the release candidate in GitHub-native PR metadata. The promotion PR body records the exact Preview SHA, exact default-branch base SHA, and exact canonical work-item batch. The GitHub adapter can find the unique open Preview-to-Main candidate repository-wide and compares the live PR head/base to that seal.
+
+While a sealed release candidate is open, ordinary lifecycle advancement does not integrate additional work into Preview. Complete or close the release first, or explicitly prepare a new release after the old candidate is closed. If Preview/Main move out of band and the live PR no longer matches the seal, lifecycle reports the candidate as stale and will not present a Main owner gate. This prevents a moving Preview branch from silently expanding a declared release batch.

@@ -511,6 +511,7 @@ export interface LifecycleGateSpec {
   integrationBranch?: 'preview' | 'vercel-preview';
   integrationHead?: string;
   deploymentId?: string;
+  workItemNumbers?: number[];
   ownerGate?: OwnerGateExplanation;
   secondaryStewardship?: {
     status: 'optional';
@@ -807,6 +808,19 @@ export interface PullRequestOrchestration {
     actionRequired: string[];
     failed: string[];
   };
+}
+
+export interface PromotionCandidateSeal {
+  version: 1;
+  expectedHeadSha: string;
+  expectedBaseSha: string;
+  workItemNumbers: number[];
+}
+
+export interface OpenPromotionCandidate {
+  pullRequest: PullRequestStatus;
+  seal: PromotionCandidateSeal | null;
+  sealState: 'current' | 'stale' | 'unsealed';
 }
 
 export interface PullRequestStatus {
