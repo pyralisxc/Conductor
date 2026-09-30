@@ -652,6 +652,25 @@ test('lifecycle advance rejects a promotion candidate whose live head drifted fr
   assert.match(result.result.summary,/drifted from sealed head/);
 });
 
+test('lifecycle advance accepts multiple merged Preview transports for one canonical issue', async () => {
+  const previewHead = '9'.repeat(40);
+  const mainHead = '8'.repeat(40);
+  const merged = (number:number, sha:string) => ({
+    repository:'pyralisxc/Conductor',pullRequestNumber:number,url:`https://github.test/pull/${number}`,state:'closed',draft:false,merged:true,mergeable:null,mergeableState:'unknown',
+    head:{ref:`work/236-pass-${number}`,sha},base:{ref:'preview',sha:'7'.repeat(40)},labels:[],checks:{total:0,pending:0,successful:0,failed:0,neutral:0,skipped:0,items:[]},workflowRuns:[],
+    orchestration:{state:'merged' as const,action:'none' as const,shouldAct:false,summary:'merged',resumeWhen:null,transition:{observed:false,previousHeadSha:null,previousState:null,headChanged:null,stateChanged:null,meaningful:null},seal:{requested:false,expectedPreSealCheckpoint:false,exactHeadVerificationRequired:false},signals:{pending:[],actionRequired:[],failed:[]}},
+  });
+  const workProvider:any={id:'work',async getCapabilities(){return[];},async getWorkItemStatus(){return{repository:'pyralisxc/Conductor',issueNumber:236,url:'https://github.test/issues/236',title:'Seal',body:'',state:'open',status:'in-progress',statusSource:'label',kind:'improvement',kindSource:'label',origin:'agent-audit',originSource:'label',labels:[],createdAt:'2026-09-30T00:00:00Z',updatedAt:'2026-09-30T00:00:00Z'};},async listWorkItems(){return{repository:'pyralisxc/Conductor',items:[],truncated:false};},async listWorkItemPullRequests(){return[merged(237,'1'.repeat(40)),merged(244,'2'.repeat(40))];}};
+  const pullProvider:any={id:'github-pr',async getCapabilities(){return[];},async findOpenPromotionPullRequest(){return null;},async getPullRequestStatus(){throw new Error('no open PR reread needed');}};
+  const source:any={id:'github',async getCapabilities(){return[];},async createBranch(){throw new Error('unused');},async bootstrapIntegrationBranch(){throw new Error('unused');},async deleteBranch(){throw new Error('unused');},async createCommit(){throw new Error('unused');},async createPullRequest(){throw new Error('unused');},async commentPullRequest(){throw new Error('unused');},async updatePullRequestLabels(){throw new Error('unused');},async mergeIntegrationPullRequest(){throw new Error('must not merge again');},async reconcilePreviewPullRequest(){throw new Error('unused');},async promotePullRequest(){throw new Error('unused');}};
+  const runtime=new ConductorToolRuntime({sourceControlMutationProvider:source,pullRequestProvider:pullProvider,workItemCandidateProvider:workProvider,repositoryBootstrapProvider:{id:'topology',async getCapabilities(){return[];},async getRepositoryBootstrap(){return{provider:'github' as const,repository:'pyralisxc/Conductor',defaultBranch:'main',defaultHead:mainHead,integrationBranch:'preview' as const,integrationHead:previewHead,observedAt:'2026-09-30T00:00:00Z'};}},deploymentProvider:{id:'vercel',async getCapabilities(){return[];},async getDeploymentStatus(){return{provider:'vercel' as const,project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:null,latestProductionAttempt:null,recent:[{id:'dpl_preview',url:null,state:'READY',target:null,createdAt:null,readyAt:null,sourceRevision:previewHead,sourceRef:'preview',sourceRepository:'Conductor',aliases:[],errorCode:null,errorMessage:null}],domains:[],observedAt:'2026-09-30T00:00:00Z'};}} as any,mutationExecutor:new IdempotentMutationExecutor({store:new InMemoryIdempotencyStore()})});
+  const receipt=await runtime.advanceLifecycle({project:{id:'Conductor',repository:'pyralisxc/Conductor'},issueNumber:236,maxPolls:0,pollIntervalMs:0,idempotencyKey:'multiple-merged-integrations'});
+  assert.equal(receipt.status,'succeeded'); if(receipt.status!=='succeeded')return;
+  assert.equal(receipt.result.stage,'preview-ready');
+  assert.equal(receipt.result.transitions.filter((item)=>item.operation==='pull-request.status').length,2);
+  assert.equal(receipt.result.previewProof?.commitSha,previewHead);
+});
+
 test('lifecycle advance stops at READY Preview by default without preparing Main', async () => {
   const integrationHead = '1'.repeat(40);
   const integrationMerge = '2'.repeat(40);

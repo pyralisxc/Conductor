@@ -1656,13 +1656,27 @@ export class ConductorToolRuntime {
 
       if (openIntegrations.length === 0) {
         if (mergedIntegrations.length === 0) return lifecycleProjection(project, input.issueNumber, 'action-required', 'No linked work-to-Preview pull request exists for this canonical work item.', transitions);
-        if (mergedIntegrations.length > 1) throw { code: 'CONFLICT', message: 'Multiple merged integration pull requests are linked to this work item; exact continuation is ambiguous' };
-        transitions.push({
-          operation: 'pull-request.status',
-          status: 'observed',
-          summary: `Integration PR #${mergedIntegrations[0]!.pullRequest.pullRequestNumber} is already merged.`,
-          pullRequestNumber: mergedIntegrations[0]!.pullRequest.pullRequestNumber,
-        });
+        for (const item of mergedIntegrations) {
+          transitions.push({
+            operation: 'pull-request.status',
+            status: 'observed',
+            summary: `Integration PR #${item.pullRequest.pullRequestNumber} is already merged and retained as historical transport evidence.`,
+            pullRequestNumber: item.pullRequest.pullRequestNumber,
+          });
+        }
+        const closedUnmerged = artifacts.filter((item) =>
+          item.role === 'preview-integration'
+          && item.pullRequest.state === 'closed'
+          && !item.pullRequest.merged
+        );
+        for (const item of closedUnmerged) {
+          transitions.push({
+            operation: 'pull-request.status',
+            status: 'observed',
+            summary: `Linked Preview PR #${item.pullRequest.pullRequestNumber} is closed without merge and is not treated as integration evidence.`,
+            pullRequestNumber: item.pullRequest.pullRequestNumber,
+          });
+        }
       }
 
       let previewDeployment: import('./types.js').DeploymentRecord | null = null;
