@@ -80,9 +80,18 @@ test('Vercel operations scope exact deployments and require production approval'
   const deployed = await provider.redeploy({ project, deploymentId: 'dpl_preview', idempotencyKey: 'redeploy-preview' });
   assert.equal(deployed.deploymentId, 'dpl_new');
   await assert.rejects(provider.promote({ project, deploymentId: 'dpl_preview', idempotencyKey: 'need-approval' }), (error: unknown) => (error as { message?: string }).message?.includes('approval') === true);
-  const promoted = await provider.promote({ project, deploymentId: 'dpl_preview', approvalReference: 'owner-approved:exact-preview-commit', idempotencyKey: 'promote-preview' });
+  await assert.rejects(
+    provider.promote({ project, deploymentId: 'dpl_preview', approvalReference: 'owner-approved:user approved exact Preview candidate', idempotencyKey: 'promote-preview' }),
+    (error: unknown) => (error as { code?: string; message?: string }).code === 'CONFLICT' && /staged Production deployment/u.test((error as { message?: string }).message ?? ''),
+  );
+  const promotePostsBefore = calls.filter(call => call.path.includes('/promote/') && call.method === 'POST').length;
+  const alreadyProduction = await provider.promote({ project, deploymentId: 'dpl_old', approvalReference: 'owner-approved:user confirmed existing production', idempotencyKey: 'promote-current-production' });
+  assert.equal(alreadyProduction.verified, true);
+  assert.equal(alreadyProduction.idempotent, true);
+  assert.equal(calls.filter(call => call.path.includes('/promote/') && call.method === 'POST').length, promotePostsBefore);
+  const promoted = await provider.promote({ project, deploymentId: 'dpl_prodold', approvalReference: 'owner-approved:user approved staged production', idempotencyKey: 'promote-staged-production' });
   assert.equal(promoted.verified, true);
-  const rolled = await provider.rollback({ project, deploymentId: 'dpl_old', approvalReference: 'owner-approved:exact-old-commit', idempotencyKey: 'rollback-old' });
+  const rolled = await provider.rollback({ project, deploymentId: 'dpl_old', approvalReference: 'owner-approved:user approved exact old production', idempotencyKey: 'rollback-old' });
   assert.equal(rolled.verified, true);
 });
 

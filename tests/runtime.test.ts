@@ -1015,3 +1015,172 @@ test('evidence bundle refuses duplicate keys before provider work', async () => 
   assert.equal(receipt.status, 'failed');
   assert.equal(calls, 0);
 });
+
+test('Main promotion creates or observes the exact Vercel Production deployment without risking the Git merge', async () => {
+  const mergeSha = 'c'.repeat(40);
+  const headSha = 'a'.repeat(40);
+  const baseSha = 'b'.repeat(40);
+  const createdInputs: any[] = [];
+  let mergeCalls = 0;
+  const source: any = {
+    id: 'github',
+    async getCapabilities() { return []; },
+    async createBranch() { throw new Error('unused'); },
+    async bootstrapIntegrationBranch() { throw new Error('unused'); },
+    async deleteBranch() { throw new Error('unused'); },
+    async createCommit() { throw new Error('unused'); },
+    async createPullRequest() { throw new Error('unused'); },
+    async commentPullRequest() { throw new Error('unused'); },
+    async updatePullRequestLabels() { throw new Error('unused'); },
+    async mergeIntegrationPullRequest() { throw new Error('unused'); },
+    async reconcilePreviewPullRequest() { throw new Error('unused'); },
+    async promotePullRequest(input: any) {
+      mergeCalls += 1;
+      return {
+        repository: 'pyralisxc/Development-Intelligence',
+        pullRequestNumber: input.pullRequestNumber,
+        merged: true,
+        mergeCommitSha: mergeSha,
+        message: 'merged',
+        approvalReference: input.approvalReference,
+        overriddenBlockerIssueNumbers: [],
+      };
+    },
+  };
+  const deployment: any = {
+    id: 'vercel',
+    async getCapabilities() { return []; },
+    async getDeploymentStatus() {
+      return {
+        provider: 'vercel',
+        project: { id: 'prj_di', name: 'development-intelligence', productionBranch: 'main', teamId: 'team' },
+        production: { id: 'dpl_old', url: null, state: 'READY', target: 'production', createdAt: null, readyAt: null, sourceRevision: baseSha, sourceRef: 'main', sourceRepository: 'Development-Intelligence', aliases: [], errorCode: null, errorMessage: null },
+        latestProductionAttempt: null,
+        recent: [],
+        domains: [],
+        observedAt: '2026-09-30T00:00:00Z',
+      };
+    },
+    async createGitDeployment(input: any) {
+      createdInputs.push(input);
+      return { provider: 'vercel', projectId: 'prj_di', deploymentId: 'dpl_exact', sourceRevision: input.sha, sourceRef: input.ref, target: input.target, state: 'INITIALIZING' };
+    },
+  };
+  const runtime = new ConductorToolRuntime({
+    sourceControlMutationProvider: source,
+    deploymentProvider: deployment,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const input = {
+    project: { id: 'Development-Intelligence', repository: 'pyralisxc/Development-Intelligence' },
+    pullRequestNumber: 187,
+    expectedHeadSha: headSha,
+    expectedBaseSha: baseSha,
+    approvalReference: 'owner-approved:user approved exact Main release',
+    mergeMethod: 'merge' as const,
+    idempotencyKey: 'promotion-production-handoff',
+  };
+  const first = await runtime.promotePullRequest(input);
+  assert.equal(first.status, 'succeeded');
+  if (first.status !== 'succeeded') return;
+  assert.equal((first.result as any).productionHandoff.status, 'created');
+  assert.equal((first.result as any).productionHandoff.deploymentId, 'dpl_exact');
+  assert.equal(first.identifiers?.deploymentId, 'dpl_exact');
+  assert.equal(createdInputs.length, 1);
+  assert.equal(createdInputs[0].repository, 'pyralisxc/Development-Intelligence');
+  assert.equal(createdInputs[0].ref, 'main');
+  assert.equal(createdInputs[0].sha, mergeSha);
+  assert.equal(createdInputs[0].target, 'production');
+
+  const replay = await runtime.promotePullRequest(input);
+  assert.equal(replay.status, 'succeeded');
+  assert.equal(replay.idempotency?.replayed, true);
+  assert.equal(mergeCalls, 1);
+  assert.equal(createdInputs.length, 1);
+});
+
+test('Main promotion reuses an exact existing Production deployment and keeps missing Vercel binding non-fatal', async () => {
+  const mergeSha = 'd'.repeat(40);
+  const baseResult = {
+    repository: 'pyralisxc/Conductor',
+    pullRequestNumber: 240,
+    merged: true,
+    mergeCommitSha: mergeSha,
+    message: 'merged',
+    approvalReference: 'owner-approved:user approved release',
+    overriddenBlockerIssueNumbers: [],
+  };
+  const source = (number: number): any => ({
+    id: `github-${number}`,
+    async getCapabilities() { return []; },
+    async createBranch() { throw new Error('unused'); },
+    async bootstrapIntegrationBranch() { throw new Error('unused'); },
+    async deleteBranch() { throw new Error('unused'); },
+    async createCommit() { throw new Error('unused'); },
+    async createPullRequest() { throw new Error('unused'); },
+    async commentPullRequest() { throw new Error('unused'); },
+    async updatePullRequestLabels() { throw new Error('unused'); },
+    async mergeIntegrationPullRequest() { throw new Error('unused'); },
+    async reconcilePreviewPullRequest() { throw new Error('unused'); },
+    async promotePullRequest() { return { ...baseResult, pullRequestNumber: number }; },
+  });
+
+  let createCalls = 0;
+  const existingDeployment: any = {
+    id: 'vercel',
+    async getCapabilities() { return []; },
+    async getDeploymentStatus() {
+      return {
+        provider: 'vercel',
+        project: { id: 'prj_conductor', name: 'conductor', productionBranch: 'main', teamId: 'team' },
+        production: null,
+        latestProductionAttempt: { id: 'dpl_exact', url: null, state: 'BUILDING', target: 'production', createdAt: null, readyAt: null, sourceRevision: mergeSha, sourceRef: 'main', sourceRepository: 'Conductor', aliases: [], errorCode: null, errorMessage: null },
+        recent: [],
+        domains: [],
+        observedAt: '2026-09-30T00:00:00Z',
+      };
+    },
+    async createGitDeployment() { createCalls += 1; throw new Error('must not create duplicate'); },
+  };
+  const observedRuntime = new ConductorToolRuntime({
+    sourceControlMutationProvider: source(240),
+    deploymentProvider: existingDeployment,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const observed = await observedRuntime.promotePullRequest({
+    project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+    pullRequestNumber: 240,
+    expectedHeadSha: 'a'.repeat(40),
+    expectedBaseSha: 'b'.repeat(40),
+    approvalReference: 'owner-approved:user approved release',
+    idempotencyKey: 'promotion-observe-existing-production',
+  });
+  assert.equal(observed.status, 'succeeded');
+  if (observed.status !== 'succeeded') return;
+  assert.equal((observed.result as any).productionHandoff.status, 'observed');
+  assert.equal((observed.result as any).productionHandoff.deploymentId, 'dpl_exact');
+  assert.equal(createCalls, 0);
+
+  const unavailableRuntime = new ConductorToolRuntime({
+    sourceControlMutationProvider: source(241),
+    deploymentProvider: {
+      id: 'vercel',
+      async getCapabilities() { return []; },
+      async getDeploymentStatus() { throw { code: 'NOT_FOUND', source: 'vercel', message: 'No bound Vercel project' }; },
+    } as any,
+    mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
+  });
+  const unavailable = await unavailableRuntime.promotePullRequest({
+    project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+    pullRequestNumber: 241,
+    expectedHeadSha: 'a'.repeat(40),
+    expectedBaseSha: 'b'.repeat(40),
+    approvalReference: 'owner-approved:user approved release',
+    idempotencyKey: 'promotion-no-vercel-binding',
+  });
+  assert.equal(unavailable.status, 'succeeded');
+  if (unavailable.status !== 'succeeded') return;
+  assert.equal((unavailable.result as any).productionHandoff.status, 'unavailable');
+  assert.match(JSON.stringify(unavailable.diagnostics), /Git promotion succeeded/u);
+});
+

@@ -388,7 +388,9 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   }
 
   private requireProductionApproval(reference?: string): void {
-    if (!reference || !/^owner-approved:[A-Za-z0-9._:/-]{8,180}$/u.test(reference)) {
+    const normalized = reference?.trim() ?? '';
+    const approval = normalized.startsWith('owner-approved:') ? normalized.slice('owner-approved:'.length).trim() : '';
+    if (!approval || normalized.length > 500) {
       throw { code: 'PERMISSION_DENIED', source: 'vercel', message: 'Exact owner approval reference is required for production changes' };
     }
   }
@@ -435,8 +437,36 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
   private async changeTraffic(input: VercelDeploymentInput, mode: 'promote' | 'rollback'): Promise<Record<string, unknown>> {
     this.requireProductionApproval(input.approvalReference);
     const bound = await this.exactDeployment(input.project, input.deploymentId);
+    const deployment = normalizeDeployment(bound.detail);
     if (stringField(bound.detail, 'readyState') !== 'READY') throw { code: 'CONFLICT', source: 'vercel', message: 'Target deployment must be READY' };
-    if (mode === 'rollback' && stringField(bound.detail, 'target') !== 'production') throw { code: 'CONFLICT', source: 'vercel', message: 'Rollback target must be a prior production deployment' };
+
+    const currentTarget = recordField(recordField(bound.data, 'targets') ?? {}, 'production');
+    const currentProductionId = currentTarget ? (stringField(currentTarget, 'id') ?? stringField(currentTarget, 'uid')) : null;
+    if (mode === 'promote') {
+      if (currentProductionId === input.deploymentId) {
+        return {
+          provider: 'vercel',
+          projectId: bound.id,
+          deploymentId: input.deploymentId,
+          action: mode,
+          productionDeploymentId: currentProductionId,
+          verified: true,
+          idempotent: true,
+          observedAt: this.now().toISOString(),
+        };
+      }
+      if (deployment?.target !== 'production') {
+        throw {
+          code: 'CONFLICT',
+          source: 'vercel',
+          message: 'Vercel promotion requires a READY staged Production deployment; deploy an exact Git revision with target=production instead of promoting an ordinary Preview deployment',
+        };
+      }
+    }
+    if (mode === 'rollback' && deployment?.target !== 'production') {
+      throw { code: 'CONFLICT', source: 'vercel', message: 'Rollback target must be a prior production deployment' };
+    }
+
     const path = mode === 'promote'
       ? `/v10/projects/${encodeURIComponent(bound.id)}/promote/${encodeURIComponent(input.deploymentId)}`
       : `/v1/projects/${encodeURIComponent(bound.id)}/rollback/${encodeURIComponent(input.deploymentId)}`;

@@ -1807,7 +1807,88 @@ export class ConductorToolRuntime {
   async promotePullRequest(input: PromotePullRequestInput) {
     return await this.executeMutation(input, 'pull-request.merge.promote', async (provider) => {
       const result = await provider.promotePullRequest(input);
-      return { result, identifiers: { pullRequestNumber: result.pullRequestNumber, mergeCommitSha: result.mergeCommitSha } };
+      const diagnostics: ToolDiagnostic[] = [];
+      let deploymentId: string | undefined;
+      let productionHandoff: Record<string, unknown> = {
+        status: 'unavailable',
+        sourceRevision: result.mergeCommitSha,
+        reason: 'No Vercel deployment provider is configured for this runtime',
+      };
+
+      if (this.deploymentProvider) {
+        try {
+          const project = this.resolveProjectReference(input.project);
+          const status = await this.deploymentProvider.getDeploymentStatus({ project, limit: 50 });
+          const productionBranch = status.project.productionBranch;
+          if (!productionBranch) {
+            throw { code: 'CONFLICT', source: 'vercel', message: 'Bound Vercel project does not declare a production branch' };
+          }
+          const deployments = [status.production, status.latestProductionAttempt, ...status.recent]
+            .filter((item): item is NonNullable<typeof item> => Boolean(item));
+          const exact = deployments.find((item) =>
+            item.sourceRevision === result.mergeCommitSha
+            && item.sourceRef === productionBranch
+            && item.target === 'production'
+          );
+
+          if (exact) {
+            deploymentId = exact.id;
+            productionHandoff = {
+              status: 'observed',
+              deploymentId: exact.id,
+              deploymentState: exact.state,
+              sourceRevision: result.mergeCommitSha,
+              sourceRef: productionBranch,
+            };
+          } else {
+            const created = await this.deploymentProvider.createGitDeployment({
+              project,
+              repository: result.repository,
+              ref: productionBranch,
+              sha: result.mergeCommitSha,
+              target: 'production',
+              approvalReference: input.approvalReference,
+              idempotencyKey: lifecycleSubkey(input.idempotencyKey, `production-deployment:${result.mergeCommitSha}`),
+            });
+            deploymentId = typeof created.deploymentId === 'string' ? created.deploymentId : undefined;
+            productionHandoff = {
+              status: 'created',
+              ...(deploymentId ? { deploymentId } : {}),
+              deploymentState: typeof created.state === 'string' ? created.state : null,
+              sourceRevision: result.mergeCommitSha,
+              sourceRef: productionBranch,
+            };
+          }
+        } catch (error) {
+          const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', 'vercel');
+          productionHandoff = {
+            status: normalized.code === 'NOT_FOUND' ? 'unavailable' : 'error',
+            sourceRevision: result.mergeCommitSha,
+            error: {
+              code: normalized.code,
+              message: normalized.message,
+              retryable: normalized.retryable,
+              source: normalized.source,
+            },
+          };
+          diagnostics.push({
+            level: normalized.code === 'NOT_FOUND' ? 'warning' : 'error',
+            code: normalized.code,
+            source: normalized.source ?? 'vercel',
+            message: `Git promotion succeeded, but the exact Production deployment handoff did not complete: ${normalized.message}`,
+          });
+        }
+      }
+
+      return {
+        result: { ...result, productionHandoff },
+        diagnostics,
+        identifiers: {
+          pullRequestNumber: result.pullRequestNumber,
+          mergeCommitSha: result.mergeCommitSha,
+          ...(deploymentId ? { deploymentId } : {}),
+        },
+      };
     });
   }
 
