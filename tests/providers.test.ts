@@ -475,6 +475,71 @@ test('GitHub provider deletes only exact integrated development branches', async
   assert.equal(deleteCalls, 2);
 });
 
+test('GitHub derives complete canonical release inventory from the exact Main-to-Preview commit delta', async () => {
+  const baseSha = 'a'.repeat(40);
+  const firstCommit = 'b'.repeat(40);
+  const secondCommit = 'c'.repeat(40);
+  let missingMetadata = false;
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/repos/pyralisxc/Conductor') {
+        return Response.json({ full_name: 'pyralisxc/Conductor', default_branch: 'main', permissions: { pull: true } });
+      }
+      if (url.pathname.startsWith('/repos/pyralisxc/Conductor/compare/')) {
+        return Response.json({
+          status: 'ahead',
+          ahead_by: 2,
+          total_commits: 2,
+          commits: [{ sha: firstCommit }, { sha: secondCommit }],
+        });
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/pulls'
+        && url.searchParams.get('state') === 'closed'
+        && url.searchParams.get('base') === 'preview') {
+        return Response.json([
+          {
+            number: 240, html_url: 'https://github.test/pull/240', state: 'closed', merged_at: '2026-09-30T00:00:00Z',
+            merge_commit_sha: firstCommit, body: 'Change\n\nCanonical Conductor work: #239',
+            head: { ref: 'work/239-vercel-production-handoff', sha: '1'.repeat(40) },
+            base: { ref: 'preview', sha: baseSha }, labels: [],
+          },
+          {
+            number: 242, html_url: 'https://github.test/pull/242', state: 'closed', merged_at: '2026-09-30T00:01:00Z',
+            merge_commit_sha: secondCommit, body: missingMetadata ? 'Change without metadata' : 'Change\n\nCanonical Conductor work: #241',
+            head: { ref: 'work/241-repository-onboarding-readiness', sha: '2'.repeat(40) },
+            base: { ref: 'preview', sha: firstCommit }, labels: [],
+          },
+        ]);
+      }
+      throw new Error(`Unexpected request ${url}`);
+    },
+  });
+
+  const inventory = await provider.getPreviewReleaseInventory({
+    project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+    expectedBaseSha: baseSha,
+    expectedHeadSha: secondCommit,
+    integrationBranch: 'preview',
+  });
+  assert.deepEqual(inventory.commitShas, [firstCommit, secondCommit]);
+  assert.deepEqual(inventory.workItemNumbers, [239, 241]);
+  assert.deepEqual(inventory.pullRequests.map((pull) => pull.pullRequestNumber), [240, 242]);
+
+  missingMetadata = true;
+  await assert.rejects(
+    provider.getPreviewReleaseInventory({
+      project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+      expectedBaseSha: baseSha,
+      expectedHeadSha: secondCommit,
+      integrationBranch: 'preview',
+    }),
+    (error: any) => error?.code === 'CONFLICT' && /no canonical work-item metadata/u.test(error.message),
+  );
+});
+
 test('GitHub provider opens work pull requests against explicit repository-native targets', async () => {
   const requests: Array<{ url: string; method: string; body?: any }> = [];
   const provider = new GitHubRuntimeProvider({

@@ -596,9 +596,15 @@ test('lifecycle advance integrates verified work, proves Preview, prepares promo
   });
   const promotionPull={repository:'pyralisxc/Conductor',pullRequestNumber:20,url:'https://github.test/pull/20',state:'open',draft:false,merged:false,mergeable:true,mergeableState:'clean',head:{ref:'preview',sha:integrationMerge},base:{ref:'main',sha:mainHead},labels:[],checks:{total:1,pending:0,successful:1,failed:0,neutral:0,skipped:0,items:[]},workflowRuns:[],orchestration:{state:'promotion-ready' as const,action:'promotion-gate' as const,shouldAct:true,summary:'ready for owner',resumeWhen:null,transition:{observed:false,previousHeadSha:null,previousState:null,headChanged:null,stateChanged:null,meaningful:null},seal:{requested:false,expectedPreSealCheckpoint:false,exactHeadVerificationRequired:false},signals:{pending:[],actionRequired:[],failed:[]}}};
   const sourceControlMutationProvider:any={id:'github',async getCapabilities(){return[];},async createBranch(){throw new Error('unused');},async bootstrapIntegrationBranch(){throw new Error('unused');},async deleteBranch(input:any){cleanupCalls++;return{repository:'pyralisxc/Conductor',branch:input.branch,commitSha:input.expectedHeadSha,deleted:true,containedIn:'preview via merged PR #10'};},async createCommit(){throw new Error('unused');},async createPullRequest(input:any){promotionCreated++;promotionWorkItems=input.workItemNumbers??[];promotionBody=input.body??'';return{repository:'pyralisxc/Conductor',pullRequestNumber:20,url:promotionPull.url};},async commentPullRequest(){throw new Error('unused');},async updatePullRequestLabels(){throw new Error('unused');},async mergeIntegrationPullRequest(){merged=true;return{repository:'pyralisxc/Conductor',pullRequestNumber:10,merged:true,mergeCommitSha:integrationMerge,message:'merged'};},async reconcilePreviewPullRequest(){throw new Error('unused');},async promotePullRequest(){throw new Error('Main must not be promoted by lifecycle.advance');}};
-  const pullRequestProvider:any={id:'github-pr',async getCapabilities(){return[];},async findOpenPromotionPullRequest(){return null;},async getPullRequestStatus(input:any){return input.pullRequestNumber===20?promotionPull:integrationPull();}};
+  const pullRequestProvider:any={id:'github-pr',async getCapabilities(){return[];},async findOpenPromotionPullRequest(){return null;},async getPreviewReleaseInventory(){return{repository:'pyralisxc/Conductor',defaultBranch:'main',integrationBranch:'preview',expectedBaseSha:mainHead,expectedHeadSha:integrationMerge,commitShas:[integrationMerge],workItemNumbers:[169,170],pullRequests:[{pullRequestNumber:10,mergeCommitSha:integrationMerge,role:'integration',workItemNumbers:[169,170]}]};},async getPullRequestStatus(input:any){return input.pullRequestNumber===20?promotionPull:integrationPull();}};
   const workProvider:any={id:'github-work',async getCapabilities(){return[];},getUsageSnapshot(){return{provider:'github-work',calls:lifecycleProviderCalls,duplicateReads:0,requestBodyBytes:0,reportedResponseBytes:lifecycleProviderCalls*100,responsesWithUnknownBytes:0,observedAt:'2026-09-27T00:00:00Z'};},async getWorkItemStatus(){lifecycleProviderCalls++;return{repository:'pyralisxc/Conductor',issueNumber:169,url:'https://github.test/issues/169',title:'Lifecycle',body:'',state:'open',status:'in-progress',statusSource:'label',kind:'feature',kindSource:'label',origin:'user-feedback',originSource:'label',labels:[],createdAt:'2026-09-27T00:00:00Z',updatedAt:'2026-09-27T00:00:00Z'};},async listWorkItems(){return{repository:'pyralisxc/Conductor',items:[],truncated:false};},async listWorkItemPullRequests(){lifecycleProviderCalls++;return[integrationPull()];}};
   const runtime=new ConductorToolRuntime({providers:[workProvider],sourceControlMutationProvider,pullRequestProvider,workItemCandidateProvider:workProvider,repositoryBootstrapProvider:{id:'github-topology',async getCapabilities(){return[];},async getRepositoryBootstrap(){return{provider:'github' as const,repository:'pyralisxc/Conductor',defaultBranch:'main',defaultHead:mainHead,integrationBranch:'preview' as const,integrationHead:integrationMerge,observedAt:'2026-09-27T00:00:00Z'};}},deploymentProvider:{id:'vercel',async getCapabilities(){return[];},async getDeploymentStatus(){return{provider:'vercel' as const,project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:null,latestProductionAttempt:null,recent:[{id:'dpl_preview',url:null,state:'READY',target:null,createdAt:null,readyAt:null,sourceRevision:integrationMerge,sourceRef:'preview',sourceRepository:'Conductor',aliases:[],errorCode:null,errorMessage:null}],domains:[],observedAt:'2026-09-27T00:00:00Z'};}} as any,mutationExecutor:new IdempotentMutationExecutor({store:new InMemoryIdempotencyStore()})});
+  const mismatch=await runtime.advanceLifecycle({project:{id:'Conductor',repository:'pyralisxc/Conductor'},issueNumber:169,maxPolls:0,pollIntervalMs:0,preparePromotion:true,promotionWorkItemNumbers:[169],idempotencyKey:'lifecycle-test-169-mismatch'});
+  assert.equal(mismatch.status,'succeeded'); if(mismatch.status!=='succeeded')return;
+  assert.equal(mismatch.result.stage,'action-required');
+  assert.match(mismatch.result.summary,/does not match GitHub-derived release inventory/);
+  assert.equal(promotionCreated,0);
+
   const receipt=await runtime.advanceLifecycle({project:{id:'Conductor',repository:'pyralisxc/Conductor'},issueNumber:169,maxPolls:0,pollIntervalMs:0,preparePromotion:true,promotionWorkItemNumbers:[169,170],idempotencyKey:'lifecycle-test-169'});
   assert.equal(receipt.status,'succeeded'); if(receipt.status!=='succeeded')return;
   assert.equal(receipt.result.stage,'human-gate'); assert.equal(receipt.result.gate?.kind,'human-approval'); assert.equal(receipt.result.gate?.pullRequestNumber,20); assert.equal(receipt.result.previewProof?.deploymentId,'dpl_preview'); assert.equal(promotionCreated,1); assert.equal(cleanupCalls,1); assert.deepEqual(promotionWorkItems,[169,170]); assert.match(promotionBody, /conductor-release-seal/); assert.deepEqual(receipt.result.gate?.workItemNumbers,[169,170]); assert.match(receipt.result.gate?.ownerGate?.protectedConcern ?? '', /accepted Main/iu);
@@ -644,6 +650,25 @@ test('lifecycle advance rejects a promotion candidate whose live head drifted fr
   assert.equal(result.status,'succeeded'); if(result.status!=='succeeded')return;
   assert.equal(result.result.stage,'verification-failed');
   assert.match(result.result.summary,/drifted from sealed head/);
+});
+
+test('lifecycle advance accepts multiple merged Preview transports for one canonical issue', async () => {
+  const previewHead = '9'.repeat(40);
+  const mainHead = '8'.repeat(40);
+  const merged = (number:number, sha:string) => ({
+    repository:'pyralisxc/Conductor',pullRequestNumber:number,url:`https://github.test/pull/${number}`,state:'closed',draft:false,merged:true,mergeable:null,mergeableState:'unknown',
+    head:{ref:`work/236-pass-${number}`,sha},base:{ref:'preview',sha:'7'.repeat(40)},labels:[],checks:{total:0,pending:0,successful:0,failed:0,neutral:0,skipped:0,items:[]},workflowRuns:[],
+    orchestration:{state:'merged' as const,action:'none' as const,shouldAct:false,summary:'merged',resumeWhen:null,transition:{observed:false,previousHeadSha:null,previousState:null,headChanged:null,stateChanged:null,meaningful:null},seal:{requested:false,expectedPreSealCheckpoint:false,exactHeadVerificationRequired:false},signals:{pending:[],actionRequired:[],failed:[]}},
+  });
+  const workProvider:any={id:'work',async getCapabilities(){return[];},async getWorkItemStatus(){return{repository:'pyralisxc/Conductor',issueNumber:236,url:'https://github.test/issues/236',title:'Seal',body:'',state:'open',status:'in-progress',statusSource:'label',kind:'improvement',kindSource:'label',origin:'agent-audit',originSource:'label',labels:[],createdAt:'2026-09-30T00:00:00Z',updatedAt:'2026-09-30T00:00:00Z'};},async listWorkItems(){return{repository:'pyralisxc/Conductor',items:[],truncated:false};},async listWorkItemPullRequests(){return[merged(237,'1'.repeat(40)),merged(244,'2'.repeat(40))];}};
+  const pullProvider:any={id:'github-pr',async getCapabilities(){return[];},async findOpenPromotionPullRequest(){return null;},async getPullRequestStatus(){throw new Error('no open PR reread needed');}};
+  const source:any={id:'github',async getCapabilities(){return[];},async createBranch(){throw new Error('unused');},async bootstrapIntegrationBranch(){throw new Error('unused');},async deleteBranch(){throw new Error('unused');},async createCommit(){throw new Error('unused');},async createPullRequest(){throw new Error('unused');},async commentPullRequest(){throw new Error('unused');},async updatePullRequestLabels(){throw new Error('unused');},async mergeIntegrationPullRequest(){throw new Error('must not merge again');},async reconcilePreviewPullRequest(){throw new Error('unused');},async promotePullRequest(){throw new Error('unused');}};
+  const runtime=new ConductorToolRuntime({sourceControlMutationProvider:source,pullRequestProvider:pullProvider,workItemCandidateProvider:workProvider,repositoryBootstrapProvider:{id:'topology',async getCapabilities(){return[];},async getRepositoryBootstrap(){return{provider:'github' as const,repository:'pyralisxc/Conductor',defaultBranch:'main',defaultHead:mainHead,integrationBranch:'preview' as const,integrationHead:previewHead,observedAt:'2026-09-30T00:00:00Z'};}},deploymentProvider:{id:'vercel',async getCapabilities(){return[];},async getDeploymentStatus(){return{provider:'vercel' as const,project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:null,latestProductionAttempt:null,recent:[{id:'dpl_preview',url:null,state:'READY',target:null,createdAt:null,readyAt:null,sourceRevision:previewHead,sourceRef:'preview',sourceRepository:'Conductor',aliases:[],errorCode:null,errorMessage:null}],domains:[],observedAt:'2026-09-30T00:00:00Z'};}} as any,mutationExecutor:new IdempotentMutationExecutor({store:new InMemoryIdempotencyStore()})});
+  const receipt=await runtime.advanceLifecycle({project:{id:'Conductor',repository:'pyralisxc/Conductor'},issueNumber:236,maxPolls:0,pollIntervalMs:0,idempotencyKey:'multiple-merged-integrations'});
+  assert.equal(receipt.status,'succeeded'); if(receipt.status!=='succeeded')return;
+  assert.equal(receipt.result.stage,'preview-ready');
+  assert.equal(receipt.result.transitions.filter((item)=>item.operation==='pull-request.status').length,2);
+  assert.equal(receipt.result.previewProof?.commitSha,previewHead);
 });
 
 test('lifecycle advance stops at READY Preview by default without preparing Main', async () => {
@@ -1184,3 +1209,87 @@ test('Main promotion reuses an exact existing Production deployment and keeps mi
   assert.match(JSON.stringify(unavailable.diagnostics), /Git promotion succeeded/u);
 });
 
+
+
+test('promotion replay can recover Vercel handoff after Git already succeeded', async () => {
+  const headSha='a'.repeat(40), baseSha='b'.repeat(40), mergeSha='c'.repeat(40);
+  let mergeCalls=0, statusReads=0, createCalls=0;
+  const source:any={
+    id:'github', async getCapabilities(){return[];},
+    async createBranch(){throw new Error('unused');},async bootstrapIntegrationBranch(){throw new Error('unused');},
+    async deleteBranch(){throw new Error('unused');},async createCommit(){throw new Error('unused');},
+    async createPullRequest(){throw new Error('unused');},async commentPullRequest(){throw new Error('unused');},
+    async updatePullRequestLabels(){throw new Error('unused');},async mergeIntegrationPullRequest(){throw new Error('unused');},
+    async reconcilePreviewPullRequest(){throw new Error('unused');},
+    async promotePullRequest(input:any){mergeCalls+=1;return{repository:'pyralisxc/Conductor',pullRequestNumber:239,merged:true,mergeCommitSha:mergeSha,message:'merged',approvalReference:input.approvalReference,overriddenBlockerIssueNumbers:[]};},
+  };
+  const deployment:any={
+    id:'vercel',async getCapabilities(){return[];},
+    async getDeploymentStatus(){
+      statusReads+=1;
+      if(statusReads===1) throw {code:'TRANSIENT',source:'vercel',message:'temporary provider read failure'};
+      return{provider:'vercel',project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:null,latestProductionAttempt:null,recent:[],domains:[],observedAt:'2026-09-30T00:00:00Z'};
+    },
+    async createGitDeployment(input:any){createCalls+=1;return{provider:'vercel',projectId:'prj',deploymentId:'dpl_recovered',sourceRevision:input.sha,sourceRef:input.ref,target:'production',state:'BUILDING'};},
+  };
+  const runtime=new ConductorToolRuntime({sourceControlMutationProvider:source,deploymentProvider:deployment,mutationExecutor:new IdempotentMutationExecutor({store:new InMemoryIdempotencyStore()})});
+  const input={project:{id:'Conductor',repository:'pyralisxc/Conductor'},pullRequestNumber:239,expectedHeadSha:headSha,expectedBaseSha:baseSha,approvalReference:'owner-approved:user approved exact release',mergeMethod:'merge' as const,idempotencyKey:'promotion-handoff-recovery'};
+  const first=await runtime.promotePullRequest(input);
+  assert.equal(first.status,'succeeded'); if(first.status!=='succeeded')return;
+  assert.equal((first.result as any).productionHandoff.status,'error');
+  assert.equal(mergeCalls,1);
+  assert.equal(createCalls,0);
+
+  const replay=await runtime.promotePullRequest(input);
+  assert.equal(replay.status,'succeeded'); if(replay.status!=='succeeded')return;
+  assert.equal(replay.idempotency?.replayed,true);
+  assert.equal((replay.result as any).productionHandoff.status,'created');
+  assert.equal((replay.result as any).productionHandoff.deploymentId,'dpl_recovered');
+  assert.equal(mergeCalls,1);
+  assert.equal(createCalls,1);
+});
+
+test('lifecycle resume waits for exact Production deployment and completes from the merged PR', async () => {
+  const headSha='d'.repeat(40),baseSha='e'.repeat(40),mergeSha='f'.repeat(40);
+  let merged=false,ready=false,mergeCalls=0,createCalls=0;
+  const pullStatus=()=>({
+    repository:'pyralisxc/Conductor',pullRequestNumber:239,url:'https://github.test/pull/239',
+    state:merged?'closed':'open',draft:false,merged,mergeCommitSha:merged?mergeSha:null,mergeable:true,mergeableState:'clean',
+    head:{ref:'preview',sha:headSha},base:{ref:'main',sha:baseSha},labels:[],
+    checks:{total:1,pending:0,successful:1,failed:0,neutral:0,skipped:0,items:[]},workflowRuns:[],
+    orchestration:{state:merged?'merged' as const:'promotion-ready' as const,action:merged?'none' as const:'promotion-gate' as const,shouldAct:!merged,summary:merged?'merged':'ready',resumeWhen:null,transition:{observed:false,previousHeadSha:null,previousState:null,headChanged:null,stateChanged:null,meaningful:null},seal:{requested:false,expectedPreSealCheckpoint:false,exactHeadVerificationRequired:false},signals:{pending:[],actionRequired:[],failed:[]}},
+  });
+  const source:any={
+    id:'github',async getCapabilities(){return[];},async createBranch(){throw new Error('unused');},async bootstrapIntegrationBranch(){throw new Error('unused');},
+    async deleteBranch(){throw new Error('unused');},async createCommit(){throw new Error('unused');},async createPullRequest(){throw new Error('unused');},
+    async commentPullRequest(){throw new Error('unused');},async updatePullRequestLabels(){throw new Error('unused');},async mergeIntegrationPullRequest(){throw new Error('unused');},
+    async reconcilePreviewPullRequest(){throw new Error('unused');},
+    async promotePullRequest(input:any){mergeCalls+=1;merged=true;return{repository:'pyralisxc/Conductor',pullRequestNumber:239,merged:true,mergeCommitSha:mergeSha,message:'merged',approvalReference:input.approvalReference,overriddenBlockerIssueNumbers:[]};},
+  };
+  const pull:any={id:'github-pr',async getCapabilities(){return[];},async getPullRequestStatus(){return pullStatus();}};
+  const deployment:any={
+    id:'vercel',async getCapabilities(){return[];},
+    async getDeploymentStatus(){
+      const exact=createCalls>0?{id:'dpl_exact',url:null,state:ready?'READY':'BUILDING',target:'production',createdAt:null,readyAt:null,sourceRevision:mergeSha,sourceRef:'main',sourceRepository:'Conductor',aliases:[],errorCode:null,errorMessage:null}:null;
+      return{provider:'vercel',project:{id:'prj',name:'conductor',productionBranch:'main',teamId:'team'},production:ready?exact:null,latestProductionAttempt:exact,recent:exact?[exact]:[],domains:[],observedAt:'2026-09-30T00:00:00Z'};
+    },
+    async createGitDeployment(input:any){createCalls+=1;return{provider:'vercel',projectId:'prj',deploymentId:'dpl_exact',sourceRevision:input.sha,sourceRef:input.ref,target:'production',state:'BUILDING'};},
+  };
+  const runtime=new ConductorToolRuntime({sourceControlMutationProvider:source,pullRequestProvider:pull,deploymentProvider:deployment,mutationExecutor:new IdempotentMutationExecutor({store:new InMemoryIdempotencyStore()})});
+  const input={project:{id:'Conductor',repository:'pyralisxc/Conductor'},issueNumber:239,gateId:'gate-239',pullRequestNumber:239,expectedHeadSha:headSha,expectedBaseSha:baseSha,approvalReference:'owner-approved:user approved exact release',idempotencyKey:'lifecycle-production-wait'};
+
+  const waiting=await runtime.resumeLifecycle(input);
+  assert.equal(waiting.status,'succeeded'); if(waiting.status!=='succeeded')return;
+  assert.equal(waiting.result.stage,'external-wait');
+  assert.equal(waiting.result.gate?.deploymentId,'dpl_exact');
+  assert.equal(mergeCalls,1);
+  assert.equal(createCalls,1);
+
+  ready=true;
+  const completed=await runtime.resumeLifecycle(input);
+  assert.equal(completed.status,'succeeded'); if(completed.status!=='succeeded')return;
+  assert.equal(completed.result.stage,'complete');
+  assert.match(completed.result.summary,/Vercel Production handoff completed/u);
+  assert.equal(mergeCalls,1);
+  assert.equal(createCalls,1);
+});

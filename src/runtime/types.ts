@@ -843,6 +843,29 @@ export interface OpenPromotionCandidate {
   sealState: 'current' | 'stale' | 'unsealed';
 }
 
+export interface GetPreviewReleaseInventoryInput {
+  project: ProjectReference;
+  expectedBaseSha: string;
+  expectedHeadSha: string;
+  integrationBranch: 'preview' | 'vercel-preview';
+}
+
+export interface PreviewReleaseInventory {
+  repository: string;
+  defaultBranch: string;
+  integrationBranch: 'preview' | 'vercel-preview';
+  expectedBaseSha: string;
+  expectedHeadSha: string;
+  commitShas: string[];
+  workItemNumbers: number[];
+  pullRequests: Array<{
+    pullRequestNumber: number;
+    mergeCommitSha: string;
+    role: 'integration' | 'reconciliation';
+    workItemNumbers: number[];
+  }>;
+}
+
 export interface PullRequestStatus {
   repository: string;
   pullRequestNumber: number;
@@ -850,6 +873,7 @@ export interface PullRequestStatus {
   state: string;
   draft: boolean;
   merged: boolean;
+  mergeCommitSha?: string | null;
   mergeable: boolean | null;
   mergeableState: string | null;
   head: { ref: string; sha: string };

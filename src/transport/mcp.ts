@@ -1037,7 +1037,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
     server.registerTool('pull-request.merge.promote', {
       title: 'Promote an approved pull request',
-      description: 'Merge an exact approved Preview candidate into the repository default branch with a merge commit. Requires exact head/base identity, owner approval, and no open production-blocking work items unless every current blocker is explicitly named for override.',
+      description: 'Merge an exact approved Preview candidate into the repository default branch with a merge commit, then create or reconcile the exact-SHA Vercel Production deployment when a verified binding exists. Requires exact head/base identity, owner approval, and no open production-blocking work items unless every current blocker is explicitly named for override.',
       inputSchema: z.object({
         project: projectSchema,
         workContext: workContextSchema,
