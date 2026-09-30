@@ -79,6 +79,70 @@ test('GitHub reconstructs same-repository PR candidates from native issue timeli
   assert.equal(candidates[0]?.workflowRuns[0]?.id, 9);
 });
 
+test('GitHub finds and validates one exact sealed Preview-to-Main candidate', async () => {
+  const headSha = 'a'.repeat(40);
+  const baseSha = 'b'.repeat(40);
+  const marker = '<!-- conductor-release-seal:' + JSON.stringify({
+    v: 1,
+    head: headSha,
+    base: baseSha,
+    workItems: [233, 231, 232],
+  }) + ' -->';
+  const provider = new GitHubRuntimeProvider({
+    credentials: {
+      async getIdentity() { return { kind: 'app' as const, appId: '12345' }; },
+      async getCredential(repository: string) {
+        return {
+          token: 'installation-token',
+          kind: 'app-installation' as const,
+          identity: { kind: 'app' as const, appId: '12345', installationId: 42 },
+          repository,
+          permissions: { contents: 'read', pull_requests: 'read', checks: 'read', actions: 'read' },
+        };
+      },
+    },
+    allowedOwners: ['pyralisxc'],
+    bindings: [{ id: 'conductor', repository: 'pyralisxc/Conductor', write: true }],
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/repos/pyralisxc/Conductor') {
+        return Response.json({ full_name: 'pyralisxc/Conductor', default_branch: 'main' });
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/pulls' && url.searchParams.get('head') === 'pyralisxc:preview') {
+        return Response.json([{
+          number: 44, html_url: 'https://github.test/pull/44', state: 'open', draft: false,
+          merged: false, mergeable: true, mergeable_state: 'clean', body: marker,
+          head: { ref: 'preview', sha: headSha }, base: { ref: 'main', sha: baseSha }, labels: [],
+        }]);
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/pulls' && url.searchParams.get('head') === 'pyralisxc:vercel-preview') {
+        return Response.json([]);
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/pulls/44') {
+        return Response.json({
+          number: 44, html_url: 'https://github.test/pull/44', state: 'open', draft: false,
+          merged: false, mergeable: true, mergeable_state: 'clean', body: marker,
+          head: { ref: 'preview', sha: headSha }, base: { ref: 'main', sha: baseSha }, labels: [],
+        });
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/commits/' + headSha + '/check-runs') {
+        return Response.json({ check_runs: [{ id: 1, name: 'verify', status: 'completed', conclusion: 'success' }] });
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/actions/runs') {
+        return Response.json({ workflow_runs: [] });
+      }
+      throw new Error('Unexpected request ' + url);
+    },
+  });
+
+  const found = await provider.findOpenPromotionPullRequest({ id: 'conductor', repository: 'pyralisxc/Conductor' });
+  assert.ok(found);
+  assert.equal(found?.sealState, 'current');
+  assert.deepEqual(found?.seal?.workItemNumbers, [231, 232, 233]);
+  assert.equal(found?.seal?.expectedHeadSha, headSha);
+  assert.equal(found?.pullRequest.pullRequestNumber, 44);
+});
+
 test('development status groups active work without ranking it and preserves inspect preflight', async () => {
   const items = [
     ['ready', 23], ['in-progress', 31], ['blocked', 32],

@@ -1344,7 +1344,7 @@ export class ConductorToolRuntime {
       if (input.promotionWorkItemNumbers && !input.preparePromotion) {
         throw { code: 'CONFLICT', message: 'promotionWorkItemNumbers requires preparePromotion=true' };
       }
-      const promotionWorkItemNumbers = [...new Set([input.issueNumber, ...(input.promotionWorkItemNumbers ?? [])])];
+      const promotionWorkItemNumbers = [...new Set([input.issueNumber, ...(input.promotionWorkItemNumbers ?? [])])].sort((a, b) => a - b);
       if (promotionWorkItemNumbers.some((number) => !Number.isSafeInteger(number) || number < 1) || promotionWorkItemNumbers.length > 20) {
         throw { code: 'CONFLICT', message: 'promotionWorkItemNumbers must contain at most 20 positive issue numbers' };
       }

@@ -282,7 +282,7 @@ function parsePromotionSeal(body: string | null | undefined): PromotionCandidate
       || value.workItems.some((number) => !Number.isSafeInteger(number) || number < 1)) {
       return null;
     }
-    const workItemNumbers = [...new Set(value.workItems as number[])];
+    const workItemNumbers = [...new Set(value.workItems as number[])].sort((a, b) => a - b);
     if (workItemNumbers.length !== value.workItems.length) return null;
     return {
       version: 1,
@@ -568,13 +568,17 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     const defaultBranch = metadata.default_branch?.trim();
     if (!defaultBranch) throw { code: 'NOT_FOUND', message: 'Repository default branch is unavailable' };
 
-    const pulls = await this.request<GitHubPullRequestResponse[]>(
-      repository,
-      `/pulls?state=open&base=${encodeURIComponent(defaultBranch)}&per_page=100`,
-      {},
-      credential,
-    );
-    const candidates = pulls.filter((pull) =>
+    const owner = repository.split('/')[0]!;
+    const candidates = (
+      await Promise.all(['preview', 'vercel-preview'].map((head) =>
+        this.request<GitHubPullRequestResponse[]>(
+          repository,
+          `/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}&base=${encodeURIComponent(defaultBranch)}&per_page=2`,
+          {},
+          credential,
+        )
+      ))
+    ).flat().filter((pull) =>
       ['preview', 'vercel-preview'].includes(pull.head.ref.toLowerCase())
       && pull.base.ref === defaultBranch
     );
