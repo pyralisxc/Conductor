@@ -1,0 +1,16 @@
+name: Conductor workflow-authoring canary
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/conductor-v11-canary.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm workflow-authoring lane
+        run: echo "Conductor workflow authoring canary passed"
