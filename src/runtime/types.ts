@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v12' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v13' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -294,6 +294,25 @@ export interface GetWorkBootstrapInput {
   clientCatalogDigest?: string;
 }
 
+export interface RepositoryWorkflowReadiness {
+  status: 'ready' | 'setup-required' | 'unavailable';
+  proofBoundary: 'hosted-preview' | 'repository-ci' | 'unknown';
+  summary: string;
+  integrationBranch: 'preview' | 'vercel-preview' | null;
+  setupGate: {
+    kind: 'repository-preview-bootstrap';
+    operation: 'git.integration.bootstrap';
+    whyOwnerGate: string;
+    protectedConcern: string;
+    allowedBranches: ['preview', 'vercel-preview'];
+    expectedDefaultHead: string;
+    authorizes: string[];
+    doesNotAuthorize: string[];
+    evidence: string[];
+    afterApproval: string;
+  } | null;
+}
+
 export interface WorkBootstrapProjection {
   contractVersion: typeof TOOL_RUNTIME_CONTRACT_VERSION;
   catalogVersion: typeof TOOL_CATALOG_VERSION;
@@ -304,6 +323,7 @@ export interface WorkBootstrapProjection {
   };
   project: ProjectReference;
   topology: RepositoryBootstrapTopology | null;
+  workflow: RepositoryWorkflowReadiness;
   preflight: ProjectPreflight;
   work: DevelopmentStatusProjection['work'];
   intelligence: {

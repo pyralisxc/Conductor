@@ -654,6 +654,54 @@ export class ConductorToolRuntime {
           ? { status: intelligenceCheck.status, summary: intelligenceCheck.summary }
           : { status: 'unavailable' as const, summary: 'Development Intelligence is not configured for this runtime' };
 
+        const workflow: WorkBootstrapProjection['workflow'] = !topology
+          ? {
+              status: 'unavailable',
+              proofBoundary: 'unknown',
+              summary: 'Repository topology is unavailable, so Conductor cannot establish the normal integration workflow.',
+              integrationBranch: null,
+              setupGate: null,
+            }
+          : topology.integrationBranch
+            ? {
+                status: 'ready',
+                proofBoundary: deployment ? 'hosted-preview' : 'repository-ci',
+                summary: deployment
+                  ? `${topology.integrationBranch} is established and a bound hosted deployment provider is available for Preview proof.`
+                  : `${topology.integrationBranch} is established. No authoritative hosted deployment binding was proven, so repository-native CI/provider evidence is the available proof boundary unless project authority requires more.`,
+                integrationBranch: topology.integrationBranch,
+                setupGate: null,
+              }
+            : {
+                status: 'setup-required',
+                proofBoundary: deployment ? 'hosted-preview' : 'repository-ci',
+                summary: 'No preview/vercel-preview integration branch exists. Repository setup requires explicit owner approval before normal work-to-Preview flow can begin.',
+                integrationBranch: null,
+                setupGate: {
+                  kind: 'repository-preview-bootstrap',
+                  operation: 'git.integration.bootstrap',
+                  whyOwnerGate: 'Creating the first integration branch establishes a durable repository delivery topology rather than performing routine implementation.',
+                  protectedConcern: 'Provider write access alone must not let an agent silently establish branch policy for a repository.',
+                  allowedBranches: ['preview', 'vercel-preview'],
+                  expectedDefaultHead: topology.defaultHead,
+                  authorizes: [`Create exactly one approved integration branch from current ${topology.defaultBranch}@${topology.defaultHead}.`],
+                  doesNotAuthorize: [
+                    'Changing the repository default branch.',
+                    'Main/production promotion.',
+                    'Creating arbitrary branch names.',
+                    'Any later consequential gate.',
+                  ],
+                  evidence: [
+                    `Default branch: ${topology.defaultBranch}@${topology.defaultHead}.`,
+                    'No preview or vercel-preview integration branch is currently present.',
+                    deployment
+                      ? `Hosted deployment binding is available through ${deployment.provider} for ${deployment.projectName}.`
+                      : 'No authoritative hosted deployment binding was proven; repository-native CI/provider proof remains the available boundary.',
+                  ],
+                  afterApproval: 'Call git.integration.bootstrap with the exact approved branch name and current default-head SHA; subsequent work uses work/* -> Preview -> proof -> explicit Main.',
+                },
+              };
+
         return {
           result: {
             contractVersion: TOOL_RUNTIME_CONTRACT_VERSION,
@@ -662,6 +710,7 @@ export class ConductorToolRuntime {
             clientCatalog: { suppliedDigest, freshness },
             project: resolvedProject,
             topology,
+            workflow,
             preflight: development.result.preflight,
             work: development.result.work,
             intelligence,
