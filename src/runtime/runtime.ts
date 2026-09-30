@@ -1279,6 +1279,106 @@ export class ConductorToolRuntime {
   async vercelVcrCreate(input: VercelVcrCreateInput) { return this.vercelMutation('deployment.vcr.create', input, (provider, project) => provider.createVcrRepository({ ...input, project })); }
   async vercelVcrImageDelete(input: VercelVcrImageDeleteInput) { return this.vercelMutation('deployment.vcr.image.delete', input, (provider, project) => provider.deleteVcrImage({ ...input, project })); }
 
+  private async ensureProductionDeploymentForPromotion(input: {
+    project: ProjectReference;
+    repository: string;
+    sha: string;
+    approvalReference: string;
+    idempotencyKey: string;
+  }): Promise<Record<string, unknown>> {
+    const project = this.resolveProjectReference(input.project);
+    if (!this.deploymentProvider || !this.mutationExecutor) {
+      return {
+        status: 'unavailable',
+        sourceRevision: input.sha,
+        reason: 'No Vercel deployment provider is configured for this runtime',
+      };
+    }
+
+    let status: DeploymentProjectStatus;
+    try {
+      status = await this.deploymentProvider.getDeploymentStatus({ project, limit: 50 });
+    } catch (error) {
+      const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', 'vercel');
+      return {
+        status: normalized.code === 'NOT_FOUND' ? 'unavailable' : 'error',
+        sourceRevision: input.sha,
+        error: {
+          code: normalized.code,
+          message: normalized.message,
+          retryable: normalized.retryable,
+          source: normalized.source,
+        },
+      };
+    }
+
+    const productionBranch = status.project.productionBranch;
+    if (!productionBranch) {
+      return {
+        status: 'error',
+        sourceRevision: input.sha,
+        error: {
+          code: 'CONFLICT',
+          message: 'Bound Vercel project does not declare a production branch',
+          retryable: false,
+          source: 'vercel',
+        },
+      };
+    }
+
+    const exact = [status.production, status.latestProductionAttempt, ...status.recent]
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+      .find((item) =>
+        item.sourceRevision === input.sha
+        && item.sourceRef === productionBranch
+        && item.target === 'production'
+      );
+
+    if (exact) {
+      const deploymentState = exact.state ?? 'unknown';
+      return {
+        status: 'observed',
+        deploymentId: exact.id,
+        deploymentState,
+        sourceRevision: input.sha,
+        sourceRef: productionBranch,
+        ready: deploymentState.toUpperCase() === 'READY',
+        failed: lifecycleDeploymentFailed(deploymentState),
+      };
+    }
+
+    const created = await this.vercelCreateGitDeployment({
+      project,
+      repository: input.repository,
+      ref: productionBranch,
+      sha: input.sha,
+      target: 'production',
+      approvalReference: input.approvalReference,
+      idempotencyKey: lifecycleSubkey(input.idempotencyKey, `production-deployment:${input.sha}`),
+    });
+    if (created.status === 'failed') {
+      return {
+        status: 'error',
+        sourceRevision: input.sha,
+        sourceRef: productionBranch,
+        error: created.error,
+      };
+    }
+
+    const value = created.result as Record<string, unknown>;
+    const deploymentState = typeof value.state === 'string' ? value.state : 'unknown';
+    return {
+      status: 'created',
+      deploymentId: typeof value.deploymentId === 'string' ? value.deploymentId : undefined,
+      deploymentState,
+      sourceRevision: input.sha,
+      sourceRef: productionBranch,
+      ready: deploymentState.toUpperCase() === 'READY',
+      failed: lifecycleDeploymentFailed(deploymentState),
+      replayed: created.idempotency?.replayed ?? false,
+    };
+  }
+
   async workItemStatus(input: GetWorkItemStatusInput): Promise<ExecutionReceipt<WorkItemRecord>> {
     const resolvedProject = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
     return await this.executeRead(
@@ -1807,19 +1907,108 @@ export class ConductorToolRuntime {
     return await this.executeCompositeMutation('lifecycle.resume', project, async () => {
       if (!this.lifecycleResumeEnabled) throw { code: 'TOOL_UNAVAILABLE', message: 'Lifecycle resume requires GitHub PR mutation/read providers' };
       if (!input.approvalReference.startsWith('owner-approved:')) throw { code: 'PERMISSION_DENIED', message: 'Lifecycle resume requires a fresh owner-approved: approval reference' };
+
       const current = await this.pullRequestProvider!.getPullRequestStatus({ project, pullRequestNumber: input.pullRequestNumber });
-      if (current.head.sha !== input.expectedHeadSha || current.base.sha !== input.expectedBaseSha) throw { code: 'CONFLICT', message: 'Signed lifecycle gate candidate no longer matches the current pull-request head/base' };
-      if (current.orchestration.state !== 'promotion-ready') throw { code: 'CONFLICT', message: `Promotion candidate is no longer promotion-ready; current state is ${current.orchestration.state}` };
-      const promoted = await this.promotePullRequest({
-        project, pullRequestNumber: input.pullRequestNumber, expectedHeadSha: input.expectedHeadSha, expectedBaseSha: input.expectedBaseSha,
-        approvalReference: input.approvalReference,
-        overrideBlockerIssueNumbers: input.overrideBlockerIssueNumbers,
-        mergeMethod: 'merge',
-        idempotencyKey: lifecycleSubkey(input.idempotencyKey, `promote:${input.gateId}:${input.pullRequestNumber}`),
-      });
-      if (promoted.status === 'failed') throw promoted.error;
-      const transitions: LifecycleTransitionRecord[] = [{ operation: 'pull-request.merge.promote', status: promoted.idempotency?.replayed ? 'replayed' : 'performed', summary: `Promoted exact approved PR #${input.pullRequestNumber} to Main.`, pullRequestNumber: input.pullRequestNumber, mergeCommitSha: promoted.result.mergeCommitSha }];
-      return lifecycleProjection(project, input.issueNumber, 'complete', `Exact approved promotion completed as ${promoted.result.mergeCommitSha}.`, transitions);
+      if (current.head.sha !== input.expectedHeadSha || current.base.sha !== input.expectedBaseSha) {
+        throw { code: 'CONFLICT', message: 'Signed lifecycle gate candidate no longer matches the current pull-request head/base' };
+      }
+
+      let mergeCommitSha: string;
+      let productionHandoff: Record<string, unknown>;
+      const transitions: LifecycleTransitionRecord[] = [];
+
+      if (current.merged) {
+        if (!current.mergeCommitSha || !/^[0-9a-f]{40}$/iu.test(current.mergeCommitSha)) {
+          throw { code: 'CONFLICT', message: 'Merged promotion is missing an exact provider merge commit SHA for deployment continuation' };
+        }
+        mergeCommitSha = current.mergeCommitSha;
+        transitions.push({
+          operation: 'pull-request.merge.promote',
+          status: 'observed',
+          summary: `Observed already-merged promotion PR #${input.pullRequestNumber} at ${mergeCommitSha}.`,
+          pullRequestNumber: input.pullRequestNumber,
+          mergeCommitSha,
+        });
+        productionHandoff = await this.ensureProductionDeploymentForPromotion({
+          project,
+          repository: current.repository,
+          sha: mergeCommitSha,
+          approvalReference: input.approvalReference,
+          idempotencyKey: lifecycleSubkey(input.idempotencyKey, `post-merge:${mergeCommitSha}`),
+        });
+      } else {
+        if (current.orchestration.state !== 'promotion-ready') {
+          throw { code: 'CONFLICT', message: `Promotion candidate is no longer promotion-ready; current state is ${current.orchestration.state}` };
+        }
+        const promoted = await this.promotePullRequest({
+          project,
+          pullRequestNumber: input.pullRequestNumber,
+          expectedHeadSha: input.expectedHeadSha,
+          expectedBaseSha: input.expectedBaseSha,
+          approvalReference: input.approvalReference,
+          overrideBlockerIssueNumbers: input.overrideBlockerIssueNumbers,
+          mergeMethod: 'merge',
+          idempotencyKey: lifecycleSubkey(input.idempotencyKey, `promote:${input.gateId}:${input.pullRequestNumber}`),
+        });
+        if (promoted.status === 'failed') throw promoted.error;
+        mergeCommitSha = promoted.result.mergeCommitSha;
+        productionHandoff = promoted.result.productionHandoff as Record<string, unknown>;
+        transitions.push({
+          operation: 'pull-request.merge.promote',
+          status: promoted.idempotency?.replayed ? 'replayed' : 'performed',
+          summary: `Promoted exact approved PR #${input.pullRequestNumber} to Main.`,
+          pullRequestNumber: input.pullRequestNumber,
+          mergeCommitSha,
+        });
+      }
+
+      const deploymentId = typeof productionHandoff.deploymentId === 'string'
+        ? productionHandoff.deploymentId
+        : undefined;
+      if (deploymentId) {
+        transitions.push({
+          operation: 'deployment.git.create',
+          status: productionHandoff.status === 'created' ? 'performed' : 'observed',
+          summary: `Vercel Production handoff for ${mergeCommitSha} is ${String(productionHandoff.deploymentState ?? productionHandoff.status)}.`,
+          commitSha: mergeCommitSha,
+          deploymentId,
+        });
+      }
+
+      if (productionHandoff.status === 'error' || productionHandoff.failed === true) {
+        return lifecycleProjection(
+          project,
+          input.issueNumber,
+          'verification-failed',
+          `Main promotion completed as ${mergeCommitSha}, but the exact Vercel Production deployment failed.`,
+          transitions,
+        );
+      }
+
+      if (productionHandoff.status !== 'unavailable' && productionHandoff.ready !== true) {
+        const gate: LifecycleGateSpec = {
+          kind: 'external-wait',
+          allowedNextOperation: 'lifecycle.resume',
+          issueNumber: input.issueNumber,
+          pullRequestNumber: input.pullRequestNumber,
+          expectedHeadSha: input.expectedHeadSha,
+          expectedBaseSha: input.expectedBaseSha,
+          ...(deploymentId ? { deploymentId } : {}),
+          summary: `Main promotion completed as ${mergeCommitSha}; the exact Vercel Production deployment has not reached READY yet.`,
+          resumeWhen: 'The exact Production deployment changes state.',
+        };
+        return lifecycleProjection(project, input.issueNumber, 'external-wait', gate.summary, transitions, null, gate);
+      }
+
+      return lifecycleProjection(
+        project,
+        input.issueNumber,
+        'complete',
+        productionHandoff.status === 'unavailable'
+          ? `Exact approved Git promotion completed as ${mergeCommitSha}; no verified Vercel Production binding is configured for this repository.`
+          : `Exact approved promotion and Vercel Production handoff completed as ${mergeCommitSha}.`,
+        transitions,
+      );
     });
   }
 
@@ -1948,93 +2137,57 @@ export class ConductorToolRuntime {
   }
 
   async promotePullRequest(input: PromotePullRequestInput) {
-    return await this.executeMutation(input, 'pull-request.merge.promote', async (provider) => {
+    const promoted = await this.executeMutation(input, 'pull-request.merge.promote', async (provider) => {
       const result = await provider.promotePullRequest(input);
-      const diagnostics: ToolDiagnostic[] = [];
-      let deploymentId: string | undefined;
-      let productionHandoff: Record<string, unknown> = {
-        status: 'unavailable',
-        sourceRevision: result.mergeCommitSha,
-        reason: 'No Vercel deployment provider is configured for this runtime',
-      };
-
-      if (this.deploymentProvider) {
-        try {
-          const project = this.resolveProjectReference(input.project);
-          const status = await this.deploymentProvider.getDeploymentStatus({ project, limit: 50 });
-          const productionBranch = status.project.productionBranch;
-          if (!productionBranch) {
-            throw { code: 'CONFLICT', source: 'vercel', message: 'Bound Vercel project does not declare a production branch' };
-          }
-          const deployments = [status.production, status.latestProductionAttempt, ...status.recent]
-            .filter((item): item is NonNullable<typeof item> => Boolean(item));
-          const exact = deployments.find((item) =>
-            item.sourceRevision === result.mergeCommitSha
-            && item.sourceRef === productionBranch
-            && item.target === 'production'
-          );
-
-          if (exact) {
-            deploymentId = exact.id;
-            productionHandoff = {
-              status: 'observed',
-              deploymentId: exact.id,
-              deploymentState: exact.state,
-              sourceRevision: result.mergeCommitSha,
-              sourceRef: productionBranch,
-            };
-          } else {
-            const created = await this.deploymentProvider.createGitDeployment({
-              project,
-              repository: result.repository,
-              ref: productionBranch,
-              sha: result.mergeCommitSha,
-              target: 'production',
-              approvalReference: input.approvalReference,
-              idempotencyKey: lifecycleSubkey(input.idempotencyKey, `production-deployment:${result.mergeCommitSha}`),
-            });
-            deploymentId = typeof created.deploymentId === 'string' ? created.deploymentId : undefined;
-            productionHandoff = {
-              status: 'created',
-              ...(deploymentId ? { deploymentId } : {}),
-              deploymentState: typeof created.state === 'string' ? created.state : null,
-              sourceRevision: result.mergeCommitSha,
-              sourceRef: productionBranch,
-            };
-          }
-        } catch (error) {
-          const normalized = normalizeToolError(error, 'TOOL_UNAVAILABLE', 'vercel');
-          productionHandoff = {
-            status: normalized.code === 'NOT_FOUND' ? 'unavailable' : 'error',
-            sourceRevision: result.mergeCommitSha,
-            error: {
-              code: normalized.code,
-              message: normalized.message,
-              retryable: normalized.retryable,
-              source: normalized.source,
-            },
-          };
-          diagnostics.push({
-            level: normalized.code === 'NOT_FOUND' ? 'warning' : 'error',
-            code: normalized.code,
-            source: normalized.source ?? 'vercel',
-            message: `Git promotion succeeded, but the exact Production deployment handoff did not complete: ${normalized.message}`,
-          });
-        }
-      }
-
       return {
-        result: { ...result, productionHandoff },
-        diagnostics,
+        result,
         identifiers: {
           pullRequestNumber: result.pullRequestNumber,
           mergeCommitSha: result.mergeCommitSha,
-          ...(deploymentId ? { deploymentId } : {}),
         },
       };
     });
-  }
+    if (promoted.status === 'failed') return promoted;
 
+    const productionHandoff = await this.ensureProductionDeploymentForPromotion({
+      project: input.project,
+      repository: promoted.result.repository,
+      sha: promoted.result.mergeCommitSha,
+      approvalReference: input.approvalReference,
+      idempotencyKey: input.idempotencyKey,
+    });
+    const deploymentId = typeof productionHandoff.deploymentId === 'string'
+      ? productionHandoff.deploymentId
+      : undefined;
+    const diagnostics: ToolDiagnostic[] = [...promoted.diagnostics];
+
+    if (productionHandoff.status === 'error') {
+      const error = productionHandoff.error as { code?: ToolDiagnostic['code']; message?: string; source?: string } | undefined;
+      diagnostics.push({
+        level: 'error',
+        ...(error?.code ? { code: error.code } : {}),
+        source: error?.source ?? 'vercel',
+        message: `Git promotion succeeded, but the exact Production deployment handoff did not complete: ${error?.message ?? 'unknown Vercel handoff error'}`,
+      });
+    } else if (productionHandoff.status === 'unavailable') {
+      diagnostics.push({
+        level: 'warning',
+        code: 'NOT_FOUND',
+        source: 'vercel',
+        message: 'Git promotion succeeded; no verified Vercel Production binding is available for this repository.',
+      });
+    }
+
+    return {
+      ...promoted,
+      result: { ...promoted.result, productionHandoff },
+      diagnostics,
+      identifiers: {
+        ...promoted.identifiers,
+        ...(deploymentId ? { deploymentId } : {}),
+      },
+    };
+  }
 
   private operationDefinitions(): ToolDefinition[] {
     return [
