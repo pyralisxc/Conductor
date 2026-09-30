@@ -374,7 +374,7 @@ test('VCR inventory is bounded and ambiguous image deletion remains fail-closed'
       idempotencyKey: 'vcr-delete-fail-closed',
     }),
     (error: unknown) => (error as { code?: string }).code === 'TOOL_UNAVAILABLE'
-      && (error as { message?: string }).message?.includes('unreferenced') === true,
+      && (error as { message?: string }).message?.includes('immutable-looking Git SHA tags') === true,
   );
   assert.equal(calls.filter(call => call.method === 'DELETE').length, beforeDeleteCalls);
 
