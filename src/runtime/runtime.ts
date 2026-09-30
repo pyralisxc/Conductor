@@ -393,6 +393,7 @@ export class ConductorToolRuntime {
       this.sourceControlMutationsEnabled
       && this.workItemCandidateProvider
       && this.pullRequestProvider
+      && this.pullRequestProvider.findOpenPromotionPullRequest
       && this.repositoryBootstrapProvider
       && this.deploymentProvider
     );
@@ -1354,8 +1355,7 @@ export class ConductorToolRuntime {
 
       const candidates = await this.workItemCandidateProvider!.listWorkItemPullRequests({ project, issueNumber: input.issueNumber });
       const artifacts = candidates.map((pullRequest) => ({ role: lifecycleTransportRole(pullRequest), pullRequest }));
-      const openPromotions = artifacts.filter((item) => item.role === 'main-promotion' && item.pullRequest.state === 'open' && !item.pullRequest.merged);
-      if (openPromotions.length > 1) throw { code: 'CONFLICT', message: 'Multiple open Preview-to-Main promotion pull requests are linked to the same canonical work item' };
+      const repositoryPromotion = await this.pullRequestProvider!.findOpenPromotionPullRequest!(project);
 
       const pollPull = async (initial: PullRequestStatus): Promise<PullRequestStatus> => {
         let current = initial;
@@ -1376,7 +1376,11 @@ export class ConductorToolRuntime {
         guidance: 'Primary work remains active. If a bounded, non-conflicting secondary lane is available and separately authorized, optional Wait Stewardship may proceed; otherwise hand control back. Re-check the exact primary resume condition after each bounded secondary lane.',
       };
 
-      const stopForPull = (pull: PullRequestStatus, humanPromotion = false): LifecycleAdvanceProjection | null => {
+      const stopForPull = (
+        pull: PullRequestStatus,
+        humanPromotion = false,
+        releaseWorkItemNumbers: number[] = [input.issueNumber],
+      ): LifecycleAdvanceProjection | null => {
         if (pull.merged || pull.orchestration.state === 'merged') {
           return humanPromotion ? lifecycleProjection(project, input.issueNumber, 'complete', 'Promotion pull request is already merged.', transitions) : null;
         }
@@ -1390,13 +1394,18 @@ export class ConductorToolRuntime {
             pullRequestNumber: pull.pullRequestNumber,
             expectedHeadSha: pull.head.sha,
             expectedBaseSha: pull.base.sha,
+            workItemNumbers: releaseWorkItemNumbers,
             ownerGate: {
               action: `Promote exact Preview candidate PR #${pull.pullRequestNumber} (${pull.head.sha}) into Main/default branch at base ${pull.base.sha}.`,
               whyOwnerGate: 'Main is accepted project truth. Conductor may prepare and verify a release candidate, but it must not infer release acceptance.',
               protectedConcern: 'Prevents stale, unintended, or insufficiently reviewed Preview state from becoming accepted Main merely because technical checks passed.',
               authorizes: [`One exact Main merge of PR #${pull.pullRequestNumber} at head ${pull.head.sha} and base ${pull.base.sha}.`],
               doesNotAuthorize: ['Future Preview heads or changed PR candidates.', 'Unlisted production-blocker overrides.', 'Separate destructive/provider/credential actions.'],
-              evidence: [`PR #${pull.pullRequestNumber} is promotion-ready on exact head ${pull.head.sha}.`, 'Required GitHub verification gates for the exact PR head are settled.'],
+              evidence: [
+                `PR #${pull.pullRequestNumber} is promotion-ready on exact head ${pull.head.sha}.`,
+                `Declared release batch: ${releaseWorkItemNumbers.map((number) => `#${number}`).join(', ')}.`,
+                'Required GitHub verification gates for the exact PR head are settled.',
+              ],
               afterApproval: 'lifecycle.resume re-reads the exact PR head/base and technical readiness, then invokes the existing audited Main promotion operation.',
             },
           };
@@ -1422,10 +1431,55 @@ export class ConductorToolRuntime {
         return null;
       };
 
-      if (openPromotions.length === 1) {
-        const promotion = await pollPull(openPromotions[0]!.pullRequest);
-        const stop = stopForPull(promotion, true);
+      if (repositoryPromotion) {
+        if (!repositoryPromotion.seal) {
+          return lifecycleProjection(
+            project,
+            input.issueNumber,
+            'action-required',
+            `Open promotion PR #${repositoryPromotion.pullRequest.pullRequestNumber} is not Conductor-sealed. Close it or recreate the release candidate through explicit lifecycle release preparation before integrating more work.`,
+            transitions,
+          );
+        }
+        if (repositoryPromotion.sealState === 'stale') {
+          return lifecycleProjection(
+            project,
+            input.issueNumber,
+            'verification-failed',
+            `Open promotion PR #${repositoryPromotion.pullRequest.pullRequestNumber} drifted from sealed head ${repositoryPromotion.seal.expectedHeadSha}/base ${repositoryPromotion.seal.expectedBaseSha} to live head ${repositoryPromotion.pullRequest.head.sha}/base ${repositoryPromotion.pullRequest.base.sha}. Close or explicitly reseal the release before continuing.`,
+            transitions,
+          );
+        }
+        const sealedBatch = repositoryPromotion.seal.workItemNumbers;
+        if (!input.preparePromotion) {
+          return lifecycleProjection(
+            project,
+            input.issueNumber,
+            'action-required',
+            `Release candidate PR #${repositoryPromotion.pullRequest.pullRequestNumber} is sealed for ${sealedBatch.map((number) => `#${number}`).join(', ')} at Preview ${repositoryPromotion.seal.expectedHeadSha}. Complete or close that release before integrating additional Preview work.`,
+            transitions,
+          );
+        }
+        if (sealedBatch.length !== promotionWorkItemNumbers.length
+          || sealedBatch.some((number, index) => number !== promotionWorkItemNumbers[index])) {
+          return lifecycleProjection(
+            project,
+            input.issueNumber,
+            'action-required',
+            `Release candidate PR #${repositoryPromotion.pullRequest.pullRequestNumber} is already sealed for ${sealedBatch.map((number) => `#${number}`).join(', ')}; requested release batch ${promotionWorkItemNumbers.map((number) => `#${number}`).join(', ')} differs. Close/reseal explicitly rather than silently changing release identity.`,
+            transitions,
+          );
+        }
+        const promotion = await pollPull(repositoryPromotion.pullRequest);
+        const stop = stopForPull(promotion, true, sealedBatch);
         if (stop) return stop;
+        return lifecycleProjection(
+          project,
+          input.issueNumber,
+          'action-required',
+          `Sealed promotion PR #${promotion.pullRequestNumber} reached unsupported orchestration state ${promotion.orchestration.state}.`,
+          transitions,
+        );
       }
 
       const openIntegrations = artifacts.filter((item) => item.role === 'preview-integration' && item.pullRequest.state === 'open' && !item.pullRequest.merged);
@@ -1569,9 +1623,15 @@ export class ConductorToolRuntime {
         );
       }
 
-      let promotion = openPromotions[0]?.pullRequest ?? null;
+      let promotion: PullRequestStatus | null = null;
       if (!promotion) {
         const issueList = promotionWorkItemNumbers.map((number) => `#${number}`).join(', ');
+        const releaseSeal = `<!-- conductor-release-seal:${JSON.stringify({
+          v: 1,
+          head: topology.integrationHead,
+          base: topology.defaultHead,
+          workItems: promotionWorkItemNumbers,
+        })} -->`;
         const created = await this.createPullRequest({
           project,
           head: topology.integrationBranch,
@@ -1579,7 +1639,7 @@ export class ConductorToolRuntime {
           title: promotionWorkItemNumbers.length === 1
             ? `Promote ${topology.integrationBranch} for #${input.issueNumber}`
             : `Promote ${topology.integrationBranch} release batch (${issueList})`,
-          body: `Prepared by lifecycle.advance after exact Preview proof for release work ${issueList}.`,
+          body: `Prepared by lifecycle.advance after exact Preview proof for release work ${issueList}.\n\n${releaseSeal}`,
           workItemNumbers: promotionWorkItemNumbers,
           idempotencyKey: lifecycleSubkey(input.idempotencyKey, `promotion-pr:${topology.integrationHead}`),
         });
@@ -1593,7 +1653,7 @@ export class ConductorToolRuntime {
         promotion = await this.pullRequestProvider!.getPullRequestStatus({ project, pullRequestNumber: created.result.pullRequestNumber });
       }
       promotion = await pollPull(promotion);
-      const promotionStop = stopForPull(promotion, true);
+      const promotionStop = stopForPull(promotion, true, promotionWorkItemNumbers);
       if (promotionStop) return { ...promotionStop, previewProof };
       return lifecycleProjection(project, input.issueNumber, 'action-required', `Promotion PR #${promotion.pullRequestNumber} reached unsupported orchestration state ${promotion.orchestration.state}.`, transitions, previewProof);
     });
