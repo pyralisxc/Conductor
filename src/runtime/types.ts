@@ -830,6 +830,7 @@ export interface PullRequestStatus {
   state: string;
   draft: boolean;
   merged: boolean;
+  mergeCommitSha?: string | null;
   mergeable: boolean | null;
   mergeableState: string | null;
   head: { ref: string; sha: string };
