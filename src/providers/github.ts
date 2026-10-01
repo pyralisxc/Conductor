@@ -641,6 +641,29 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
           };
         }
         remaining.delete(mergeCommitSha);
+        const sourceHeadSha = pull.head.sha.toLowerCase();
+        if (remaining.has(sourceHeadSha)) {
+          const sourceCommits = await this.request<Array<{ sha: string }>>(
+            repository,
+            `/pulls/${pull.number}/commits?per_page=100&page=1`,
+            {},
+            credential,
+          );
+          if (sourceCommits.length >= 100) {
+            throw {
+              code: 'CONFLICT',
+              message: `Merged integration PR #${pull.number} source commit inventory reached the 100-commit safety bound`,
+            };
+          }
+          const sourceCommitShas = sourceCommits.map((commit) => commit.sha.toLowerCase());
+          if (sourceCommitShas.some((sha) => !/^[0-9a-f]{40}$/u.test(sha))) {
+            throw { code: 'CONFLICT', message: `GitHub returned an invalid source commit identity for merged integration PR #${pull.number}` };
+          }
+          if (!sourceCommitShas.includes(sourceHeadSha)) {
+            throw { code: 'CONFLICT', message: `Merged integration PR #${pull.number} commit inventory does not contain its exact source head ${sourceHeadSha}` };
+          }
+          sourceCommitShas.forEach((sha) => remaining.delete(sha));
+        }
         canonical.forEach((number) => workItems.add(number));
         pullRequests.push({
           pullRequestNumber: pull.number,
