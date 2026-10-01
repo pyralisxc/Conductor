@@ -2,6 +2,39 @@
 
 > Pricing changes. Verify current pricing before committing spend. The architecture intentionally avoids depending on pricing assumptions.
 
+## Connection, authorization, provider, and lifecycle ownership
+
+Conductor keeps four boundaries distinct:
+
+1. **Connections** describe durable external-provider relationships and resolve credential/resource identity.
+2. **Authorization** decides which actor/session may request work against an exact scope.
+3. **Providers** execute provider-native GitHub, Vercel, or other operations using already-resolved connection authority.
+4. **Runtime/lifecycle** orchestrates work, Preview proof, release gates, receipts, and idempotency.
+
+Transport is limited to MCP/HTTP/OAuth message handling; configuration composes the layers.
+
+### Vocabulary
+
+- **Connection** — durable relationship with an external provider account or installation.
+- **Credential** — secret material backing a Connection.
+- **Binding** — internal project/resource to external Connection/resource relationship.
+- **Attestation** — safe evidence describing what a Connection/resource represents without exposing its credential.
+- **Delegation** — temporary authorization permitting an actor to use a bounded capability.
+- **Provider** — execution adapter for provider-native behavior.
+
+Shared connection infrastructure lives under `src/connections/universal`. Provider-specific connection semantics live under `src/connections/<provider>`. Execution semantics remain under `src/providers`.
+
+The intended ownership direction is:
+
+```text
+Transport -> Authorization / Runtime
+Runtime   -> Providers
+Providers -> Connections
+Config    -> composes the layers
+```
+
+Connections do not decide human authority. Authorization does not own provider credentials. Providers do not decide Main/production human gates. ASC may become the owner-facing authorization plane without receiving provider secret material or replacing Conductor provider execution.
+
 ## Primary initial providers
 
 ### GitHub

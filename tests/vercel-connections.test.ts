@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { vercelConnectionCsrfToken, vercelConnectionCsrfValid } from '../src/transport/vercel-connections.js';
+import { vercelConnectionCsrfToken, vercelConnectionCsrfValid } from '../src/transport/vercel-connection-http.js';
 
 test('Vercel connection forms require a fresh token for the intended action', () => {
   const previous = process.env.CONDUCTOR_SESSION_SECRET;

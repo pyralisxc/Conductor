@@ -4,10 +4,10 @@ import test from 'node:test';
 import {
   RedisProviderConnectionCredentialStore,
   RoutedProviderConnectionCredentialResolver
-} from '../src/transport/provider-connections.js';
+} from '../src/connections/universal/provider-connections.js';
 import {
   VersionedProviderCredentialVault
-} from '../src/transport/credential-vault.js';
+} from '../src/connections/universal/credential-vault.js';
 import { VercelDeploymentProvider } from '../src/providers/vercel.js';
 
 test('provider connection resolver routes explicit providers and multiple accounts without first-match behavior', async () => {

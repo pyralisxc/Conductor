@@ -9,7 +9,7 @@ import {
   type GitHubIdentity,
   type GitHubInstallationAttestation,
   type GitHubRepositoryAttestation
-} from '../providers/github-auth.js';
+} from '../connections/github/app-installation.js';
 import {
   VercelDeploymentProvider,
   type VercelRepositoryAttestation
@@ -19,7 +19,7 @@ import {
   vercelInstallationMetadata,
   vercelInstallationToken,
   type VercelInstallationMetadata
-} from './vercel-connections.js';
+} from '../connections/vercel/installation.js';
 
 function json(
   res: ServerResponse,

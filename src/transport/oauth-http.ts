@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { handleVercelConnectionRequest } from './vercel-connections.js';
+import { handleVercelConnectionRequest } from './vercel-connection-http.js';
 import { handleAscProviderBridgeRequest } from './asc-provider-bridge.js';
 import {
   clearOwnerSession,
