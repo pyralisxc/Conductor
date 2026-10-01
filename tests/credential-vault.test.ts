@@ -9,7 +9,7 @@ import test from 'node:test';
 import {
   ProviderCredentialVaultUnavailableError,
   VersionedProviderCredentialVault
-} from '../src/transport/credential-vault.js';
+} from '../src/connections/universal/credential-vault.js';
 
 function legacyEncrypt(
   plaintext: string,

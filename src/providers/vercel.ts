@@ -13,7 +13,7 @@ import type {
   RuntimeOperationName,
 } from '../runtime/types.js';
 import type { VercelOperationsProvider, OperationPreflightProvider } from './runtime.js';
-import type { ProviderConnectionCredentialResolver } from '../transport/provider-connections.js';
+import type { ProviderConnectionCredentialResolver } from '../connections/universal/provider-connections.js';
 import { ProviderUsageTracker } from './usage.js';
 
 interface VercelProjectBinding {

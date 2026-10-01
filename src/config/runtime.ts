@@ -1,13 +1,13 @@
 import { ConductorToolRuntime } from '../runtime/runtime.js';
 import { GitHubRuntimeProvider } from '../providers/github.js';
-import { GitHubAppCredentialProvider } from '../providers/github-auth.js';
+import { GitHubAppCredentialProvider } from '../connections/github/app-installation.js';
 import { DevelopmentIntelligenceProvider, UnavailableDevelopmentIntelligenceProvider } from '../providers/development-intelligence.js';
 import type { ToolRuntimeProvider } from '../providers/runtime.js';
 import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
 import { VercelDeploymentProvider } from '../providers/vercel.js';
-import { VERCEL_RUNTIME_CONNECTION_ID, vercelInstallationToken } from '../transport/vercel-connections.js';
-import { RedisProviderConnectionCredentialStore, RoutedProviderConnectionCredentialResolver } from '../transport/provider-connections.js';
-import { providerCredentialVaultFromEnvironment } from '../transport/credential-vault.js';
+import { VERCEL_RUNTIME_CONNECTION_ID, vercelInstallationToken } from '../connections/vercel/installation.js';
+import { RedisProviderConnectionCredentialStore, RoutedProviderConnectionCredentialResolver } from '../connections/universal/provider-connections.js';
+import { providerCredentialVaultFromEnvironment } from '../connections/universal/credential-vault.js';
 import { IdempotentMutationExecutor } from '../runtime/idempotency.js';
 import { RedisIdempotencyStore } from '../runtime/redis-idempotency.js';
 

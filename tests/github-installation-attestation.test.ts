@@ -5,7 +5,7 @@ import test from 'node:test';
 import {
   GitHubAppCredentialProvider,
   githubCapabilitiesFromPermissions
-} from '../src/providers/github-auth.js';
+} from '../src/connections/github/app-installation.js';
 
 function privateKey(): string {
   const { privateKey } = generateKeyPairSync('rsa', {

@@ -1,22 +1,21 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Redis } from '@upstash/redis';
 import { derivedSecret, ownerSessionValid } from './owner-auth.js';
 import { oauthPublicBaseUrl } from './oauth.js';
-import { RedisProviderConnectionCredentialStore } from './provider-connections.js';
-import { providerCredentialVaultFromEnvironment } from './credential-vault.js';
+import {
+  connectVercelRuntimeCredential,
+  consumeVercelConnectionState,
+  createVercelConnectionState,
+  disconnectVercelInstallation,
+  disconnectVercelRuntimeCredential,
+  listVercelInstallationMetadata,
+  storeVercelInstallation,
+  vercelConnectionOAuthConfiguration,
+  vercelRuntimeCredentialConnected,
+} from '../connections/vercel/installation.js';
 
-type Installation = { configurationId: string; teamId: string | null; connectedAt: string; token: string };
-
-export interface VercelInstallationMetadata {
-  readonly configurationId: string;
-  readonly teamId: string | null;
-  readonly connectedAt: string;
-}
-const prefix = 'conductor:vercel:connection:v1';
-const stateTtl = 600;
 const csrfTtlSeconds = 15 * 60;
-export const VERCEL_RUNTIME_CONNECTION_ID = 'vercel-runtime-primary';
+
 type ConnectionAction = 'start' | 'disconnect' | 'runtime-connect' | 'runtime-disconnect';
 
 function csrfSignature(action: ConnectionAction, expiresAt: number): string {
@@ -52,147 +51,6 @@ async function formBody(req: IncomingMessage): Promise<URLSearchParams> {
   return new URLSearchParams(body);
 }
 
-function configuration(): { redis: Redis; slug: string; clientId: string; clientSecret: string } {
-  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
-  const slug = process.env.CONDUCTOR_VERCEL_INTEGRATION_SLUG;
-  const clientId = process.env.CONDUCTOR_VERCEL_CLIENT_ID;
-  const clientSecret = process.env.CONDUCTOR_VERCEL_CLIENT_SECRET;
-  if (!url || !token || !slug || !clientId || !clientSecret) {
-    throw Object.assign(new Error('Vercel connection requires Redis and integration slug, client ID, and client secret'), { status: 503 });
-  }
-  if (!/^[a-z0-9-]+$/u.test(slug)) throw new Error('Invalid Vercel integration slug');
-  return { redis: new Redis({ url, token, enableTelemetry: false }), slug, clientId, clientSecret };
-}
-
-function installationVault() {
-  return providerCredentialVaultFromEnvironment(
-    'vercel-installation',
-  );
-}
-
-function parseInstallation(value: string): Installation {
-  let parsed: Partial<Installation>;
-  try {
-    parsed = JSON.parse(value) as Partial<Installation>;
-  } catch {
-    throw new Error('Invalid Vercel connection payload');
-  }
-  if (
-    typeof parsed.configurationId !== 'string' ||
-    !/^icfg_[\w-]+$/u.test(parsed.configurationId) ||
-    (parsed.teamId !== null && typeof parsed.teamId !== 'string') ||
-    typeof parsed.connectedAt !== 'string' ||
-    typeof parsed.token !== 'string' ||
-    !parsed.token
-  ) {
-    throw new Error('Invalid Vercel connection payload');
-  }
-  return {
-    configurationId: parsed.configurationId,
-    teamId: parsed.teamId ?? null,
-    connectedAt: parsed.connectedAt,
-    token: parsed.token,
-  };
-}
-
-function encrypt(value: Installation): string {
-  return installationVault().seal(JSON.stringify(value));
-}
-
-function decrypt(value: string): {
-  installation: Installation;
-  replacement?: string;
-} {
-  const opened = installationVault().open(value);
-  return {
-    installation: parseInstallation(opened.plaintext),
-    ...(opened.replacement
-      ? { replacement: opened.replacement }
-      : {}),
-  };
-}
-
-export async function listVercelInstallationMetadata():
-  Promise<readonly VercelInstallationMetadata[]> {
-  const { redis } = configuration();
-  const ids = (
-    await redis.smembers<string[]>(prefix + ':ids')
-  ).slice().sort();
-
-  const result: VercelInstallationMetadata[] = [];
-  for (const configurationId of ids) {
-    if (!/^icfg_[\w-]+$/u.test(configurationId)) {
-      continue;
-    }
-    const key =
-      prefix + ':installation:' + configurationId;
-    const record = await redis.get<string>(key);
-    if (!record) continue;
-
-    const opened = decrypt(record);
-    if (opened.replacement) {
-      await redis.set(key, opened.replacement);
-    }
-    const installation = opened.installation;
-    if (
-      installation.configurationId !== configurationId
-    ) {
-      throw new Error(
-        'Stored Vercel installation identity mismatch'
-      );
-    }
-    result.push(
-      Object.freeze({
-        configurationId:
-          installation.configurationId,
-        teamId: installation.teamId,
-        connectedAt: installation.connectedAt,
-      })
-    );
-  }
-  return Object.freeze(result);
-}
-
-export async function vercelInstallationMetadata(
-  configurationId: string
-): Promise<VercelInstallationMetadata | undefined> {
-  if (!/^icfg_[\w-]+$/u.test(configurationId)) {
-    throw new Error('Invalid Vercel installation ID');
-  }
-  const { redis } = configuration();
-  const key = prefix + ':installation:' + configurationId;
-  const record = await redis.get<string>(key);
-  if (!record) return undefined;
-  const opened = decrypt(record);
-  if (opened.replacement) {
-    await redis.set(key, opened.replacement);
-  }
-  const installation = opened.installation;
-  if (installation.configurationId !== configurationId) {
-    throw new Error('Stored Vercel installation identity mismatch');
-  }
-  return Object.freeze({
-    configurationId: installation.configurationId,
-    teamId: installation.teamId,
-    connectedAt: installation.connectedAt,
-  });
-}
-
-export async function vercelInstallationToken(configurationId: string, teamId?: string): Promise<string | undefined> {
-  const { redis } = configuration();
-  const key = prefix + ':installation:' + configurationId;
-  const record = await redis.get<string>(key);
-  if (!record) return undefined;
-  const opened = decrypt(record);
-  if (opened.replacement) {
-    await redis.set(key, opened.replacement);
-  }
-  const installation = opened.installation;
-  if ((installation.teamId ?? undefined) !== teamId) return undefined;
-  return installation.token;
-}
-
 function respond(res: ServerResponse, status: number, body: string): void {
   res.writeHead(status, {
     'content-type': 'text/html; charset=utf-8',
@@ -226,26 +84,13 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
     return true;
   }
   try {
-    const { redis, slug, clientId, clientSecret } = configuration();
+    const { slug, clientId, clientSecret } = vercelConnectionOAuthConfiguration();
     if (url.pathname === '/connections/vercel' && req.method === 'GET') {
-      const ids = await redis.smembers<string[]>(prefix + ':ids');
-      const installations = (
-        await Promise.all(ids.map(async (id) => {
-          const key = prefix + ':installation:' + id;
-          const record = await redis.get<string>(key);
-          if (!record) return undefined;
-          const opened = decrypt(record);
-          if (opened.replacement) {
-            await redis.set(key, opened.replacement);
-          }
-          return opened.installation;
-        }))
-      ).filter((entry): entry is Installation => Boolean(entry));
-      const credentialStore = new RedisProviderConnectionCredentialStore(redis);
-      const runtimeCredential = await credentialStore.resolve({ provider: 'vercel', connectionId: VERCEL_RUNTIME_CONNECTION_ID });
+      const installations = await listVercelInstallationMetadata();
+      const runtimeConnected = await vercelRuntimeCredentialConnected();
       const disconnectCsrf = vercelConnectionCsrfToken('disconnect');
       const list = installations.length ? `<ul>${installations.map(item => `<li>${escapeHtml(item.teamId ?? 'Personal account')} <small>(${escapeHtml(item.configurationId)})</small><form method="post" action="/connections/vercel/disconnect"><input type="hidden" name="csrf" value="${disconnectCsrf}"><input type="hidden" name="configurationId" value="${escapeHtml(item.configurationId)}"><button>Disconnect locally</button></form></li>`).join('')}</ul>` : '<p>No Vercel account is connected.</p>';
-      const runtime = runtimeCredential
+      const runtime = runtimeConnected
         ? `<p>Runtime-log direct access: connected.</p><form method="post" action="/connections/vercel/runtime/disconnect"><input type="hidden" name="csrf" value="${vercelConnectionCsrfToken('runtime-disconnect')}"><button>Disconnect runtime-log access</button></form>`
         : `<p>Runtime-log direct access: not connected.</p><form method="post" action="/connections/vercel/runtime"><input type="hidden" name="csrf" value="${vercelConnectionCsrfToken('runtime-connect')}"><label>Vercel access token <input type="password" name="token" autocomplete="off" required></label> <button>Connect runtime-log access</button></form>`;
       respond(res, 200, page(`${list}<p>Authorize an account or team in Vercel. Access remains scoped to the chosen installation.</p><form method="post" action="/connections/vercel/start"><input type="hidden" name="csrf" value="${vercelConnectionCsrfToken('start')}"><button>Connect Vercel</button></form><hr>${runtime}`));
@@ -255,7 +100,7 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
       const form = await formBody(req);
       if (!vercelConnectionCsrfValid('start', form.get('csrf') ?? '')) { respond(res, 403, page('<p>Connection form expired. Return to connections and try again.</p>')); return true; }
       const state = randomBytes(32).toString('base64url');
-      await redis.set(`${prefix}:state:${state}`, 'pending', { ex: stateTtl, nx: true });
+      await createVercelConnectionState(state);
       const authorize = new URL(`https://vercel.com/integrations/${slug}/new`);
       authorize.searchParams.set('state', state);
       redirect(res, authorize.toString());
@@ -266,8 +111,7 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
       if (!vercelConnectionCsrfValid('disconnect', form.get('csrf') ?? '')) { respond(res, 403, page('<p>Connection form expired. Return to connections and try again.</p>')); return true; }
       const id = form.get('configurationId') ?? '';
       if (!/^icfg_[\w-]+$/u.test(id)) { respond(res, 400, page('<p>Invalid connection.</p>')); return true; }
-      await redis.del(`${prefix}:installation:${id}`);
-      await redis.srem(`${prefix}:ids`, id);
+      await disconnectVercelInstallation(id);
       redirect(res, '/connections/vercel');
       return true;
     }
@@ -276,14 +120,14 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
       if (!vercelConnectionCsrfValid('runtime-connect', form.get('csrf') ?? '')) { respond(res, 403, page('<p>Connection form expired. Return to connections and try again.</p>')); return true; }
       const runtimeToken = form.get('token')?.trim() ?? '';
       if (runtimeToken.length < 20 || runtimeToken.length > 1024 || /[\u0000-\u001f\u007f]/u.test(runtimeToken)) { respond(res, 400, page('<p>Invalid Vercel access token.</p>')); return true; }
-      await new RedisProviderConnectionCredentialStore(redis).put({ provider: 'vercel', connectionId: VERCEL_RUNTIME_CONNECTION_ID, token: runtimeToken });
+      await connectVercelRuntimeCredential(runtimeToken);
       redirect(res, '/connections/vercel');
       return true;
     }
     if (url.pathname === '/connections/vercel/runtime/disconnect' && req.method === 'POST') {
       const form = await formBody(req);
       if (!vercelConnectionCsrfValid('runtime-disconnect', form.get('csrf') ?? '')) { respond(res, 403, page('<p>Connection form expired. Return to connections and try again.</p>')); return true; }
-      await new RedisProviderConnectionCredentialStore(redis).delete('vercel', VERCEL_RUNTIME_CONNECTION_ID);
+      await disconnectVercelRuntimeCredential();
       redirect(res, '/connections/vercel');
       return true;
     }
@@ -292,7 +136,7 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
       const code = url.searchParams.get('code') ?? '';
       const configurationId = url.searchParams.get('configurationId') ?? '';
       if (!/^[\w-]{30,100}$/u.test(state) || !code || !/^icfg_[\w-]+$/u.test(configurationId)
-        || await redis.getdel(`${prefix}:state:${state}`) !== 'pending') {
+        || !(await consumeVercelConnectionState(state))) {
         respond(res, 400, page('<p>Connection request expired or was not recognized. Start again from Conductor.</p>'));
         return true;
       }
@@ -307,8 +151,12 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
       const teamId = payload.team_id ?? null;
       const returnedTeam = url.searchParams.get('teamId');
       if (returnedTeam && returnedTeam !== teamId) throw new Error('Vercel account selection changed during authorization');
-      await redis.set(`${prefix}:installation:${configurationId}`, encrypt({ configurationId, teamId, connectedAt: new Date().toISOString(), token: payload.access_token }));
-      await redis.sadd(`${prefix}:ids`, configurationId);
+      await storeVercelInstallation({
+        configurationId,
+        teamId,
+        connectedAt: new Date().toISOString(),
+        token: payload.access_token,
+      });
       redirect(res, '/connections/vercel');
       return true;
     }
