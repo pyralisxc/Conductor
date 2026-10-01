@@ -78,7 +78,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v13'),
+      catalogVersion: z.literal('conductor.catalog.v14'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -891,11 +891,11 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
     server.registerTool('pull-request.create', {
       title: 'Open a pull request',
-      description: 'Open ordinary work/* only into preview/vercel-preview, or propose exact preview/vercel-preview to the provider-native default branch. Optional canonical work-item numbers create native GitHub cross-references so transport PRs remain subordinate to one work identity. Creating a proposal never authorizes merge or production promotion.',
+      description: 'Open ordinary work/* into preview/vercel-preview, propose exact preview/vercel-preview to the provider-native default branch, or prepare exact provider-default-branch to Preview reconciliation. Optional canonical work-item numbers create native GitHub cross-references so transport PRs remain subordinate to one work identity. Creating a proposal never authorizes merge or production promotion.',
       inputSchema: z.object({
         project: projectSchema,
         workContext: workContextSchema,
-        head: z.string().min(6),
+        head: z.string().min(1).max(255),
         base: z.string().min(1).max(255).describe('Target branch for the pull request, for example main, preview, or vercel-preview'),
         title: z.string().min(1).max(256),
         body: z.string().optional(),
