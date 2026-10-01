@@ -2269,11 +2269,36 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     const defaultBranch = metadata.default_branch?.trim();
     if (!defaultBranch) throw { code: 'NOT_FOUND', message: 'Repository default branch is unavailable' };
     const promotionProposal = ['preview', 'vercel-preview'].includes(input.head.toLowerCase());
+    const reconciliationProposal = input.head === defaultBranch;
+    let reconciliationEvidence = '';
     if (promotionProposal) {
       assertPromotionSourceBranch(input.head);
       if (base !== defaultBranch) {
         throw { code: 'PERMISSION_DENIED', message: 'Preview promotion pull requests must target the repository default branch' };
       }
+    } else if (reconciliationProposal) {
+      assertPreviewReconciliationTarget(base);
+      const [headRef, baseRef] = await Promise.all([
+        this.request<{ object: { sha: string } }>(
+          repository,
+          `/git/ref/heads/${encodePath(defaultBranch)}`,
+          {},
+          credential,
+        ),
+        this.request<{ object: { sha: string } }>(
+          repository,
+          `/git/ref/heads/${encodePath(base)}`,
+          {},
+          credential,
+        ),
+      ]);
+      assertSha(headRef.object.sha, 'reconciliation default head');
+      assertSha(baseRef.object.sha, 'reconciliation Preview head');
+      reconciliationEvidence = [
+        'Conductor Preview reconciliation evidence:',
+        `default ${defaultBranch}@${headRef.object.sha}`,
+        `integration ${base}@${baseRef.object.sha}`,
+      ].join('\n');
     } else {
       assertWorkBranch(input.head);
       if (!['preview', 'vercel-preview'].includes(base.toLowerCase())) {
@@ -2288,7 +2313,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     const canonicalWork = workItemNumbers.length
       ? `Canonical Conductor work: ${workItemNumbers.map((number) => `#${number}`).join(', ')}`
       : '';
-    const body = [input.body?.trim(), canonicalWork].filter(Boolean).join('\n\n');
+    const body = [input.body?.trim(), canonicalWork, reconciliationEvidence].filter(Boolean).join('\n\n');
 
     const created = await this.request<{ number: number; html_url: string }>(repository, '/pulls', {
       method: 'POST',
