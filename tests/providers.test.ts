@@ -540,6 +540,61 @@ test('GitHub derives complete canonical release inventory from the exact Main-to
   );
 });
 
+
+test('GitHub release inventory attributes merge-style integration source commits to the canonical PR', async () => {
+  const baseSha = 'a'.repeat(40);
+  const sourceCommit = 'b'.repeat(40);
+  const mergeCommit = 'c'.repeat(40);
+  const provider = new GitHubRuntimeProvider({
+    token: 'secret',
+    allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/repos/pyralisxc/Conductor') {
+        return Response.json({ full_name: 'pyralisxc/Conductor', default_branch: 'main', permissions: { pull: true } });
+      }
+      if (url.pathname.startsWith('/repos/pyralisxc/Conductor/compare/')) {
+        return Response.json({
+          status: 'ahead',
+          ahead_by: 2,
+          total_commits: 2,
+          commits: [{ sha: sourceCommit }, { sha: mergeCommit }],
+        });
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/pulls'
+        && url.searchParams.get('state') === 'closed'
+        && url.searchParams.get('base') === 'preview') {
+        return Response.json([{
+          number: 261,
+          html_url: 'https://github.test/pull/261',
+          state: 'closed',
+          merged_at: '2026-10-01T00:00:00Z',
+          merge_commit_sha: mergeCommit,
+          body: 'Schema repair\n\nCanonical Conductor work: #256',
+          head: { ref: 'work/256-reconciliation-schema', sha: sourceCommit },
+          base: { ref: 'preview', sha: baseSha },
+          labels: [],
+        }]);
+      }
+      if (url.pathname === '/repos/pyralisxc/Conductor/pulls/261/commits') {
+        return Response.json([{ sha: sourceCommit }]);
+      }
+      throw new Error(`Unexpected request ${url}`);
+    },
+  });
+
+  const inventory = await provider.getPreviewReleaseInventory({
+    project: { id: 'Conductor', repository: 'pyralisxc/Conductor' },
+    expectedBaseSha: baseSha,
+    expectedHeadSha: mergeCommit,
+    integrationBranch: 'preview',
+  });
+
+  assert.deepEqual(inventory.commitShas, [sourceCommit, mergeCommit]);
+  assert.deepEqual(inventory.workItemNumbers, [256]);
+  assert.deepEqual(inventory.pullRequests.map((pull) => pull.pullRequestNumber), [261]);
+});
+
 test('GitHub provider opens work pull requests against explicit repository-native targets', async () => {
   const requests: Array<{ url: string; method: string; body?: any }> = [];
   const provider = new GitHubRuntimeProvider({
