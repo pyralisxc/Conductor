@@ -562,6 +562,8 @@ test('GitHub provider opens work pull requests against explicit repository-nativ
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       requests.push({ url, method, body });
       if (/\/repos\/pyralisxc\/CardForge$/u.test(url) && method === 'GET') return Response.json({ full_name: 'pyralisxc/CardForge', default_branch: 'main' });
+      if (url.endsWith('/git/ref/heads/main') && method === 'GET') return Response.json({ object: { sha: 'a'.repeat(40) } });
+      if (url.endsWith('/git/ref/heads/vercel-preview') && method === 'GET') return Response.json({ object: { sha: 'b'.repeat(40) } });
       if (url.endsWith('/pulls') && method === 'POST') return Response.json({ number: 12, html_url: 'https://github.com/pyralisxc/CardForge/pull/12' });
       throw new Error(`Unexpected request ${method} ${url}`);
     },
@@ -616,15 +618,29 @@ test('GitHub provider opens work pull requests against explicit repository-nativ
     (error: any) => error?.code === 'PERMISSION_DENIED' && /default branch/.test(error.message),
   );
 
+  const reconciliation = await provider.createPullRequest({
+    project: { id: 'pyralisxc/CardForge' },
+    head: 'main',
+    base: 'vercel-preview',
+    title: 'Reconcile accepted Main',
+    workItemNumbers: [42],
+    idempotencyKey: 'pr:cf:reconcile-main',
+  });
+  assert.equal(reconciliation.pullRequestNumber, 12);
+  assert.equal(requests.at(-1)?.body?.head, 'main');
+  assert.equal(requests.at(-1)?.body?.base, 'vercel-preview');
+  assert.match(requests.at(-1)?.body?.body ?? '', /default main@a{40}/);
+  assert.match(requests.at(-1)?.body?.body ?? '', /integration vercel-preview@b{40}/);
+
   await assert.rejects(
     provider.createPullRequest({
       project: { id: 'pyralisxc/CardForge' },
       head: 'main',
-      base: 'vercel-preview',
-      title: 'Invalid reverse promotion',
-      idempotencyKey: 'pr:cf:reverse-promotion',
+      base: 'work/cf-cleanup',
+      title: 'Invalid reconciliation target',
+      idempotencyKey: 'pr:cf:bad-reconciliation-target',
     }),
-    (error: any) => error?.code === 'PERMISSION_DENIED' && /work\/\*/.test(error.message),
+    (error: any) => error?.code === 'PERMISSION_DENIED' && /Preview reconciliation targets/.test(error.message),
   );
 
   await assert.rejects(
