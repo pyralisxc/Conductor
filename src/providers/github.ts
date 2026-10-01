@@ -74,7 +74,7 @@ import {
   StaticGitHubCredentialProvider,
   type GitHubCredential,
   type GitHubCredentialProvider,
-} from './github-auth.js';
+} from '../connections/github/app-installation.js';
 import { ProviderUsageTracker } from './usage.js';
 
 interface GitHubRepositoryResponse {

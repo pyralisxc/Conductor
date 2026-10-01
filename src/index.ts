@@ -2,7 +2,7 @@ export * from './domain/types.js';
 export * from './domain/work-envelope.js';
 export * from './providers/runtime.js';
 export * from './providers/github.js';
-export * from './providers/github-auth.js';
+export * from './connections/github/app-installation.js';
 export * from './providers/workspace.js';
 export * from './providers/development-intelligence.js';
 export * from './providers/vercel.js';
@@ -17,7 +17,7 @@ export * from './transport/oauth.js';
 export * from './transport/oauth-http.js';
 export * from './transport/oauth-code-store.js';
 export * from './transport/owner-auth.js';
-export * from './transport/provider-connections.js';
+export * from './connections/universal/provider-connections.js';
 export * from './transport/mcp.js';
 export * from './transport/http.js';
 
