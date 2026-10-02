@@ -968,8 +968,14 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
         .slice(0, 20)
         .map(normalizeDeployment)
         .filter((item): item is DeploymentRecord => Boolean(item));
+      const detailCredential = await this.vcrCredentialRoute(bound.binding);
       const detailOutcomes = await Promise.allSettled(listed.map(item =>
-        this.getJson(`/v13/deployments/${encodeURIComponent(item.id)}`, scopeQuery(bound.binding), bound.binding)
+        this.getJson(
+          `/v13/deployments/${encodeURIComponent(item.id)}`,
+          scopeQuery(bound.binding),
+          bound.binding,
+          detailCredential,
+        )
       ));
       const data = listed.map((summary, index) => {
         const outcome = detailOutcomes[index];
@@ -986,7 +992,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
           requested: listed.length,
           succeeded: detailReadsSucceeded,
           failed: listed.length - detailReadsSucceeded,
-          note: 'Build usage is read from exact Vercel deployment detail responses; list responses are retained only as identity/fallback evidence.',
+          credentialRoute: detailCredential === 'runtime' ? 'shared-owner' : 'bound-installation',
+          note: 'Project/list identity remains installation-backed; exact deployment detail uses the shared owner credential when available so provider-private build usage can be observed without exposing credentials.',
         },
       };
     } else {

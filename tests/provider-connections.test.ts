@@ -226,3 +226,71 @@ test('VCR falls back to the bound installation when no shared owner credential e
   assert.equal(authorization.get('/v9/projects/prj_di'), 'Bearer installation-di');
   assert.equal(authorization.get('/v1/vcr/repository/dockerfile'), 'Bearer installation-di');
 });
+
+
+test('deployment audit keeps project identity on installation while using shared owner credential for exact detail usage', async () => {
+  const runtimeConnectionId = 'vercel-runtime-primary';
+  const authorization = new Map<string, string>();
+  const resolver = new RoutedProviderConnectionCredentialResolver({
+    vercel: async ({ connectionId, accountId }) => {
+      if (connectionId === runtimeConnectionId) return 'runtime-direct-token';
+      if (connectionId === 'icfg_di' && accountId === 'team_di') return 'installation-di';
+      return undefined;
+    },
+  });
+  const provider = new VercelDeploymentProvider({
+    credentialResolver: resolver,
+    runtimeConnectionId,
+    bindings: [{ id: 'di', project: 'prj_di', repository: 'owner/di', teamId: 'team_di', connectionId: 'icfg_di' }],
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      authorization.set(url.pathname, (init?.headers as Record<string, string>).Authorization);
+      if (url.pathname === '/v9/projects/prj_di') return Response.json({
+        id: 'prj_di',
+        name: 'di',
+        link: { type: 'github', org: 'owner', repo: 'di', productionBranch: 'main' },
+      });
+      if (url.pathname === '/v9/projects/prj_di/domains') return Response.json({ domains: [] });
+      if (url.pathname === '/v9/projects/prj_di/custom-environments') return Response.json({ environments: [] });
+      if (url.pathname === '/v4/aliases') return Response.json({ aliases: [] });
+      if (url.pathname === '/v10/projects/prj_di/env') return Response.json({ envs: [] });
+      if (url.pathname === '/v10/projects') return Response.json({ projects: [] });
+      if (url.pathname === '/v2/teams/team_di') return Response.json({ id: 'team_di', billing: { plan: 'pro' } });
+      if (url.pathname === '/v6/deployments') return Response.json({ deployments: [{
+        id: 'dpl_di',
+        projectId: 'prj_di',
+        readyState: 'READY',
+        target: 'production',
+        meta: { githubCommitSha: 'a'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/di' },
+      }] });
+      if (url.pathname === '/v13/deployments/dpl_di') return Response.json({
+        id: 'dpl_di',
+        projectId: 'prj_di',
+        readyState: 'READY',
+        target: 'production',
+        meta: { githubCommitSha: 'a'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/di' },
+        duration: {
+          startTime: 1000,
+          endTime: 541000,
+          endTimeCapped: 541000,
+          timeForBilling: 540000,
+          timeToContainerExit: 500000,
+          timeToContainerExitCapped: 500000,
+          timeToReady: 480000,
+        },
+      });
+      return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
+    },
+  });
+
+  const audit = await provider.getAudit({ project: { id: 'di', repository: 'owner/di' } });
+  const deployments = audit.deployments as {
+    detailEvidence: { credentialRoute: string };
+    data: Array<{ id: string; buildUsage: { providerDuration: { timeForBilling: number | null } } }>;
+  };
+  assert.equal(deployments.detailEvidence.credentialRoute, 'shared-owner');
+  assert.equal(deployments.data[0]?.buildUsage.providerDuration.timeForBilling, 540000);
+  assert.equal(authorization.get('/v9/projects/prj_di'), 'Bearer installation-di');
+  assert.equal(authorization.get('/v6/deployments'), 'Bearer installation-di');
+  assert.equal(authorization.get('/v13/deployments/dpl_di'), 'Bearer runtime-direct-token');
+});
