@@ -137,3 +137,8 @@ The first transport is documented in `docs/MCP_RUNTIME.md`. It exposes the confi
 
 
 - `source.discover(project, sha, ...)` provides bounded provider-native source location evidence at one exact immutable revision. Without a query it returns a bounded recursive-tree manifest. With a query it scans only bounded likely-text blobs from that exact tree for literal line matches. It reports scan/file/byte/match limits, truncation reasons, skipped large/binary/unsupported files, and exact blob identities. Results are path evidence, not semantic relevance, architecture meaning, impact analysis, or mutation authority; use `source.artifact.read` to inspect a selected file exactly and Development Intelligence for semantic/project-wide reasoning.
+
+
+## Scheduled VCR retention
+
+Production may configure generic VCR cleanup targets in `CONDUCTOR_VCR_RETENTION_JSON`. Vercel Cron invokes `/internal/vcr-retention`, authenticated only by `CRON_SECRET`. The maintenance runner enumerates exact deployment and VCR image evidence, preserves current READY production, one distinct rollback SHA, latest READY Preview, configured retention windows and production aliases, and then calls the existing exact `deployment.vcr.image.delete` path for every planner-approved deletion. That means scheduled deletion retains the same exact image ID/digest check, protected-deployment re-read, durable idempotency and provider readback used by interactive mutations. Missing identities remain review items, and a provider failure stops the run without affecting serving deployments. VCR provider quota/headroom is not currently authoritative through the API, so the runner reports exact retained-image counts and known bytes rather than inventing capacity.
