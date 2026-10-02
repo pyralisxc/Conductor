@@ -1208,6 +1208,7 @@ function deploymentBuildUsage(item: JsonRecord): DeploymentRecord['buildUsage'] 
   const buildUsage = recordField(item, 'buildUsage');
   const billing = recordField(item, 'billing');
   const usage = recordField(item, 'usage');
+  const duration = recordField(item, 'duration');
   const buildMachine = recordField(item, 'buildMachine')
     ?? (recordField(item, 'resourceConfig') ? recordField(recordField(item, 'resourceConfig')!, 'buildMachine') : null);
 
@@ -1254,6 +1255,16 @@ function deploymentBuildUsage(item: JsonRecord): DeploymentRecord['buildUsage'] 
     buildMachine?.type,
     buildMachine?.name,
   );
+  const providerDuration = {
+    startTime: firstFiniteNumber(duration?.startTime),
+    endTime: firstFiniteNumber(duration?.endTime),
+    endTimeCapped: firstFiniteNumber(duration?.endTimeCapped),
+    timeForBilling: firstFiniteNumber(duration?.timeForBilling),
+    timeToContainerExit: firstFiniteNumber(duration?.timeToContainerExit),
+    timeToContainerExitCapped: firstFiniteNumber(duration?.timeToContainerExitCapped),
+    timeToReady: firstFiniteNumber(duration?.timeToReady),
+  };
+  const providerNumericUsageEvidence = numericUsageEvidence(item);
 
   const values = [buildDurationMs, postBuildDurationMs, billableDurationMs, cpuMinutes, vcpus, machine];
   const observed = values.filter(value => value !== null).length;
@@ -1265,7 +1276,33 @@ function deploymentBuildUsage(item: JsonRecord): DeploymentRecord['buildUsage'] 
     cpuMinutes,
     vcpus,
     machine,
+    providerDuration,
+    providerNumericUsageEvidence,
   };
+}
+
+function numericUsageEvidence(item: JsonRecord): Array<{ path: string; value: number }> {
+  const matches: Array<{ path: string; value: number }> = [];
+  const visit = (value: unknown, path: string, depth: number): void => {
+    if (matches.length >= 40 || depth > 4) return;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      if (/(?:^|\.)(?:duration|billing|usage|cpu|vcpu|machine|build)/iu.test(path)) {
+        matches.push({ path, value });
+      }
+      return;
+    }
+    const object = record(value);
+    if (!object) return;
+    for (const [key, child] of Object.entries(object)) {
+      if (matches.length >= 40) break;
+      const next = path ? `${path}.${key}` : key;
+      if (depth === 0 || /duration|billing|usage|cpu|vcpu|machine|build/iu.test(next)) {
+        visit(child, next, depth + 1);
+      }
+    }
+  };
+  visit(item, '', 0);
+  return matches.sort((left, right) => left.path.localeCompare(right.path));
 }
 
 function normalizeLogEntry(value: unknown): DeploymentLogEntry | null {

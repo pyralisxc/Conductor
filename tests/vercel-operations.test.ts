@@ -812,13 +812,47 @@ test('deployment audit enriches list identity with exact deployment-detail build
         target: null,
         meta: { githubCommitSha: 'b'.repeat(40), githubCommitRef: 'preview', githubCommitRepo: 'owner/app' },
         buildDuration: 610000,
+        duration: {
+          startTime: 1000,
+          endTime: 901000,
+          endTimeCapped: 901000,
+          timeForBilling: 900000,
+          timeToContainerExit: 850000,
+          timeToContainerExitCapped: 850000,
+          timeToReady: 820000,
+        },
       });
       return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
     },
   });
 
   const audit = await provider.getAudit({ project: { id: 'app', repository: 'owner/app' } });
-  const deployments = audit.deployments as { status: string; data: Array<{ id: string; buildUsage: Record<string, unknown> }>; detailEvidence: Record<string, unknown> };
+  const deployments = audit.deployments as {
+    status: string;
+    data: Array<{
+      id: string;
+      buildUsage: {
+        status: string;
+        buildDurationMs: number | null;
+        postBuildDurationMs: number | null;
+        billableDurationMs: number | null;
+        cpuMinutes: number | null;
+        vcpus: number | null;
+        machine: string | null;
+        providerDuration: {
+          startTime: number | null;
+          endTime: number | null;
+          endTimeCapped: number | null;
+          timeForBilling: number | null;
+          timeToContainerExit: number | null;
+          timeToContainerExitCapped: number | null;
+          timeToReady: number | null;
+        };
+        providerNumericUsageEvidence: Array<{ path: string; value: number }>;
+      };
+    }>;
+    detailEvidence: Record<string, unknown>;
+  };
   assert.equal(deployments.status, 'available');
   assert.deepEqual(deployments.detailEvidence, {
     status: 'available',
@@ -837,12 +871,36 @@ test('deployment audit enriches list identity with exact deployment-detail build
     cpuMinutes: 270,
     vcpus: 30,
     machine: 'turbo',
+    providerDuration: {
+      startTime: null,
+      endTime: null,
+      endTimeCapped: null,
+      timeForBilling: null,
+      timeToContainerExit: null,
+      timeToContainerExitCapped: null,
+      timeToReady: null,
+    },
+    providerNumericUsageEvidence: [
+      { path: 'buildDuration', value: 309000 },
+      { path: 'buildMachine.vcpus', value: 30 },
+      { path: 'cpuMinutes', value: 270 },
+    ],
   });
   const before = deployments.data.find(item => item.id === 'dpl_before');
   assert.ok(before);
   assert.equal(before.buildUsage.status, 'partial');
   assert.equal(before.buildUsage.buildDurationMs, 610000);
   assert.equal(before.buildUsage.cpuMinutes, null, 'CPU minutes must remain null when Vercel detail does not return them');
+  assert.deepEqual(before.buildUsage.providerDuration, {
+    startTime: 1000,
+    endTime: 901000,
+    endTimeCapped: 901000,
+    timeForBilling: 900000,
+    timeToContainerExit: 850000,
+    timeToContainerExitCapped: 850000,
+    timeToReady: 820000,
+  });
+  assert.ok(before.buildUsage.providerNumericUsageEvidence.some(item => item.path === 'duration.timeForBilling' && item.value === 900000));
   assert.ok(calls.includes('/v13/deployments/dpl_after'));
   assert.ok(calls.includes('/v13/deployments/dpl_before'));
 });
