@@ -676,11 +676,11 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     if (id !== input.imageId || manifestDigest !== input.expectedManifestDigest) {
       throw { code: 'CONFLICT', source: 'vercel', message: 'Exact VCR image ID/digest no longer matches provider state' };
     }
-    if (tags.length === 0 || tags.some(tag => !/^[0-9a-f]{7,40}$/iu.test(tag))) {
+    if (tags.some(tag => !/^[0-9a-f]{7,40}$/iu.test(tag))) {
       throw {
         code: 'TOOL_UNAVAILABLE',
         source: 'vercel',
-        message: 'VCR image deletion requires only immutable-looking Git SHA tags; untagged or mutable/ambiguous tags remain fail-closed.',
+        message: 'VCR image deletion requires either an exact untagged image or only immutable-looking Git SHA tags; mutable/ambiguous tags remain fail-closed.',
       };
     }
 
