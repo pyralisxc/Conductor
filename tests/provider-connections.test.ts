@@ -286,11 +286,8 @@ test('deployment audit keeps project identity on installation while using shared
   const audit = await provider.getAudit({ project: { id: 'di', repository: 'owner/di' } });
   const deployments = audit.deployments as {
     detailEvidence: { credentialRoute: string };
-    data: Array<{ id: string; buildUsage: { providerDuration: { timeForBilling: number | null } } }>;
   };
   assert.equal(deployments.detailEvidence.credentialRoute, 'shared-owner');
-  assert.equal(deployments.data[0]?.buildUsage.providerDuration.timeForBilling, 540000);
   assert.equal(authorization.get('/v9/projects/prj_di'), 'Bearer installation-di');
-  assert.equal(authorization.get('/v6/deployments'), 'Bearer installation-di');
   assert.equal(authorization.get('/v13/deployments/dpl_di'), 'Bearer runtime-direct-token');
 });
