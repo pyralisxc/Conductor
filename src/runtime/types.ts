@@ -590,6 +590,16 @@ export interface LifecycleAdvanceProjection {
   gate: LifecycleGateSpec | null;
 }
 
+export interface DeploymentBuildUsage {
+  status: 'available' | 'partial' | 'unavailable';
+  buildDurationMs: number | null;
+  postBuildDurationMs: number | null;
+  billableDurationMs: number | null;
+  cpuMinutes: number | null;
+  vcpus: number | null;
+  machine: string | null;
+}
+
 export interface DeploymentRecord {
   id: string;
   url: string | null;
@@ -603,6 +613,7 @@ export interface DeploymentRecord {
   aliases: string[];
   errorCode: string | null;
   errorMessage: string | null;
+  buildUsage: DeploymentBuildUsage;
 }
 
 export interface DeploymentProjectStatus {
