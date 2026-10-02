@@ -755,12 +755,14 @@ test('Vercel mutations still re-read project and deployment identity after boots
 });
 
 
-test('deployment reads expose only provider-native build usage without deriving missing CPU data', async () => {
+test('deployment audit enriches list identity with exact deployment-detail build usage without deriving missing CPU data', async () => {
+  const calls: string[] = [];
   const provider = new VercelDeploymentProvider({
     token: 'test-token',
     bindings: [{ id: 'app', project: 'prj_app', repository: 'owner/app', teamId: 'team_1' }],
     fetch: async input => {
       const url = new URL(String(input));
+      calls.push(url.pathname);
       if (url.pathname === '/v9/projects/prj_app') return Response.json({
         id: 'prj_app',
         name: 'app',
@@ -768,6 +770,11 @@ test('deployment reads expose only provider-native build usage without deriving 
         targets: { production: { id: 'dpl_after' } },
       });
       if (url.pathname === '/v9/projects/prj_app/domains') return Response.json({ domains: [] });
+      if (url.pathname === '/v9/projects/prj_app/custom-environments') return Response.json({ environments: [] });
+      if (url.pathname === '/v4/aliases') return Response.json({ aliases: [] });
+      if (url.pathname === '/v10/projects/prj_app/env') return Response.json({ envs: [] });
+      if (url.pathname === '/v10/projects') return Response.json({ projects: [] });
+      if (url.pathname === '/v2/teams/team_1') return Response.json({ id: 'team_1', billing: { plan: 'pro' } });
       if (url.pathname === '/v6/deployments') return Response.json({ deployments: [
         {
           id: 'dpl_after',
@@ -776,11 +783,6 @@ test('deployment reads expose only provider-native build usage without deriving 
           target: 'production',
           createdAt: Date.parse('2026-10-02T20:00:00.000Z'),
           meta: { githubCommitSha: 'a'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/app' },
-          buildDuration: 309000,
-          postBuildDuration: 201000,
-          billableDuration: 540000,
-          cpuMinutes: 270,
-          buildMachine: { vcpus: 30, type: 'turbo' },
         },
         {
           id: 'dpl_before',
@@ -789,15 +791,43 @@ test('deployment reads expose only provider-native build usage without deriving 
           target: null,
           createdAt: Date.parse('2026-10-01T20:00:00.000Z'),
           meta: { githubCommitSha: 'b'.repeat(40), githubCommitRef: 'preview', githubCommitRepo: 'owner/app' },
-          buildDuration: 610000,
         },
       ] });
+      if (url.pathname === '/v13/deployments/dpl_after') return Response.json({
+        id: 'dpl_after',
+        projectId: 'prj_app',
+        readyState: 'READY',
+        target: 'production',
+        meta: { githubCommitSha: 'a'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/app' },
+        buildDuration: 309000,
+        postBuildDuration: 201000,
+        billableDuration: 540000,
+        cpuMinutes: 270,
+        buildMachine: { vcpus: 30, type: 'turbo' },
+      });
+      if (url.pathname === '/v13/deployments/dpl_before') return Response.json({
+        id: 'dpl_before',
+        projectId: 'prj_app',
+        readyState: 'READY',
+        target: null,
+        meta: { githubCommitSha: 'b'.repeat(40), githubCommitRef: 'preview', githubCommitRepo: 'owner/app' },
+        buildDuration: 610000,
+      });
       return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
     },
   });
 
-  const status = await provider.getDeploymentStatus({ project: { id: 'app', repository: 'owner/app' }, limit: 10 });
-  const after = status.recent.find(item => item.id === 'dpl_after');
+  const audit = await provider.getAudit({ project: { id: 'app', repository: 'owner/app' } });
+  const deployments = audit.deployments as { status: string; data: Array<{ id: string; buildUsage: Record<string, unknown> }>; detailEvidence: Record<string, unknown> };
+  assert.equal(deployments.status, 'available');
+  assert.deepEqual(deployments.detailEvidence, {
+    status: 'available',
+    requested: 2,
+    succeeded: 2,
+    failed: 0,
+    note: 'Build usage is read from exact Vercel deployment detail responses; list responses are retained only as identity/fallback evidence.',
+  });
+  const after = deployments.data.find(item => item.id === 'dpl_after');
   assert.ok(after);
   assert.deepEqual(after.buildUsage, {
     status: 'available',
@@ -808,9 +838,11 @@ test('deployment reads expose only provider-native build usage without deriving 
     vcpus: 30,
     machine: 'turbo',
   });
-  const before = status.recent.find(item => item.id === 'dpl_before');
+  const before = deployments.data.find(item => item.id === 'dpl_before');
   assert.ok(before);
   assert.equal(before.buildUsage.status, 'partial');
   assert.equal(before.buildUsage.buildDurationMs, 610000);
-  assert.equal(before.buildUsage.cpuMinutes, null, 'CPU minutes must remain null when Vercel does not return them');
+  assert.equal(before.buildUsage.cpuMinutes, null, 'CPU minutes must remain null when Vercel detail does not return them');
+  assert.ok(calls.includes('/v13/deployments/dpl_after'));
+  assert.ok(calls.includes('/v13/deployments/dpl_before'));
 });
