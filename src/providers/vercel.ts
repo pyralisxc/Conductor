@@ -1149,6 +1149,71 @@ function normalizeDeployment(value: unknown): DeploymentRecord | null {
     aliases: [...new Set(aliases)].sort(),
     errorCode: stringField(item, 'errorCode'),
     errorMessage: stringField(item, 'errorMessage'),
+    buildUsage: deploymentBuildUsage(item),
+  };
+}
+
+function deploymentBuildUsage(item: JsonRecord): DeploymentRecord['buildUsage'] {
+  const buildUsage = recordField(item, 'buildUsage');
+  const billing = recordField(item, 'billing');
+  const usage = recordField(item, 'usage');
+  const buildMachine = recordField(item, 'buildMachine')
+    ?? (recordField(item, 'resourceConfig') ? recordField(recordField(item, 'resourceConfig')!, 'buildMachine') : null);
+
+  const buildDurationMs = firstFiniteNumber(
+    item.buildDuration,
+    item.buildDurationMs,
+    buildUsage?.buildDuration,
+    buildUsage?.buildDurationMs,
+    billing?.buildDuration,
+  );
+  const postBuildDurationMs = firstFiniteNumber(
+    item.postBuildDuration,
+    item.postBuildDurationMs,
+    buildUsage?.postBuildDuration,
+    buildUsage?.postBuildDurationMs,
+    billing?.postBuildDuration,
+  );
+  const billableDurationMs = firstFiniteNumber(
+    item.billableDuration,
+    item.billableDurationMs,
+    buildUsage?.billableDuration,
+    buildUsage?.billableDurationMs,
+    billing?.billableDuration,
+  );
+  const cpuMinutes = firstFiniteNumber(
+    item.cpuMinutes,
+    item.cpuMinutesUsage,
+    item.buildCpuMinutes,
+    buildUsage?.cpuMinutes,
+    buildUsage?.cpuMinutesUsage,
+    billing?.cpuMinutes,
+    usage?.cpuMinutes,
+  );
+  const vcpus = firstFiniteNumber(
+    item.vcpus,
+    item.vCpuCount,
+    buildUsage?.vcpus,
+    buildMachine?.vcpus,
+    buildMachine?.vcpu,
+  );
+  const machine = firstNonEmptyString(
+    item.buildMachineType,
+    buildUsage?.machine,
+    buildMachine?.type,
+    buildMachine?.name,
+  );
+
+  const values = [buildDurationMs, postBuildDurationMs, billableDurationMs, cpuMinutes, vcpus, machine];
+  const observed = values.filter(value => value !== null).length;
+  return {
+    status: observed === 0 ? 'unavailable' : observed === values.length ? 'available' : 'partial',
+    buildDurationMs,
+    postBuildDurationMs,
+    billableDurationMs,
+    cpuMinutes,
+    vcpus,
+    machine,
   };
 }
 
@@ -1242,6 +1307,18 @@ function recordField(value: JsonRecord, key: string): JsonRecord | null {
 function stringField(value: JsonRecord, key: string): string | null {
   const field = value[key];
   return typeof field === 'string' && field.trim() ? field.trim() : null;
+}
+function firstFiniteNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value;
+  }
+  return null;
+}
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
 }
 function arrayField(value: JsonRecord, key: string): unknown[] {
   return Array.isArray(value[key]) ? value[key] as unknown[] : [];

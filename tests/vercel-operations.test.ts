@@ -753,3 +753,64 @@ test('Vercel mutations still re-read project and deployment identity after boots
   assert.equal(paths.includes('/v9/projects/prj_app'), true);
   assert.equal(paths.includes('/v13/deployments/dpl_source'), true);
 });
+
+
+test('deployment reads expose only provider-native build usage without deriving missing CPU data', async () => {
+  const provider = new VercelDeploymentProvider({
+    token: 'test-token',
+    bindings: [{ id: 'app', project: 'prj_app', repository: 'owner/app', teamId: 'team_1' }],
+    fetch: async input => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v9/projects/prj_app') return Response.json({
+        id: 'prj_app',
+        name: 'app',
+        link: { type: 'github', org: 'owner', repo: 'app', productionBranch: 'main' },
+        targets: { production: { id: 'dpl_after' } },
+      });
+      if (url.pathname === '/v9/projects/prj_app/domains') return Response.json({ domains: [] });
+      if (url.pathname === '/v6/deployments') return Response.json({ deployments: [
+        {
+          id: 'dpl_after',
+          projectId: 'prj_app',
+          readyState: 'READY',
+          target: 'production',
+          createdAt: Date.parse('2026-10-02T20:00:00.000Z'),
+          meta: { githubCommitSha: 'a'.repeat(40), githubCommitRef: 'main', githubCommitRepo: 'owner/app' },
+          buildDuration: 309000,
+          postBuildDuration: 201000,
+          billableDuration: 540000,
+          cpuMinutes: 270,
+          buildMachine: { vcpus: 30, type: 'turbo' },
+        },
+        {
+          id: 'dpl_before',
+          projectId: 'prj_app',
+          readyState: 'READY',
+          target: null,
+          createdAt: Date.parse('2026-10-01T20:00:00.000Z'),
+          meta: { githubCommitSha: 'b'.repeat(40), githubCommitRef: 'preview', githubCommitRepo: 'owner/app' },
+          buildDuration: 610000,
+        },
+      ] });
+      return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
+    },
+  });
+
+  const status = await provider.getDeploymentStatus({ project: { id: 'app', repository: 'owner/app' }, limit: 10 });
+  const after = status.recent.find(item => item.id === 'dpl_after');
+  assert.ok(after);
+  assert.deepEqual(after.buildUsage, {
+    status: 'available',
+    buildDurationMs: 309000,
+    postBuildDurationMs: 201000,
+    billableDurationMs: 540000,
+    cpuMinutes: 270,
+    vcpus: 30,
+    machine: 'turbo',
+  });
+  const before = status.recent.find(item => item.id === 'dpl_before');
+  assert.ok(before);
+  assert.equal(before.buildUsage.status, 'partial');
+  assert.equal(before.buildUsage.buildDurationMs, 610000);
+  assert.equal(before.buildUsage.cpuMinutes, null, 'CPU minutes must remain null when Vercel does not return them');
+});
