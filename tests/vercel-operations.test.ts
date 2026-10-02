@@ -859,7 +859,8 @@ test('deployment audit enriches list identity with exact deployment-detail build
     requested: 2,
     succeeded: 2,
     failed: 0,
-    note: 'Build usage is read from exact Vercel deployment detail responses; list responses are retained only as identity/fallback evidence.',
+    credentialRoute: 'direct-owner',
+    note: 'Project/list identity remains installation-backed; exact deployment detail uses the available owner credential route when present so provider-private build usage can be observed without exposing credentials.',
   });
   const after = deployments.data.find(item => item.id === 'dpl_after');
   assert.ok(after);
