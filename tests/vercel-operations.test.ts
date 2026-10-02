@@ -883,6 +883,7 @@ test('deployment audit enriches list identity with exact deployment-detail build
     providerNumericUsageEvidence: [
       { path: 'buildDuration', value: 309000 },
       { path: 'buildMachine.vcpus', value: 30 },
+      { path: 'cpuMinutes', value: 270 },
     ],
   });
   const before = deployments.data.find(item => item.id === 'dpl_before');
