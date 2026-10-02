@@ -598,6 +598,16 @@ export interface DeploymentBuildUsage {
   cpuMinutes: number | null;
   vcpus: number | null;
   machine: string | null;
+  providerDuration: {
+    startTime: number | null;
+    endTime: number | null;
+    endTimeCapped: number | null;
+    timeForBilling: number | null;
+    timeToContainerExit: number | null;
+    timeToContainerExitCapped: number | null;
+    timeToReady: number | null;
+  };
+  providerNumericUsageEvidence: Array<{ path: string; value: number }>;
 }
 
 export interface DeploymentRecord {
