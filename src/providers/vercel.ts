@@ -959,8 +959,40 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     ];
     const outcomes = await Promise.allSettled(requests);
     const section = (index: number, field: string) => outcomes[index]?.status === 'fulfilled'
-      ? { status: 'available', data: arrayField(outcomes[index].value as JsonRecord, field).slice(0, 50).map(item => field === 'deployments' ? normalizeDeployment(item) : field === 'envs' ? envMetadata(record(item) ?? {}) : safeAuditItem(item)) }
+      ? { status: 'available', data: arrayField(outcomes[index].value as JsonRecord, field).slice(0, 50).map(item => field === 'envs' ? envMetadata(record(item) ?? {}) : safeAuditItem(item)) }
       : { status: 'unavailable', reason: 'Vercel API did not provide this read for the bound project' };
+
+    let deployments: Record<string, unknown>;
+    if (outcomes[3]?.status === 'fulfilled') {
+      const listed = arrayField(outcomes[3].value as JsonRecord, 'deployments')
+        .slice(0, 20)
+        .map(normalizeDeployment)
+        .filter((item): item is DeploymentRecord => Boolean(item));
+      const detailOutcomes = await Promise.allSettled(listed.map(item =>
+        this.getJson(`/v13/deployments/${encodeURIComponent(item.id)}`, scopeQuery(bound.binding), bound.binding)
+      ));
+      const data = listed.map((summary, index) => {
+        const outcome = detailOutcomes[index];
+        if (outcome?.status !== 'fulfilled') return summary;
+        const detail = normalizeDeployment(outcome.value);
+        return detail ? mergeDeploymentRecord(summary, detail) : summary;
+      });
+      const detailReadsSucceeded = detailOutcomes.filter(item => item.status === 'fulfilled').length;
+      deployments = {
+        status: 'available',
+        data,
+        detailEvidence: {
+          status: detailReadsSucceeded === listed.length ? 'available' : detailReadsSucceeded > 0 ? 'partial' : 'unavailable',
+          requested: listed.length,
+          succeeded: detailReadsSucceeded,
+          failed: listed.length - detailReadsSucceeded,
+          note: 'Build usage is read from exact Vercel deployment detail responses; list responses are retained only as identity/fallback evidence.',
+        },
+      };
+    } else {
+      deployments = { status: 'unavailable', reason: 'Vercel API did not provide deployment inventory for the bound project' };
+    }
+
     const vars = outcomes[4]?.status === 'fulfilled' ? { status: 'available', data: (outcomes[4].value as JsonRecord).variables } : { status: 'unavailable' };
     const team = outcomes[6]?.status === 'fulfilled' ? outcomes[6].value as JsonRecord : null;
     const teamPlan = team ? stringField(recordField(team, 'billing') ?? {}, 'plan') : null;
@@ -969,8 +1001,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       team: team ? { status: 'available', id: stringField(team, 'id') ?? bound.binding.teamId, name: stringField(team, 'name'), slug: stringField(team, 'slug'), plan: teamPlan } : { status: 'unavailable' },
       projectInventory: section(5, 'projects'),
       project: { id: bound.id, name: stringField(bound.data, 'name'), productionBranch: stringField(recordField(bound.data, 'link') ?? {}, 'productionBranch'), framework: stringField(bound.data, 'framework'), rootDirectory: stringField(bound.data, 'rootDirectory'), deploymentProtection: safeAuditItem(recordField(bound.data, 'ssoProtection') ?? {}) },
-      domains: section(0, 'domains'), customEnvironments: section(1, 'environments'), aliases: section(2, 'aliases'), deployments: section(3, 'deployments'), variables: vars,
-      usageAndBilling: { status: teamPlan ? 'partial' : 'unavailable', plan: teamPlan, reason: 'Spend, usage, limits and budget require a verified supported API and are unavailable here' },
+      domains: section(0, 'domains'), customEnvironments: section(1, 'environments'), aliases: section(2, 'aliases'), deployments, variables: vars,
+      usageAndBilling: { status: teamPlan ? 'partial' : 'unavailable', plan: teamPlan, reason: 'Account-wide spend, limits and budget are separate from deployment-scoped build usage; unsupported values remain unavailable.' },
     };
   }
 
@@ -1110,6 +1142,25 @@ function linkedRepository(project: JsonRecord, repository: string): boolean {
   const linkedOrg = stringField(link, 'org')?.toLowerCase();
   return Boolean(linkedRepo && ((linkedRepo === `${org}/${repo}` && (!linkedOrg || linkedOrg === org))
     || (linkedRepo === repo && linkedOrg === org)));
+}
+
+function mergeDeploymentRecord(summary: DeploymentRecord, detail: DeploymentRecord): DeploymentRecord {
+  return {
+    ...summary,
+    ...detail,
+    url: detail.url ?? summary.url,
+    state: detail.state ?? summary.state,
+    target: detail.target ?? summary.target,
+    createdAt: detail.createdAt ?? summary.createdAt,
+    readyAt: detail.readyAt ?? summary.readyAt,
+    sourceRevision: detail.sourceRevision ?? summary.sourceRevision,
+    sourceRef: detail.sourceRef ?? summary.sourceRef,
+    sourceRepository: detail.sourceRepository ?? summary.sourceRepository,
+    aliases: detail.aliases.length ? detail.aliases : summary.aliases,
+    errorCode: detail.errorCode ?? summary.errorCode,
+    errorMessage: detail.errorMessage ?? summary.errorMessage,
+    buildUsage: detail.buildUsage.status !== 'unavailable' ? detail.buildUsage : summary.buildUsage,
+  };
 }
 
 function normalizeDeployment(value: unknown): DeploymentRecord | null {
