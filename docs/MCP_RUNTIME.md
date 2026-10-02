@@ -173,3 +173,8 @@ While a sealed release candidate is open, ordinary lifecycle advancement does no
 ### Iterative canonical work
 
 One canonical issue may legitimately require multiple successive work-to-Preview pull requests as acceptance testing reveals follow-up gaps. `lifecycle.advance` treats multiple **merged** integration PRs as historical transport evidence for that durable work identity and continues to prove the current repository Preview head/deployment. Multiple **open** integration PRs remain a conflict because the next mutation target would be ambiguous. Merged transport never implies semantic issue completion.
+
+
+### Bounded Vercel build-usage evidence
+
+Vercel's current deployment-detail contract exposes a numeric `duration` object even when higher-level build-usage aliases are absent. During #275 hardening, Conductor returns only the seven documented numeric duration members and a bounded list of numeric paths whose names contain build/duration/billing/CPU/vCPU/machine/usage terms. It never returns arbitrary strings or raw deployment payloads. This evidence exists to bind the final provider-neutral mapping to actual provider fields without inventing CPU values.
