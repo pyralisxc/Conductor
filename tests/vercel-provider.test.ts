@@ -91,17 +91,20 @@ test('Vercel provider exposes current production separately from latest failed p
   assert.ok(requests.every(url => url.includes('teamId=team_1')));
 });
 
-test('Vercel deployment logs are bounded, project-scoped, and redact secret-like content', async () => {
-  const { instance } = provider();
+test('Vercel deployment logs are bounded, project-scoped, redacted, and support forward/backward reads', async () => {
+  const { instance, requests } = provider();
   const logs = await instance.getDeploymentLogs({
     project: { id: 'Development-Intelligence' },
     deploymentId: 'dpl_failed',
     limit: 1,
+    direction: 'backward',
   });
   assert.equal(logs.entries.length, 1);
   assert.equal(logs.truncated, true);
+  assert.equal((logs as any).direction, 'backward');
   assert.match(logs.entries[0]?.text ?? '', /TOKEN=\[redacted\]/u);
   assert.doesNotMatch(logs.entries[0]?.text ?? '', /super-secret-value/u);
+  assert.ok(requests.some(url => url.includes('/v3/deployments/dpl_failed/events') && url.includes('direction=backward')));
 });
 
 test('Vercel provider reports missing authentication without exposing deployment tools as usable', async () => {

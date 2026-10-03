@@ -263,7 +263,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
 
     const response = await this.request(
       `/v3/deployments/${encodeURIComponent(input.deploymentId)}/events`,
-      { ...scopeQuery(binding), direction: 'forward', follow: '0' }, binding,
+      { ...scopeQuery(binding), direction: input.direction ?? 'forward', follow: '0' }, binding,
     );
     const body = await response.text();
     const events = parseEventStream(body);
@@ -277,7 +277,8 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       truncated: events.length > limit,
       source: 'deployment-events',
       observedAt: this.now().toISOString(),
-      note: 'Vercel deployment-event output is bounded and redacted. Provider event availability varies by deployment lifecycle and must not be treated as a complete runtime log archive.',
+      direction: input.direction ?? 'forward',
+      note: 'Vercel deployment-event output is bounded and redacted. Forward reads expose build starts; backward reads expose the newest build/deployment events. Provider event availability varies by deployment lifecycle and must not be treated as a complete runtime log archive.',
     };
   }
 

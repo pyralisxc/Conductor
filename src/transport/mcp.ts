@@ -611,6 +611,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         project: projectSchema,
         deploymentId: z.string().min(3).max(256),
         limit: z.number().int().min(1).max(200).default(100),
+        direction: z.enum(['forward', 'backward']).default('forward'),
         bootstrapEvidence: bootstrapEvidenceSchema,
       }),
       outputSchema: readReceiptSchema,

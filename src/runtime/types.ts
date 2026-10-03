@@ -681,6 +681,7 @@ export interface GetDeploymentLogsInput {
   project: ProjectReference;
   deploymentId: string;
   limit?: number;
+  direction?: 'forward' | 'backward';
   readEvidence?: VercelReadEvidence;
 }
 
