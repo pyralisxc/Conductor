@@ -953,7 +953,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
       this.getJson(`/v9/projects/${encodeURIComponent(bound.id)}/domains`, scopeQuery(bound.binding), bound.binding),
       this.getJson(`/v9/projects/${encodeURIComponent(bound.id)}/custom-environments`, scopeQuery(bound.binding), bound.binding),
       this.getJson('/v4/aliases', { ...scopeQuery(bound.binding), projectId: bound.id, limit: '50' }, bound.binding),
-      this.getJson('/v6/deployments', { ...scopeQuery(bound.binding), projectId: bound.id, limit: '20' }, bound.binding),
+      this.getJson('/v6/deployments', { ...scopeQuery(bound.binding), projectId: bound.id, limit: '50' }, bound.binding),
       this.listEnvironment(input),
       this.getJson('/v10/projects', { ...scopeQuery(bound.binding), limit: '50' }, bound.binding),
       bound.binding.teamId ? this.getJson(`/v2/teams/${encodeURIComponent(bound.binding.teamId)}`, {}, bound.binding) : Promise.reject(new Error('No bound team')),
@@ -966,7 +966,7 @@ export class VercelDeploymentProvider implements VercelOperationsProvider, Opera
     let deployments: Record<string, unknown>;
     if (outcomes[3]?.status === 'fulfilled') {
       const listed = arrayField(outcomes[3].value as JsonRecord, 'deployments')
-        .slice(0, 20)
+        .slice(0, 50)
         .map(normalizeDeployment)
         .filter((item): item is DeploymentRecord => Boolean(item));
       const detailRoute = await this.runtimeCredentialRoute(bound.binding);
