@@ -673,6 +673,7 @@ export interface DeploymentLogs {
   entries: DeploymentLogEntry[];
   truncated: boolean;
   source: 'deployment-events';
+  direction: 'forward' | 'backward';
   observedAt: string;
   note: string;
 }
@@ -681,6 +682,7 @@ export interface GetDeploymentLogsInput {
   project: ProjectReference;
   deploymentId: string;
   limit?: number;
+  direction?: 'forward' | 'backward';
   readEvidence?: VercelReadEvidence;
 }
 
