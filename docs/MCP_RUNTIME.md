@@ -178,3 +178,6 @@ One canonical issue may legitimately require multiple successive work-to-Preview
 ### Bounded Vercel build-usage evidence
 
 Vercel's current deployment-detail contract exposes a numeric `duration` object even when higher-level build-usage aliases are absent. During #275 hardening, Conductor returns only the seven documented numeric duration members and a bounded list of numeric paths whose names contain build/duration/billing/CPU/vCPU/machine/usage terms. It never returns arbitrary strings or raw deployment payloads. This evidence exists to bind the final provider-neutral mapping to actual provider fields without inventing CPU values.
+
+
+For deployment-scoped build usage, Conductor preserves installation-backed project/list identity but routes the exact deployment-detail enrichment through the existing shared owner Vercel credential when available. This mirrors the proven VCR/runtime credential boundary: private provider fields can be read without moving credential custody or weakening project identity checks. If the shared owner credential is unavailable, detail enrichment falls back to the bound installation and missing private usage remains explicit.
