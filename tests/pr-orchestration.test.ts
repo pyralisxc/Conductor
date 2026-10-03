@@ -215,6 +215,36 @@ test('newer successful verify supersedes historical action_required evidence on 
   assert.deepEqual(result.orchestration.signals.actionRequired, []);
 });
 
+test('historical cancelled same-SHA verification stays inspectable without blocking newer success', async () => {
+  const provider = providerFor({
+    headSha: newHead,
+    checks: [
+      { id: 30, name: 'verify', status: 'completed', conclusion: 'cancelled' },
+      { id: 31, name: 'verify', status: 'completed', conclusion: 'success' },
+      { id: 32, name: 'action-smoke', status: 'completed', conclusion: 'success' },
+    ],
+    workflowRuns: [
+      { id: 40, name: 'verify', status: 'completed', conclusion: 'cancelled', createdAt: '2026-10-02T19:20:00Z', runAttempt: 1 },
+      { id: 41, name: 'verify', status: 'completed', conclusion: 'success', createdAt: '2026-10-02T19:21:00Z', runAttempt: 1 },
+    ],
+  });
+
+  const result = await status(provider, {
+    headSha: newHead,
+    orchestrationState: 'external-gate-pending',
+  });
+
+  assert.equal(result.checks.items.find((check) => check.id === 30)?.historical, true);
+  assert.equal(result.checks.items.find((check) => check.id === 31)?.historical, false);
+  assert.equal(result.workflowRuns.find((run) => run.id === 40)?.historical, true);
+  assert.equal(result.workflowRuns.find((run) => run.id === 41)?.historical, false);
+  assert.equal(result.checks.failed, 0);
+  assert.equal(result.orchestration.state, 'integration-ready');
+  assert.equal(result.orchestration.action, 'integration-merge');
+  assert.deepEqual(result.orchestration.signals.failed, []);
+  assert.deepEqual(result.orchestration.signals.pending, []);
+});
+
 test('real source verification failure remains actionable even during seal-b', async () => {
   const provider = providerFor({
     labels: ['seal-b'],
