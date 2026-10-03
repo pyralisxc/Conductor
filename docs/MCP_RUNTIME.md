@@ -181,3 +181,6 @@ Vercel's current deployment-detail contract exposes a numeric `duration` object 
 
 
 For deployment-scoped build usage, Conductor preserves installation-backed project/list identity but routes the exact deployment-detail enrichment through the existing shared owner Vercel credential when available. This mirrors the proven VCR/runtime credential boundary: private provider fields can be read without moving credential custody or weakening project identity checks. If the shared owner credential is unavailable, detail enrichment falls back to the bound installation and missing private usage remains explicit.
+
+
+Vercel's native deployment detail currently uses `duration.timeForBilling`, `duration.cpuTimeForBilling`, and `resourceConfig.buildMachine.cores` on supported deployments. Conductor maps those fields directly to billable duration, CPU Minutes (provider CPU-billing milliseconds divided by 60,000), and vCPU count; this is provider-native telemetry, not a timestamp-derived estimate. For container deployments where Vercel omits the `duration` block, Conductor separately exposes a strict lifecycle timestamp allowlist (`createdAt`, `buildingAt`, `buildContainerFinishedAt`, `readyAt`, `readyStateAt`, `canceledAt`, `errorAt`) so callers can audit provider lifecycle evidence without receiving arbitrary payload fields.

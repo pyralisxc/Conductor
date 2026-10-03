@@ -603,9 +603,19 @@ export interface DeploymentBuildUsage {
     endTime: number | null;
     endTimeCapped: number | null;
     timeForBilling: number | null;
+    cpuTimeForBilling: number | null;
     timeToContainerExit: number | null;
     timeToContainerExitCapped: number | null;
     timeToReady: number | null;
+  };
+  providerLifecycle: {
+    createdAt: number | null;
+    buildingAt: number | null;
+    buildContainerFinishedAt: number | null;
+    readyAt: number | null;
+    readyStateAt: number | null;
+    canceledAt: number | null;
+    errorAt: number | null;
   };
   providerNumericUsageEvidence: Array<{ path: string; value: number }>;
 }

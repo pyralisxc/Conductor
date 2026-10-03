@@ -812,15 +812,20 @@ test('deployment audit enriches list identity with exact deployment-detail build
         target: null,
         meta: { githubCommitSha: 'b'.repeat(40), githubCommitRef: 'preview', githubCommitRepo: 'owner/app' },
         buildDuration: 610000,
+        buildingAt: 1500,
+        buildContainerFinishedAt: 880000,
+        readyStateAt: 905000,
         duration: {
           startTime: 1000,
           endTime: 901000,
           endTimeCapped: 901000,
           timeForBilling: 900000,
+          cpuTimeForBilling: 1800000,
           timeToContainerExit: 850000,
           timeToContainerExitCapped: 850000,
           timeToReady: 820000,
         },
+        resourceConfig: { buildMachine: { cores: 2, memory: 8192 } },
       });
       return Response.json({ error: { message: 'unexpected path' } }, { status: 404 });
     },
@@ -844,9 +849,19 @@ test('deployment audit enriches list identity with exact deployment-detail build
           endTime: number | null;
           endTimeCapped: number | null;
           timeForBilling: number | null;
+          cpuTimeForBilling: number | null;
           timeToContainerExit: number | null;
           timeToContainerExitCapped: number | null;
           timeToReady: number | null;
+        };
+        providerLifecycle: {
+          createdAt: number | null;
+          buildingAt: number | null;
+          buildContainerFinishedAt: number | null;
+          readyAt: number | null;
+          readyStateAt: number | null;
+          canceledAt: number | null;
+          errorAt: number | null;
         };
         providerNumericUsageEvidence: Array<{ path: string; value: number }>;
       };
@@ -877,9 +892,19 @@ test('deployment audit enriches list identity with exact deployment-detail build
       endTime: null,
       endTimeCapped: null,
       timeForBilling: null,
+      cpuTimeForBilling: null,
       timeToContainerExit: null,
       timeToContainerExitCapped: null,
       timeToReady: null,
+    },
+    providerLifecycle: {
+      createdAt: null,
+      buildingAt: null,
+      buildContainerFinishedAt: null,
+      readyAt: null,
+      readyStateAt: null,
+      canceledAt: null,
+      errorAt: null,
     },
     providerNumericUsageEvidence: [
       { path: 'buildDuration', value: 309000 },
@@ -891,15 +916,27 @@ test('deployment audit enriches list identity with exact deployment-detail build
   assert.ok(before);
   assert.equal(before.buildUsage.status, 'partial');
   assert.equal(before.buildUsage.buildDurationMs, 610000);
-  assert.equal(before.buildUsage.cpuMinutes, null, 'CPU minutes must remain null when Vercel detail does not return them');
+  assert.equal(before.buildUsage.cpuMinutes, 30, 'Provider cpuTimeForBilling is converted from milliseconds to CPU Minutes');
+  assert.equal(before.buildUsage.billableDurationMs, 900000);
+  assert.equal(before.buildUsage.vcpus, 2);
   assert.deepEqual(before.buildUsage.providerDuration, {
     startTime: 1000,
     endTime: 901000,
     endTimeCapped: 901000,
     timeForBilling: 900000,
+    cpuTimeForBilling: 1800000,
     timeToContainerExit: 850000,
     timeToContainerExitCapped: 850000,
     timeToReady: 820000,
+  });
+  assert.deepEqual(before.buildUsage.providerLifecycle, {
+    createdAt: null,
+    buildingAt: 1500,
+    buildContainerFinishedAt: 880000,
+    readyAt: null,
+    readyStateAt: 905000,
+    canceledAt: null,
+    errorAt: null,
   });
   assert.ok(before.buildUsage.providerNumericUsageEvidence.some(item => item.path === 'duration.timeForBilling' && item.value === 900000));
   assert.ok(calls.includes('/v13/deployments/dpl_after'));

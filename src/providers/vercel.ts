@@ -1245,7 +1245,9 @@ function deploymentBuildUsage(item: JsonRecord): DeploymentRecord['buildUsage'] 
     buildUsage?.billableDuration,
     buildUsage?.billableDurationMs,
     billing?.billableDuration,
+    duration?.timeForBilling,
   );
+  const providerCpuTimeForBilling = firstFiniteNumber(duration?.cpuTimeForBilling);
   const cpuMinutes = firstFiniteNumber(
     item.cpuMinutes,
     item.cpuMinutesUsage,
@@ -1254,6 +1256,7 @@ function deploymentBuildUsage(item: JsonRecord): DeploymentRecord['buildUsage'] 
     buildUsage?.cpuMinutesUsage,
     billing?.cpuMinutes,
     usage?.cpuMinutes,
+    providerCpuTimeForBilling === null ? null : providerCpuTimeForBilling / 60_000,
   );
   const vcpus = firstFiniteNumber(
     item.vcpus,
@@ -1261,6 +1264,7 @@ function deploymentBuildUsage(item: JsonRecord): DeploymentRecord['buildUsage'] 
     buildUsage?.vcpus,
     buildMachine?.vcpus,
     buildMachine?.vcpu,
+    buildMachine?.cores,
   );
   const machine = firstNonEmptyString(
     item.buildMachineType,
@@ -1273,9 +1277,19 @@ function deploymentBuildUsage(item: JsonRecord): DeploymentRecord['buildUsage'] 
     endTime: firstFiniteNumber(duration?.endTime),
     endTimeCapped: firstFiniteNumber(duration?.endTimeCapped),
     timeForBilling: firstFiniteNumber(duration?.timeForBilling),
+    cpuTimeForBilling: providerCpuTimeForBilling,
     timeToContainerExit: firstFiniteNumber(duration?.timeToContainerExit),
     timeToContainerExitCapped: firstFiniteNumber(duration?.timeToContainerExitCapped),
     timeToReady: firstFiniteNumber(duration?.timeToReady),
+  };
+  const providerLifecycle = {
+    createdAt: firstFiniteNumber(item.createdAt, item.created),
+    buildingAt: firstFiniteNumber(item.buildingAt),
+    buildContainerFinishedAt: firstFiniteNumber(item.buildContainerFinishedAt),
+    readyAt: firstFiniteNumber(item.readyAt),
+    readyStateAt: firstFiniteNumber(item.readyStateAt),
+    canceledAt: firstFiniteNumber(item.canceledAt),
+    errorAt: firstFiniteNumber(item.errorAt),
   };
   const providerNumericUsageEvidence = numericUsageEvidence(item);
 
@@ -1290,6 +1304,7 @@ function deploymentBuildUsage(item: JsonRecord): DeploymentRecord['buildUsage'] 
     vcpus,
     machine,
     providerDuration,
+    providerLifecycle,
     providerNumericUsageEvidence,
   };
 }
