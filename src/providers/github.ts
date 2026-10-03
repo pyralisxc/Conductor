@@ -3110,14 +3110,14 @@ function derivePullRequestOrchestration(input: {
       .map((run) => `workflow:${run.name}`),
   ]);
 
-  const granularFailures = input.checks
+  const granularFailures = activeChecks
     .filter((check) => isFailureConclusion(check.conclusion))
     .filter((check) =>
       !(expectedPreSealCheckpoint && normalizedCheckName(check.name) === 'action-smoke')
     )
     .map((check) => `check:${check.name}`);
 
-  const aggregateWorkflowFailures = input.workflowRuns
+  const aggregateWorkflowFailures = activeWorkflowRuns
     .filter((run) => isFailureConclusion(run.conclusion))
     .filter((run) =>
       !(expectedPreSealCheckpoint && normalizedCheckName(run.name) === 'verify')
