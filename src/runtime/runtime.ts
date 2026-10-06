@@ -476,7 +476,7 @@ export class ConductorToolRuntime {
 
   async workerRuntimeDispatch(input: WorkerRuntimeDispatchInput): Promise<ExecutionReceipt<Record<string, unknown>>> {
     const project = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
-    return this.executeRead('worker-runtime.dispatch', { kind: 'project', id: project.id, ref: project.ref }, async () => {
+    return this.executeRead<Record<string, unknown>>('worker-runtime.dispatch', { kind: 'project', id: project.id, ref: project.ref }, async () => {
       const provider = this.requireWorkerRuntimeProvider(project);
       if (!this.workItemProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'Exact worker dispatch requires the GitHub work-item provider' };
       const target = await this.workItemProvider.getWorkItemStatus({ project, issueNumber: input.issueNumber });
