@@ -1,9 +1,10 @@
-import { createRuntimeFromEnvironment } from './runtime.js';
+import { createRuntimeFromEnvironment, parseRuntimeBindings } from './runtime.js';
 import { createConductorHttpHandler } from '../transport/http.js';
 import { createWorkScopeHttpHandler } from '../transport/work-scope-http.js';
 import { RedisWorkScopeStore, WorkScopeAuthorizer } from '../transport/work-scope.js';
 import { handleOAuthHttpRequest } from '../transport/oauth-http.js';
 import { handleAscAuthorityBridgeRequest } from '../transport/asc-authority-bridge.js';
+import { handleSymphonyConnectionRequest } from '../transport/symphony-connection-http.js';
 import { assertOAuthConfiguration, oauthPublicBaseUrl, SelfHostedAccessTokenVerifier } from '../transport/oauth.js';
 import { runConfiguredVcrRetention, vcrRetentionCronAuthorized } from '../maintenance/vcr-retention.js';
 
@@ -12,6 +13,15 @@ export function createConfiguredHttpHandler() {
   assertOAuthConfiguration();
   const publicUrl = oauthPublicBaseUrl();
   const runtime = createRuntimeFromEnvironment();
+  const symphonyBindings = parseRuntimeBindings(process.env.CONDUCTOR_PROJECTS_JSON)
+    .filter((binding) => binding.workerRuntimeEndpoint && binding.workerRuntimeConnectionId);
+  const symphonyBinding = symphonyBindings[0] && symphonyBindings[0].repository
+    ? {
+        endpoint: symphonyBindings[0].workerRuntimeEndpoint!,
+        connectionId: symphonyBindings[0].workerRuntimeConnectionId!,
+        repository: symphonyBindings[0].repository!,
+      }
+    : undefined;
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
   if (runtime.sourceControlMutationsEnabled || runtime.workItemMutationsEnabled) {
@@ -30,6 +40,16 @@ export function createConfiguredHttpHandler() {
       response,
       url,
     ) => {
+      if (
+        await handleSymphonyConnectionRequest(
+          request,
+          response,
+          url,
+          { binding: symphonyBinding },
+        )
+      ) {
+        return true;
+      }
       if (
         await handleAscAuthorityBridgeRequest(
           request,

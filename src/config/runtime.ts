@@ -5,6 +5,7 @@ import { DevelopmentIntelligenceProvider, UnavailableDevelopmentIntelligenceProv
 import type { ToolRuntimeProvider } from '../providers/runtime.js';
 import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
 import { VercelDeploymentProvider } from '../providers/vercel.js';
+import { OhMySymphonyProvider } from '../providers/oh-my-symphony.js';
 import { VERCEL_RUNTIME_CONNECTION_ID, vercelInstallationToken } from '../connections/vercel/installation.js';
 import { RedisProviderConnectionCredentialStore, RoutedProviderConnectionCredentialResolver } from '../connections/universal/provider-connections.js';
 import { providerCredentialVaultFromEnvironment } from '../connections/universal/credential-vault.js';
@@ -20,6 +21,8 @@ export interface RuntimeBinding {
   vercelTeamId?: string;
   vercelConnectionId?: string;
   vercelRuntimeLogsDirect?: boolean;
+  workerRuntimeEndpoint?: string;
+  workerRuntimeConnectionId?: string;
 }
 
 export interface RuntimeEnvironment extends Record<string, string | undefined> {
@@ -103,6 +106,24 @@ export function createRuntimeFromEnvironment(
       : vercelInstallationToken(connectionId, accountId),
   });
 
+  const workerBindings = bindings.filter((binding) => binding.workerRuntimeEndpoint && binding.workerRuntimeConnectionId);
+  if (workerBindings.length > 1) {
+    throw new Error('The first canary supports exactly one oh-my-symphony runtime binding');
+  }
+  const workerBinding = workerBindings[0];
+  let workerRuntimeProvider: OhMySymphonyProvider | undefined;
+  if (workerBinding) {
+    if (!workerBinding.repository) throw new Error('Worker runtime binding requires an exact repository');
+    if (!providerCredentialStore) throw new Error('Worker runtime binding requires durable provider credential storage');
+    workerRuntimeProvider = new OhMySymphonyProvider({
+      endpoint: workerBinding.workerRuntimeEndpoint!,
+      repository: workerBinding.repository,
+      connectionId: workerBinding.workerRuntimeConnectionId!,
+      credentialResolver: providerCredentialStore,
+    });
+    providers.push(workerRuntimeProvider);
+  }
+
   const vercelBindings = bindings.flatMap((binding) => binding.vercelProject
     ? [{ id: binding.id, project: binding.vercelProject, repository: binding.repository, teamId: binding.vercelTeamId, connectionId: binding.vercelConnectionId, runtimeLogsDirect: binding.vercelRuntimeLogsDirect }]
     : []);
@@ -118,7 +139,7 @@ export function createRuntimeFromEnvironment(
   }
 
   const sourceControlMutationsEnabled = environment.CONDUCTOR_ENABLE_GITHUB_MUTATIONS === '1';
-  if (!sourceControlMutationsEnabled) return new ConductorToolRuntime({ providers, repositoryAcquisitionProvider: githubProvider, repositoryBootstrapProvider: githubProvider, repositoryAuditProvider: githubProvider, intelligenceAuditProvider: intelligenceProvider, projectResolver: githubProvider, pullRequestProvider: githubProvider, sourceArtifactProvider: githubProvider, ciReadProvider: githubProvider, workItemProvider: githubProvider, workItemCandidateProvider: githubProvider, deploymentProvider: vercelProvider });
+  if (!sourceControlMutationsEnabled) return new ConductorToolRuntime({ providers, repositoryAcquisitionProvider: githubProvider, repositoryBootstrapProvider: githubProvider, repositoryAuditProvider: githubProvider, intelligenceAuditProvider: intelligenceProvider, projectResolver: githubProvider, pullRequestProvider: githubProvider, sourceArtifactProvider: githubProvider, ciReadProvider: githubProvider, workItemProvider: githubProvider, workItemCandidateProvider: githubProvider, deploymentProvider: vercelProvider, workerRuntimeProvider });
   if (!githubProvider || (!environment.GITHUB_TOKEN && !githubApp)) {
     throw new Error('GitHub mutations require an authorized owner/project and GitHub authentication');
   }
@@ -142,6 +163,7 @@ export function createRuntimeFromEnvironment(
     workItemProvider: githubProvider,
     workItemCandidateProvider: githubProvider,
     deploymentProvider: vercelProvider,
+    workerRuntimeProvider,
   });
 }
 
@@ -206,6 +228,18 @@ export function parseRuntimeBindings(value?: string): RuntimeBinding[] {
     if (project.vercelRuntimeLogsDirect !== undefined && typeof project.vercelRuntimeLogsDirect !== 'boolean') {
       throw new Error(`Runtime binding ${project.id} vercelRuntimeLogsDirect must be a boolean`);
     }
+    if (project.workerRuntimeEndpoint !== undefined) {
+      if (typeof project.workerRuntimeEndpoint !== 'string') throw new Error(`Runtime binding ${project.id} workerRuntimeEndpoint must be a string`);
+      let url: URL;
+      try { url = new URL(project.workerRuntimeEndpoint); } catch { throw new Error(`Runtime binding ${project.id} workerRuntimeEndpoint must be an absolute URL`); }
+      if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`Runtime binding ${project.id} workerRuntimeEndpoint must use HTTP(S)`);
+    }
+    if (project.workerRuntimeConnectionId !== undefined && (typeof project.workerRuntimeConnectionId !== 'string' || !/^[A-Za-z0-9._:-]{3,128}$/u.test(project.workerRuntimeConnectionId))) {
+      throw new Error(`Runtime binding ${project.id} workerRuntimeConnectionId is invalid`);
+    }
+    if ((project.workerRuntimeEndpoint === undefined) !== (project.workerRuntimeConnectionId === undefined)) {
+      throw new Error(`Runtime binding ${project.id} worker runtime endpoint and connection ID must be configured together`);
+    }
     return {
       id: project.id,
       repository: project.repository,
@@ -215,6 +249,8 @@ export function parseRuntimeBindings(value?: string): RuntimeBinding[] {
       ...(typeof project.vercelTeamId === 'string' ? { vercelTeamId: project.vercelTeamId } : {}),
       ...(typeof project.vercelConnectionId === 'string' ? { vercelConnectionId: project.vercelConnectionId } : {}),
       ...(typeof project.vercelRuntimeLogsDirect === 'boolean' ? { vercelRuntimeLogsDirect: project.vercelRuntimeLogsDirect } : {}),
+      ...(typeof project.workerRuntimeEndpoint === 'string' ? { workerRuntimeEndpoint: project.workerRuntimeEndpoint } : {}),
+      ...(typeof project.workerRuntimeConnectionId === 'string' ? { workerRuntimeConnectionId: project.workerRuntimeConnectionId } : {}),
     } as RuntimeBinding;
   });
 }
