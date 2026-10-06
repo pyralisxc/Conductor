@@ -3,39 +3,46 @@ import type {
   WorkerRuntimeRunProjection, WorkerRuntimeStatusProjection,
 } from '../runtime/types.js';
 import type { WorkerRuntimeAction, WorkerRuntimeControlProvider } from './runtime.js';
+import type { ProviderConnectionCredentialResolver } from '../connections/universal/provider-connections.js';
 
 type FetchLike = typeof fetch;
 
 export interface OhMySymphonyProviderOptions {
-  endpoint: string; token: string; repository: string; fetchImpl?: FetchLike; timeoutMs?: number; now?: () => Date;
+  endpoint: string; repository: string; token?: string; credentialResolver?: ProviderConnectionCredentialResolver; connectionId?: string; fetchImpl?: FetchLike; timeoutMs?: number; now?: () => Date;
 }
 
 export class OhMySymphonyProvider implements WorkerRuntimeControlProvider {
   readonly id = 'oh-my-symphony';
   readonly repository: string;
   private readonly endpoint: string;
-  private readonly token: string;
+  private readonly token?: string;
+  private readonly credentialResolver?: ProviderConnectionCredentialResolver;
+  private readonly connectionId?: string;
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
   private readonly now: () => Date;
 
   constructor(options: OhMySymphonyProviderOptions) {
     const endpoint = options.endpoint.trim().replace(/\/+$/u, '');
-    const token = options.token.trim();
+    const token = options.token?.trim() || undefined;
     const repository = options.repository.trim();
+    const connectionId = options.connectionId?.trim() || undefined;
     let parsed: URL;
     try { parsed = new URL(endpoint); } catch { throw new Error('CONDUCTOR_SYMPHONY_URL must be an absolute HTTP(S) URL'); }
     if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('CONDUCTOR_SYMPHONY_URL must use http or https');
-    if (!token) throw new Error('CONDUCTOR_SYMPHONY_API_TOKEN is required');
-    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) throw new Error('CONDUCTOR_SYMPHONY_REPOSITORY must be owner/repository');
+    if (!token && !(options.credentialResolver && connectionId)) throw new Error('oh-my-symphony authentication requires a token or connected credential');
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) throw new Error('oh-my-symphony repository must be owner/repository');
     this.endpoint = endpoint; this.token = token; this.repository = repository;
+    this.credentialResolver = options.credentialResolver;
+    this.connectionId = connectionId;
     this.fetchImpl = options.fetchImpl ?? fetch; this.timeoutMs = options.timeoutMs ?? 10000; this.now = options.now ?? (() => new Date());
   }
 
   async getCapabilities(): Promise<CapabilityAvailability[]> {
+    const authenticated = Boolean(await this.resolveToken().catch(() => undefined));
     return [
-      { capability: 'worker-runtime.read', available: true, provider: this.id, access: 'read', auth: 'ready', health: 'ready', diagnostics: [] },
-      { capability: 'worker-runtime.control', available: true, provider: this.id, access: 'execute', auth: 'ready', health: 'ready', diagnostics: [] },
+      { capability: 'worker-runtime.read', available: true, provider: this.id, access: 'read', auth: authenticated ? 'ready' : 'required', health: authenticated ? 'ready' : 'unavailable', diagnostics: [] },
+      { capability: 'worker-runtime.control', available: true, provider: this.id, access: 'execute', auth: authenticated ? 'ready' : 'required', health: authenticated ? 'ready' : 'unavailable', diagnostics: [] },
     ];
   }
 
@@ -73,10 +80,22 @@ export class OhMySymphonyProvider implements WorkerRuntimeControlProvider {
       recoveryPreserved: typeof payload.recovery_preserved === 'boolean' ? payload.recovery_preserved : null, observedAt: this.now().toISOString() };
   }
 
+  private async resolveToken(): Promise<string | undefined> {
+    if (this.token) return this.token;
+    if (!this.credentialResolver || !this.connectionId) return undefined;
+    return (await this.credentialResolver.resolve({
+      provider: this.id,
+      connectionId: this.connectionId,
+      accountId: this.repository,
+    }))?.token;
+  }
+
   private async request(path: string, method: 'GET' | 'POST'): Promise<Record<string, unknown>> {
     const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await this.fetchImpl(this.endpoint + path, { method, headers: { accept: 'application/json', authorization: 'Bearer ' + this.token, ...(method === 'POST' ? { 'content-type': 'application/json' } : {}) }, signal: controller.signal });
+      const token = await this.resolveToken();
+      if (!token) throw { code: 'AUTH_REQUIRED', message: 'oh-my-symphony credential is not connected', source: this.id };
+      const response = await this.fetchImpl(this.endpoint + path, { method, headers: { accept: 'application/json', authorization: 'Bearer ' + token, ...(method === 'POST' ? { 'content-type': 'application/json' } : {}) }, signal: controller.signal });
       if (!response.ok) {
         const code = response.status === 401 || response.status === 403 ? 'AUTH_REQUIRED' : response.status === 404 ? 'NOT_FOUND' : response.status === 409 ? 'CONFLICT' : response.status >= 500 ? 'TRANSIENT' : 'COMMAND_FAILED';
         throw { code, message: 'oh-my-symphony request failed: ' + method + ' ' + path + ' -> ' + response.status, source: this.id };
