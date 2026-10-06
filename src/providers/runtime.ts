@@ -53,6 +53,7 @@ import type {
   DeploymentLogs,
   VercelProjectInput, VercelReadProjectInput, VercelDeploymentInput, VercelGitDeploymentInput, VercelEnvInput, VercelEnvEditInput, VercelEnvRemoveInput, VercelRuntimeLogsInput, VercelVcrRepositoryInput, VercelVcrCreateInput, VercelVcrListInput, VercelVcrImageListInput, VercelVcrImageDeleteInput,
   ProviderUsageSnapshot,
+  WorkerRuntimeStatusProjection,
 } from '../runtime/types.js';
 
 export interface RuntimeCapabilityProvider {
@@ -145,6 +146,17 @@ export interface VercelOperationsProvider extends DeploymentReadProvider {
   removeEnvironment(input: VercelEnvRemoveInput): Promise<Record<string, unknown>>;
 }
 
+export type WorkerRuntimeAction = 'pause' | 'resume' | 'terminate';
+
+export interface WorkerRuntimeControlProvider extends RuntimeCapabilityProvider, OperationPreflightProvider {
+  readonly repository: string;
+  getRuntimeStatus(): Promise<WorkerRuntimeStatusProjection>;
+  setDispatchEnabled(enabled: boolean): Promise<{ provider: 'oh-my-symphony'; repository: string; dispatchEnabled: boolean; observedAt: string }>;
+  controlWorker(identifier: string, action: WorkerRuntimeAction): Promise<{
+    provider: 'oh-my-symphony'; repository: string; identifier: string; action: WorkerRuntimeAction;
+    accepted: boolean; paused: boolean | null; recoveryPreserved: boolean | null; observedAt: string;
+  }>;
+}
 export interface RepositoryAcquisitionProvider extends RuntimeCapabilityProvider {
   preflightRepositoryAcquisition(input: RepositoryAcquisitionPreflightInput): Promise<RepositoryAcquisitionPreflight>;
   acquireRepository(input: AcquireRepositoryInput): Promise<RepositoryAcquisitionResult>;
