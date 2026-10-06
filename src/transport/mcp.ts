@@ -31,7 +31,9 @@ const errorSchema = z.object({
 
 const runtimeOperationSchema = z.enum([
   'capabilities', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
-  'work.bootstrap', 'repository.audit', 'evidence.bundle', 'development.status', 'pull-request.status', 'source.discover', 'source.artifact.read', 'ci.run.read', 'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'deployment.vcr.list', 'deployment.vcr.images.list', 'work-item.status', 'work-item.list',
+  'work.bootstrap', 'repository.audit', 'evidence.bundle', 'development.status', 'pull-request.status', 'source.discover', 'source.artifact.read', 'ci.run.read',
+  'worker-runtime.status', 'worker-runtime.dispatch', 'worker-runtime.stop-dispatch', 'worker-runtime.pause', 'worker-runtime.resume', 'worker-runtime.terminate',
+  'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'deployment.vcr.list', 'deployment.vcr.images.list', 'work-item.status', 'work-item.list',
   'repository.acquire', 'lifecycle.advance', 'lifecycle.resume',
   'git.branch.create', 'git.integration.bootstrap', 'git.branch.delete', 'git.commit.create', 'git.workflow.commit', 'git.push',
   'pull-request.create', 'pull-request.comment.create', 'pull-request.labels.update',
@@ -78,7 +80,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v14'),
+      catalogVersion: z.literal('conductor.catalog.v15'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -662,6 +664,61 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     writeTool('deployment.vcr.image.delete', 'Delete exact Vercel Container Registry image', 'Delete one exact image ID + manifest digest only after Conductor proves it is unreferenced by protected current deployments. Until authoritative reachability is available, the operation fails closed before DELETE.', z.object({ ...base, name: z.string().min(1).max(128).regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u), imageId: z.string().min(1).max(256), expectedManifestDigest: z.string().min(1).max(512) }), input => runtime.vercelVcrImageDelete(input), true);
   }
 
+  if (runtime.workerRuntimeReadEnabled) {
+    server.registerTool('worker-runtime.status', {
+      title: 'Read autonomous worker runtime status',
+      description: 'Read bounded oh-my-symphony dispatch state and exact issue/run/thread/workspace identity for the configured repository.',
+      inputSchema: z.object({ project: projectSchema }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => result(await runtime.workerRuntimeStatus(input)));
+  }
+
+  if (runtime.workerRuntimeControlEnabled) {
+    server.registerTool('worker-runtime.dispatch', {
+      title: 'Dispatch one exact DevOS-ready issue',
+      description: 'Verify the exact GitHub issue is Ready and automation-eligible, prove there is no competing eligible canary work, then enable oh-my-symphony dispatch. This does not authorize Main.',
+      inputSchema: z.object({ project: projectSchema, workContext: workContextSchema, issueNumber: z.number().int().positive() }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.workerRuntimeDispatch({ project: input.project, issueNumber: input.issueNumber }));
+    });
+
+    server.registerTool('worker-runtime.stop-dispatch', {
+      title: 'Stop new autonomous dispatch',
+      description: 'Disable new oh-my-symphony dispatch for the exact configured project without terminating or resetting existing workers.',
+      inputSchema: z.object({ project: projectSchema, workContext: workContextSchema }),
+      outputSchema: readReceiptSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      _meta: { securitySchemes: oauthWriteSecurity },
+    }, async (input, extra) => {
+      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      return result(await runtime.workerRuntimeStopDispatch({ project: input.project }));
+    });
+
+    const workerIdentifier = z.string().regex(/^GH-[1-9]\\d*$/u);
+    const workerActions = ['pause', 'resume', 'terminate'] as const;
+    for (const action of workerActions) {
+      const operation = ('worker-runtime.' + action) as 'worker-runtime.pause' | 'worker-runtime.resume' | 'worker-runtime.terminate';
+      server.registerTool(operation, {
+        title: action + ' exact autonomous worker',
+        description: action === 'terminate'
+          ? 'Terminate one exact oh-my-symphony worker while preserving runtime recovery identity; this is not destructive reset.'
+          : action + ' one exact oh-my-symphony worker through the runtime native control semantics.',
+        inputSchema: z.object({ project: projectSchema, workContext: workContextSchema, identifier: workerIdentifier }),
+        outputSchema: readReceiptSchema,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: action !== 'terminate', openWorldHint: true },
+        _meta: { securitySchemes: oauthWriteSecurity },
+      }, async (input, extra) => {
+        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        return result(await runtime.workerRuntimeControl(operation, { project: input.project, identifier: input.identifier }));
+      });
+    }
+  }
   if (runtime.workItemReadEnabled) {
     server.registerTool('work-item.status', {
       title: 'Read work item status',
@@ -1172,6 +1229,7 @@ function requireWriteScope(scopes?: string[]): void {
 
 function writeAction(operation: string): WorkAction | undefined {
   if (operation.startsWith('work-item.')) return ['work-item.status', 'work-item.list'].includes(operation) ? undefined : 'route-work';
+  if (operation.startsWith('worker-runtime.')) return operation === 'worker-runtime.status' ? undefined : 'develop';
   if (operation === 'pull-request.status') return undefined;
   if (operation.startsWith('deployment.') && !['deployment.status','deployment.logs','deployment.audit','deployment.runtime-logs','deployment.env.list','deployment.vcr.get','deployment.vcr.list','deployment.vcr.images.list'].includes(operation)) return 'develop';
   if (operation.startsWith('lifecycle.')) return 'develop';

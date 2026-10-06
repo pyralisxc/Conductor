@@ -16,6 +16,8 @@ import {
   type WorkItemMutationProvider,
   type DeploymentReadProvider,
   type VercelOperationsProvider,
+  type WorkerRuntimeControlProvider,
+  type WorkerRuntimeAction,
 } from '../providers/runtime.js';
 import { normalizeToolError } from './errors.js';
 import {
@@ -96,6 +98,10 @@ import {
   type DeploymentProjectStatus,
   type DeploymentLogs,
   type VercelProjectInput, type VercelReadProjectInput, type VercelDeploymentInput, type VercelGitDeploymentInput, type VercelEnvInput, type VercelEnvEditInput, type VercelEnvRemoveInput, type VercelRuntimeLogsInput, type VercelVcrRepositoryInput, type VercelVcrCreateInput, type VercelVcrListInput, type VercelVcrImageListInput, type VercelVcrImageDeleteInput,
+  type WorkerRuntimeDispatchInput,
+  type WorkerRuntimeProjectInput,
+  type WorkerRuntimeWorkerInput,
+  type WorkerRuntimeStatusProjection,
 } from './types.js';
 import { IdempotentMutationExecutor } from './idempotency.js';
 
@@ -207,6 +213,14 @@ const VERCEL_MUTATION_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'deployment.vcr.image.delete', description: 'Delete one exact VCR image only after Conductor proves exact identity and that no protected current deployment references it; otherwise fail closed.', mutates: true },
 ];
 
+const WORKER_RUNTIME_DEFINITIONS: readonly ToolDefinition[] = [
+  { name: 'worker-runtime.status', description: 'Read bounded oh-my-symphony dispatch and live worker identity for the exact configured repository.', mutates: false },
+  { name: 'worker-runtime.dispatch', description: 'Verify one exact DevOS Ready + automation-eligible GitHub issue is the sole eligible canary target, then enable Symphony dispatch.', mutates: true },
+  { name: 'worker-runtime.stop-dispatch', description: 'Disable new Symphony dispatch without terminating or deleting active/recoverable workers.', mutates: true },
+  { name: 'worker-runtime.pause', description: 'Pause one exact Symphony worker at a safe turn boundary.', mutates: true },
+  { name: 'worker-runtime.resume', description: 'Resume one exact paused Symphony worker or retry-held continuation.', mutates: true },
+  { name: 'worker-runtime.terminate', description: 'Terminate one exact worker while preserving Symphony recovery identity; this is not destructive reset.', mutates: true },
+];
 const WORK_ITEM_READ_DEFINITIONS: readonly ToolDefinition[] = [
   { name: 'work-item.status', description: 'Read one normalized durable work item.', mutates: false },
   { name: 'work-item.list', description: 'List normalized durable work items for one project, optionally filtered by status.', mutates: false },
@@ -283,6 +297,7 @@ export interface ConductorToolRuntimeOptions {
   workItemProvider?: WorkItemMutationProvider;
   workItemCandidateProvider?: WorkItemCandidateReadProvider;
   deploymentProvider?: VercelOperationsProvider;
+  workerRuntimeProvider?: WorkerRuntimeControlProvider;
 }
 
 export class ConductorToolRuntime {
@@ -305,6 +320,7 @@ export class ConductorToolRuntime {
   private readonly workItemProvider?: WorkItemMutationProvider;
   private readonly workItemCandidateProvider?: WorkItemCandidateReadProvider;
   private readonly deploymentProvider?: VercelOperationsProvider;
+  private readonly workerRuntimeProvider?: WorkerRuntimeControlProvider;
 
   constructor(options: ConductorToolRuntimeOptions = {}) {
     this.providers = options.providers ?? [];
@@ -324,6 +340,7 @@ export class ConductorToolRuntime {
     this.workItemProvider = options.workItemProvider;
     this.workItemCandidateProvider = options.workItemCandidateProvider;
     this.deploymentProvider = options.deploymentProvider;
+    this.workerRuntimeProvider = options.workerRuntimeProvider;
   }
 
   private captureProviderUsage(): Map<string, ProviderUsageSnapshot> {
@@ -441,6 +458,68 @@ export class ConductorToolRuntime {
     return Boolean(this.workItemProvider && this.mutationExecutor);
   }
 
+  get workerRuntimeReadEnabled(): boolean {
+    return Boolean(this.workerRuntimeProvider);
+  }
+
+  get workerRuntimeControlEnabled(): boolean {
+    return Boolean(this.workerRuntimeProvider && this.workItemProvider);
+  }
+
+  async workerRuntimeStatus(input: WorkerRuntimeProjectInput): Promise<ExecutionReceipt<WorkerRuntimeStatusProjection>> {
+    const project = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return this.executeRead('worker-runtime.status', { kind: 'project', id: project.id, ref: project.ref }, async () => {
+      const provider = this.requireWorkerRuntimeProvider(project);
+      return { result: await provider.getRuntimeStatus() };
+    });
+  }
+
+  async workerRuntimeDispatch(input: WorkerRuntimeDispatchInput): Promise<ExecutionReceipt<Record<string, unknown>>> {
+    const project = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return this.executeRead<Record<string, unknown>>('worker-runtime.dispatch', { kind: 'project', id: project.id, ref: project.ref }, async () => {
+      const provider = this.requireWorkerRuntimeProvider(project);
+      if (!this.workItemProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'Exact worker dispatch requires the GitHub work-item provider' };
+      const target = await this.workItemProvider.getWorkItemStatus({ project, issueNumber: input.issueNumber });
+      const targetLabels = target.labels.map((label) => label.toLowerCase());
+      if (target.state !== 'open' || target.status !== 'ready' || !targetLabels.includes('automation-eligible')) throw { code: 'CONFLICT', message: 'Worker dispatch requires an open DevOS Ready issue with the automation-eligible label' };
+      const active = await this.workItemProvider.listWorkItems({ project, statuses: ['ready', 'in-progress', 'review'], limit: 100 });
+      if (active.truncated) throw { code: 'CONFLICT', message: 'Worker dispatch refuses truncated active-work inventory' };
+      const competitors = active.items.filter((item) => item.issueNumber !== target.issueNumber && item.state === 'open' && item.labels.map((label) => label.toLowerCase()).includes('automation-eligible'));
+      if (competitors.length > 0) throw { code: 'CONFLICT', message: 'Exact worker dispatch refused because another automation-eligible active issue exists' };
+      const status = await provider.getRuntimeStatus();
+      const identifier = 'GH-' + target.issueNumber;
+      const foreignRuns = status.running.filter((run) => run.issueIdentifier && run.issueIdentifier !== identifier);
+      if (foreignRuns.length > 0) throw { code: 'CONFLICT', message: 'Exact worker dispatch refused while another worker is active' };
+      const existing = status.running.find((run) => run.issueIdentifier === identifier);
+      if (existing) return { result: { provider: provider.id, repository: provider.repository, issueNumber: target.issueNumber, identifier, alreadyRunning: true, dispatchEnabled: status.dispatchEnabled, run: existing } };
+      const dispatch = await provider.setDispatchEnabled(true);
+      return { result: { provider: provider.id, repository: provider.repository, issueNumber: target.issueNumber, identifier, alreadyRunning: false, dispatchEnabled: dispatch.dispatchEnabled, acceptedAt: dispatch.observedAt } };
+    });
+  }
+
+  async workerRuntimeStopDispatch(input: WorkerRuntimeProjectInput): Promise<ExecutionReceipt<Record<string, unknown>>> {
+    const project = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return this.executeRead('worker-runtime.stop-dispatch', { kind: 'project', id: project.id, ref: project.ref }, async () => {
+      const provider = this.requireWorkerRuntimeProvider(project);
+      return { result: await provider.setDispatchEnabled(false) };
+    });
+  }
+
+  async workerRuntimeControl(operation: 'worker-runtime.pause' | 'worker-runtime.resume' | 'worker-runtime.terminate', input: WorkerRuntimeWorkerInput): Promise<ExecutionReceipt<Record<string, unknown>>> {
+    const project = this.projectResolver?.resolveProjectReference(input.project) ?? input.project;
+    return this.executeRead(operation, { kind: 'project', id: project.id, ref: project.ref }, async () => {
+      const provider = this.requireWorkerRuntimeProvider(project);
+      const action = operation.split('.').at(-1) as WorkerRuntimeAction;
+      return { result: await provider.controlWorker(input.identifier, action) };
+    });
+  }
+
+  private requireWorkerRuntimeProvider(project: ProjectReference): WorkerRuntimeControlProvider {
+    if (!this.workerRuntimeProvider) throw { code: 'TOOL_UNAVAILABLE', message: 'oh-my-symphony worker runtime is not configured' };
+    const repository = project.repository ?? project.id;
+    if (repository.toLowerCase() !== this.workerRuntimeProvider.repository.toLowerCase()) throw { code: 'PERMISSION_DENIED', message: 'Worker runtime project does not match the configured Symphony repository' };
+    return this.workerRuntimeProvider;
+  }
   async capabilities(): Promise<ExecutionReceipt<CapabilityReport>> {
     return this.executeRead(
       'capabilities',
@@ -2237,6 +2316,7 @@ export class ConductorToolRuntime {
       ...(this.deploymentReadEnabled ? [...DEPLOYMENT_READ_DEFINITIONS, ...VERCEL_AUDIT_DEFINITIONS] : []),
       ...(this.vercelMutationEnabled ? VERCEL_MUTATION_DEFINITIONS : []),
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
+      ...(this.workerRuntimeReadEnabled ? WORKER_RUNTIME_DEFINITIONS : []),
       ...(this.sourceControlMutationsEnabled ? MUTATION_DEFINITIONS : []),
       ...(this.workflowCommitEnabled ? [WORKFLOW_MUTATION_DEFINITION] : []),
       ...(this.lifecycleAdvanceEnabled || this.lifecycleResumeEnabled ? LIFECYCLE_MUTATION_DEFINITIONS.filter((item) => item.name === 'lifecycle.advance' ? this.lifecycleAdvanceEnabled : this.lifecycleResumeEnabled) : []),
