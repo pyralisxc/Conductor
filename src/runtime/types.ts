@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v14' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v15' as const;
 
 export type ToolOperationName =
   | 'capabilities'
@@ -16,6 +16,12 @@ export type ToolOperationName =
   | 'ci.run.read'
   | 'work-item.status'
   | 'work-item.list'
+  | 'worker-runtime.status'
+  | 'worker-runtime.dispatch'
+  | 'worker-runtime.stop-dispatch'
+  | 'worker-runtime.pause'
+  | 'worker-runtime.resume'
+  | 'worker-runtime.terminate'
   | 'deployment.status'
   | 'deployment.logs'
   | 'deployment.audit'
@@ -85,6 +91,8 @@ export type DevelopmentCapability =
   | 'work-item.write'
   | 'ci.read'
   | 'development-intelligence.read'
+  | 'worker-runtime.read'
+  | 'worker-runtime.control'
   | 'deployment.read'
   | 'deployment.logs.read'
   | 'deployment.audit.read'
@@ -186,6 +194,39 @@ export interface ProjectReference {
   ref?: string;
 }
 
+export interface WorkerRuntimeRunProjection {
+  issueId: string | null;
+  issueIdentifier: string | null;
+  state: string | null;
+  paused: boolean;
+  runId: string | null;
+  continuedFromRunId: string | null;
+  processId: number | null;
+  processGroupId: number | null;
+  sessionId: string | null;
+  threadId: string | null;
+  turnId: string | null;
+  recoveryResumed: boolean;
+  workspacePath: string | null;
+  branch: string | null;
+}
+
+export interface WorkerRuntimeStatusProjection {
+  provider: 'oh-my-symphony';
+  repository: string;
+  dispatchEnabled: boolean;
+  counts: { running: number; retrying: number };
+  running: WorkerRuntimeRunProjection[];
+  observedAt: string;
+}
+
+export interface WorkerRuntimeDispatchInput {
+  project: ProjectReference;
+  issueNumber: number;
+}
+
+export interface WorkerRuntimeProjectInput { project: ProjectReference; }
+export interface WorkerRuntimeWorkerInput extends WorkerRuntimeProjectInput { identifier: string; }
 export interface GetOperationPreflightInput {
   project: ProjectReference;
   operation: RuntimeOperationName;
