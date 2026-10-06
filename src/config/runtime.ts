@@ -5,6 +5,7 @@ import { DevelopmentIntelligenceProvider, UnavailableDevelopmentIntelligenceProv
 import type { ToolRuntimeProvider } from '../providers/runtime.js';
 import { WorkspaceRuntimeProvider } from '../providers/workspace.js';
 import { VercelDeploymentProvider } from '../providers/vercel.js';
+import { OhMySymphonyProvider } from '../providers/oh-my-symphony.js';
 import { VERCEL_RUNTIME_CONNECTION_ID, vercelInstallationToken } from '../connections/vercel/installation.js';
 import { RedisProviderConnectionCredentialStore, RoutedProviderConnectionCredentialResolver } from '../connections/universal/provider-connections.js';
 import { providerCredentialVaultFromEnvironment } from '../connections/universal/credential-vault.js';
@@ -35,6 +36,9 @@ export interface RuntimeEnvironment extends Record<string, string | undefined> {
   CONDUCTOR_ENABLE_GITHUB_MUTATIONS?: string;
   CONDUCTOR_PROVIDER_CREDENTIAL_KEY?: string;
   CONDUCTOR_PROVIDER_CREDENTIAL_PREVIOUS_KEYS_JSON?: string;
+  CONDUCTOR_SYMPHONY_URL?: string;
+  CONDUCTOR_SYMPHONY_TOKEN?: string;
+  CONDUCTOR_SYMPHONY_REPOSITORY?: string;
   CONDUCTOR_SESSION_SECRET?: string;
   CONDUCTOR_VERCEL_TOKEN?: string;
   VERCEL_TOKEN?: string;
