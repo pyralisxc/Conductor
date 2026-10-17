@@ -26,6 +26,8 @@ function providerFor(input: {
   mergeable?: boolean | null;
   headRef?: string;
   baseRef?: string;
+  state?: 'open' | 'closed';
+  draft?: boolean;
 }) {
   const headSha = input.headSha ?? oldHead;
   return new GitHubRuntimeProvider({
@@ -52,8 +54,8 @@ function providerFor(input: {
         return Response.json({
           number: 12,
           html_url: 'https://github.com/pyralisxc/Development-Intelligence/pull/12',
-          state: 'open',
-          draft: false,
+          state: input.state ?? 'open',
+          draft: input.draft ?? false,
           merged: false,
           mergeable: input.mergeable ?? true,
           mergeable_state: 'clean',
@@ -93,7 +95,7 @@ async function status(
   provider: GitHubRuntimeProvider,
   previous?: {
     headSha: string;
-    orchestrationState?: 'merged' | 'draft' | 'external-gate-pending'
+    orchestrationState?: 'merged' | 'closed-unmerged' | 'draft' | 'external-gate-pending'
       | 'pre-seal-checkpoint' | 'sealed-head-verification-required'
       | 'action-required' | 'verification-failed' | 'merge-blocked'
       | 'integration-ready' | 'promotion-ready';
@@ -105,6 +107,46 @@ async function status(
     previous,
   });
 }
+
+test('closed unmerged candidates remain terminal despite failed or pending checks and seal changes', async () => {
+  const provider = providerFor({
+    state: 'closed',
+    draft: true,
+    mergeable: false,
+    headSha: newHead,
+    labels: ['seal-b'],
+    checks: [
+      { id: 1, name: 'verify', status: 'completed', conclusion: 'failure' },
+      { id: 2, name: 'self-seal', status: 'in_progress', conclusion: null },
+    ],
+    workflowRuns: [{ id: 9, name: 'verify', status: 'completed', conclusion: 'action_required' }],
+  });
+  const result = await status(provider, { headSha: oldHead, orchestrationState: 'verification-failed' });
+  assert.equal(result.state, 'closed');
+  assert.equal(result.merged, false);
+  assert.equal(result.orchestration.state, 'closed-unmerged');
+  assert.equal(result.orchestration.action, 'none');
+  assert.equal(result.orchestration.shouldAct, false);
+  assert.equal(result.orchestration.resumeWhen, null);
+  assert.equal(result.orchestration.seal.exactHeadVerificationRequired, false);
+  assert.equal(result.orchestration.transition.meaningful, true);
+  assert.equal(result.checks.items.length, 2);
+  assert.equal(result.workflowRuns.length, 1);
+  assert.ok(result.orchestration.signals.failed.length);
+  assert.ok(result.orchestration.signals.pending.length);
+
+  const unchanged = await status(provider, { headSha: newHead, orchestrationState: 'closed-unmerged' });
+  assert.equal(unchanged.orchestration.transition.meaningful, false);
+});
+
+test('reopened candidate resumes the normal exact-head verification gates', async () => {
+  const result = await status(providerFor({
+    checks: [{ id: 1, name: 'verify', status: 'in_progress', conclusion: null }],
+  }), { headSha: oldHead, orchestrationState: 'closed-unmerged' });
+  assert.equal(result.orchestration.state, 'external-gate-pending');
+  assert.equal(result.orchestration.transition.stateChanged, true);
+  assert.equal(result.orchestration.action, 'wait');
+});
 
 test('pending CI is summarized as an external gate with no agent action required', async () => {
   const provider = providerFor({

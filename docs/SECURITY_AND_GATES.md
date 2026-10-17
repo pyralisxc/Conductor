@@ -52,6 +52,12 @@ Every externally retried mutation must tolerate duplicate delivery.
 
 Use stable work, integration, reconciliation, release-candidate, and provider-event IDs.
 
+`git.commit.create` recovery records are scoped to the authenticated OAuth client, exact resolved canonical repository, and caller-known idempotency key. `operation.status` requires authenticated read access and cannot enumerate claims or expose another client's, another repository's, another operation's, or legacy unscoped records. It does not grant code-work authority. Original commit execution retains the existing write authorization and repository work-scope gates; the dedicated `git.workflow.commit` permission/review lane is unchanged.
+
+Commit checkpoints persist recovery identity metadata only: monotonic phase, repository, branch, expected head, and known parent-tree/tree/candidate SHAs. They do not persist raw source, commit messages, credentials, or secrets. The candidate and ref-update intent must be durably recorded before ref PATCH. Conductor re-reads the exact expected head before requesting advancement with GitHub REST `force: false`; this is fast-forward protection, not atomic expected-old-ref compare-and-swap.
+
+Incomplete retries and status perform provider reads only: the candidate's tree and sole parent must match the checkpoint, and the live branch must equal the candidate or one exact candidate-to-observed-head comparison must report `ahead` with the candidate as merge base. Expected-parent, diverged, deleted, or unavailable branch evidence remains unknown; no history scan is performed. Recovery may persist the proven terminal receipt but never recreate objects, retry a ref write, or automatically resume execution. Unknown or aged records do not prove failure or process liveness. Redis retention defaults to seven days after the last durable write; reads do not extend it, and `not-retained` does not prove that no effect occurred. This bounded idempotency recovery adds no scheduler, background worker, or project/operation ledger.
+
 ## Explainability
 
 Every meaningful mutation retains triggering request, governing policy, evidence/reason, resulting state, and owner override path.

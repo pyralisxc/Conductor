@@ -1,3 +1,4 @@
+import type { CommitCheckpoint, CommitMutationProgress } from '../runtime/commit-checkpoint.js';
 import type {
   CapabilityAvailability,
   PreflightCheck,
@@ -173,7 +174,8 @@ export interface SourceControlMutationProvider extends RuntimeCapabilityProvider
     approvalReference: string;
   }>;
   deleteBranch(input: DeleteBranchInput): Promise<{ repository: string; branch: string; commitSha: string; deleted: true; containedIn: string }>;
-  createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }>;
+  createCommit(input: CreateCommitInput, progress?: CommitMutationProgress): Promise<{ repository: string; branch: string; commitSha: string }>;
+  reconcileCommit?(input: { project: ProjectReference; checkpoint: CommitCheckpoint }): Promise<{ repository: string; branch: string; commitSha: string } | null>;
   createWorkflowCommit?(input: CreateWorkflowCommitInput): Promise<WorkflowCommitResult>;
   createPullRequest(input: CreatePullRequestInput): Promise<{ repository: string; pullRequestNumber: number; url: string }>;
   commentPullRequest(input: CommentPullRequestInput): Promise<{ repository: string; pullRequestNumber: number; commentId: string; url: string }>;
