@@ -1,3 +1,5 @@
+import { assertReleaseIdentityTransport, RELEASE_IDENTITY_MAX_BYTES } from '../runtime/release-identities.js';
+import { assertCommitCheckpoint, type CommitCheckpoint, type CommitMutationProgress } from '../runtime/commit-checkpoint.js';
 import type {
   CapabilityAvailability,
   NormalizedToolError,
@@ -278,6 +280,9 @@ function parsePromotionSeal(body: string | null | undefined): PromotionCandidate
   const end = body.indexOf(RELEASE_SEAL_SUFFIX, start + RELEASE_SEAL_PREFIX.length);
   if (end < 0) return null;
   const raw = body.slice(start + RELEASE_SEAL_PREFIX.length, end);
+  if (Buffer.byteLength(raw, 'utf8') > RELEASE_IDENTITY_MAX_BYTES) {
+    throw { code: 'CONFLICT', message: `Inline release seal exceeds the ${RELEASE_IDENTITY_MAX_BYTES}-byte transport budget` };
+  }
   try {
     const value = JSON.parse(raw) as { v?: unknown; head?: unknown; base?: unknown; workItems?: unknown };
     if (value.v !== 1
@@ -287,7 +292,6 @@ function parsePromotionSeal(body: string | null | undefined): PromotionCandidate
       || !/^[0-9a-f]{40}$/iu.test(value.base)
       || !Array.isArray(value.workItems)
       || value.workItems.length < 1
-      || value.workItems.length > 20
       || value.workItems.some((number) => !Number.isSafeInteger(number) || number < 1)) {
       return null;
     }
@@ -681,9 +685,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       };
     }
     const workItemNumbers = [...workItems].sort((a, b) => a - b);
-    if (workItemNumbers.length > 20) {
-      throw { code: 'CONFLICT', message: `Release inventory contains ${workItemNumbers.length} canonical work items; split the release into a smaller accepted batch` };
-    }
+    assertReleaseIdentityTransport(workItemNumbers);
     return {
       repository,
       defaultBranch,
@@ -1908,12 +1910,34 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     return { repository, branch: input.branch, commitSha: input.expectedHeadSha, deleted: true, containedIn };
   }
 
-  async createCommit(input: CreateCommitInput): Promise<{ repository: string; branch: string; commitSha: string }> {
+  async createCommit(input: CreateCommitInput, progress?: CommitMutationProgress): Promise<{ repository: string; branch: string; commitSha: string }> {
     const { repository, credential } = await this.writableRepository(input.project, GITHUB_WRITE_OPERATION_PERMISSIONS['git.commit.create']);
     if (input.files.some((file) => /^\.github\/workflows\//iu.test(file.path))) {
       throw { code: 'PERMISSION_DENIED', message: 'GitHub Actions workflow files must use the dedicated git.workflow.commit lane' };
     }
-    return await this.createCommitUsingCredential(repository, credential, input);
+    return await this.createCommitUsingCredential(repository, credential, input, progress);
+  }
+
+  async reconcileCommit(input: { project: ProjectReference; checkpoint: CommitCheckpoint }): Promise<{ repository: string; branch: string; commitSha: string } | null> {
+    const { repository, credential } = await this.readableRepository(input.project, { contents: 'read' });
+    const checkpoint = input.checkpoint;
+    assertCommitCheckpoint(checkpoint);
+    if (checkpoint.repository.toLowerCase() !== repository.toLowerCase()) throw { code: 'PERMISSION_DENIED', message: 'Commit checkpoint is outside the requested repository' };
+    if (!checkpoint.candidateCommitSha || !checkpoint.treeSha) return null;
+    const ref = await this.request<{ object: { sha: string } }>(repository, `/git/ref/heads/${encodePath(checkpoint.branch)}`, {}, credential);
+    if (ref.object.sha === checkpoint.expectedHeadSha) return null;
+    const commit = await this.request<{ sha: string; tree: { sha: string }; parents: { sha: string }[] }>(repository, `/git/commits/${checkpoint.candidateCommitSha}`, {}, credential);
+    if (commit.sha !== checkpoint.candidateCommitSha || commit.tree.sha !== checkpoint.treeSha
+      || commit.parents.length !== 1 || commit.parents[0]?.sha !== checkpoint.expectedHeadSha) {
+      throw { code: 'CONFLICT', message: 'Provider commit does not match the exact recovery checkpoint' };
+    }
+    if (ref.object.sha !== checkpoint.candidateCommitSha) {
+      assertSha(ref.object.sha, 'observedHeadSha');
+      const comparison = await this.request<{ status: string; merge_base_commit?: { sha: string } }>(repository,
+        `/compare/${checkpoint.candidateCommitSha}...${ref.object.sha}`, {}, credential);
+      if (comparison.status !== 'ahead' || comparison.merge_base_commit?.sha !== checkpoint.candidateCommitSha) return null;
+    }
+    return { repository, branch: checkpoint.branch, commitSha: checkpoint.candidateCommitSha };
   }
 
   async createWorkflowCommit(input: CreateWorkflowCommitInput): Promise<WorkflowCommitResult> {
@@ -1953,6 +1977,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     repository: string,
     credential: GitHubCredential,
     input: CreateCommitInput,
+    progress?: CommitMutationProgress,
   ): Promise<{ repository: string; branch: string; commitSha: string }> {
     assertWorkBranch(input.branch);
     assertSha(input.expectedHeadSha, 'expectedHeadSha');
@@ -1964,11 +1989,6 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     if (totalBytes > 5 * 1024 * 1024) {
       throw { code: 'PERMISSION_DENIED', message: 'Commit content exceeds the 5 MiB mutation limit' };
     }
-    const ref = await this.request<{ object: { sha: string } }>(repository, `/git/ref/heads/${encodePath(input.branch)}`, {}, credential);
-    if (ref.object.sha !== input.expectedHeadSha) {
-      throw { status: 409, message: `Branch head changed from expected ${input.expectedHeadSha} to ${ref.object.sha}` };
-    }
-    const parent = await this.request<{ tree: { sha: string } }>(repository, `/git/commits/${encodeURIComponent(input.expectedHeadSha)}`, {}, credential);
     const paths = new Set<string>();
     const validatedFiles = input.files.map((file) => {
       const path = validRepositoryPath(file.path);
@@ -1979,26 +1999,46 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       paths.add(path);
       return { ...file, path };
     });
-    const tree = await Promise.all(validatedFiles.map(async (file) => {
-      if (file.content === null) return { path: file.path, mode: '100644', type: 'blob', sha: null };
-      const blob = await this.request<{ sha: string }>(repository, '/git/blobs', {
-        method: 'POST',
-        body: JSON.stringify({ content: file.content, encoding: 'utf-8' }),
-      }, credential);
-      return { path: file.path, mode: '100644', type: 'blob', sha: blob.sha };
+    const identity = { kind: 'git-commit' as const, repository, branch: input.branch, expectedHeadSha: input.expectedHeadSha };
+    await progress?.checkpoint({ ...identity, phase: 'validated' });
+    const ref = await this.request<{ object: { sha: string } }>(repository, `/git/ref/heads/${encodePath(input.branch)}`, {}, credential);
+    if (ref.object.sha !== input.expectedHeadSha) {
+      throw { status: 409, message: `Branch head changed from expected ${input.expectedHeadSha} to ${ref.object.sha}` };
+    }
+    const parent = await this.request<{ tree: { sha: string } }>(repository, `/git/commits/${encodeURIComponent(input.expectedHeadSha)}`, {}, credential);
+    // GitHub creates UTF-8 blobs natively from tree entries. One bounded tree
+    // request replaces per-file blob uploads; a null sha preserves deletion.
+    const tree = validatedFiles.map((file) => ({
+      path: file.path,
+      mode: '100644',
+      type: 'blob',
+      ...(file.content === null ? { sha: null } : { content: file.content }),
     }));
     const createdTree = await this.request<{ sha: string }>(repository, '/git/trees', {
       method: 'POST',
       body: JSON.stringify({ base_tree: parent.tree.sha, tree }),
     }, credential);
+    const staged = { ...identity, parentTreeSha: parent.tree.sha, treeSha: createdTree.sha };
+    await progress?.checkpoint({ ...staged, phase: 'tree-created' });
     const commit = await this.request<{ sha: string }>(repository, '/git/commits', {
       method: 'POST',
       body: JSON.stringify({ message: input.message, tree: createdTree.sha, parents: [input.expectedHeadSha] }),
     }, credential);
+    const candidate = { ...staged, candidateCommitSha: commit.sha };
+    // Durable candidate identity is mandatory before the mutable ref effect.
+    await progress?.checkpoint({ ...candidate, phase: 'commit-created' });
+    const latest = await this.request<{ object: { sha: string } }>(repository, `/git/ref/heads/${encodePath(input.branch)}`, {}, credential);
+    if (latest.object.sha !== input.expectedHeadSha) throw { code: 'CONFLICT', message: 'Branch head changed before commit ref advancement' };
+    await progress?.checkpoint({ ...candidate, phase: 'ref-update-requested' });
     await this.request(repository, `/git/refs/heads/${encodePath(input.branch)}`, {
       method: 'PATCH',
       body: JSON.stringify({ sha: commit.sha, force: false }),
     }, credential);
+    if (progress) {
+      const observed = await this.request<{ object: { sha: string } }>(repository, `/git/ref/heads/${encodePath(input.branch)}`, {}, credential);
+      if (observed.object.sha !== commit.sha) throw { code: 'TRANSIENT', message: 'Exact commit ref advancement is not yet observed' };
+      await progress.checkpoint({ ...candidate, phase: 'ref-confirmed' });
+    }
     return { repository, branch: input.branch, commitSha: commit.sha };
   }
 
@@ -2329,6 +2369,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       }
     }
 
+    assertReleaseIdentityTransport(input.workItemNumbers ?? []);
     const workItemNumbers = [...new Set(input.workItemNumbers ?? [])];
     if (workItemNumbers.some((number) => !Number.isSafeInteger(number) || number < 1)) {
       throw { code: 'CONFLICT', message: 'workItemNumbers must contain only positive issue numbers' };
@@ -3146,6 +3187,11 @@ function derivePullRequestOrchestration(input: {
     action = 'none';
     shouldAct = false;
     summary = 'Pull request is already merged; no further orchestration action is required.';
+  } else if (input.pull.state === 'closed') {
+    state = 'closed-unmerged';
+    action = 'none';
+    shouldAct = false;
+    summary = 'Pull request is closed without merge; retained checks and source are historical evidence, not actionable integration work.';
   } else if (input.pull.draft) {
     state = 'draft';
     action = 'none';
@@ -3243,7 +3289,8 @@ function derivePullRequestOrchestration(input: {
         && headChanged === true
         && state !== 'promotion-ready'
         && state !== 'integration-ready'
-        && state !== 'merged',
+        && state !== 'merged'
+        && state !== 'closed-unmerged',
     },
     signals: {
       pending: pendingSignals,

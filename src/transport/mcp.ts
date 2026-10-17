@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import * as z from 'zod/v4';
+import { releaseIdentityFitsTransport, RELEASE_IDENTITY_MAX_BYTES } from '../runtime/release-identities.js';
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
 import { CONDUCTOR_WRITE_SCOPE } from './auth.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
@@ -30,7 +31,7 @@ const errorSchema = z.object({
 });
 
 const runtimeOperationSchema = z.enum([
-  'capabilities', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
+  'capabilities', 'operation.status', 'preflight_project', 'preflight_operation', 'repository.acquire.preflight',
   'work.bootstrap', 'repository.audit', 'evidence.bundle', 'development.status', 'pull-request.status', 'source.discover', 'source.artifact.read', 'ci.run.read',
   'worker-runtime.status', 'worker-runtime.dispatch', 'worker-runtime.stop-dispatch', 'worker-runtime.pause', 'worker-runtime.resume', 'worker-runtime.terminate',
   'deployment.status', 'deployment.logs', 'deployment.audit', 'deployment.runtime-logs', 'deployment.env.list', 'deployment.vcr.get', 'deployment.vcr.list', 'deployment.vcr.images.list', 'work-item.status', 'work-item.list',
@@ -80,7 +81,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v15'),
+      catalogVersion: z.literal('conductor.catalog.v16'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -236,6 +237,19 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       instructions: 'Call capabilities first in a fresh conversation. Establish the active repository from the user or workspace, then call work-scope.begin once and reuse its workContext for code and deployment writes; issue routing and maintenance in another repository do not change the active repository. Search for an existing issue before creating another; comment there when it owns the new evidence, and link a confirmed duplicate before closing it. Use preflight_project for readiness and preflight_operation with workContext for code/deployment writes or without it for issue routing. Treat unavailable or blocked checks as hard evidence; do not infer hidden access or project meaning.',
     },
   );
+
+  if (runtime.operationStatusEnabled) server.registerTool('operation.status', {
+    title: 'Look up an exact commit operation',
+    description: 'Look up this authenticated OAuth client’s git.commit.create claim in one exact repository using the original idempotencyKey, including while its initial call is pending. Reports last durable phase, not process liveness. A known candidate may be reconciled through provider reads only; no execution or ref update is resumed. Missing records do not prove that no effect happened. Records are retained for seven days after the last durable write.',
+    inputSchema: z.object({ project: projectSchema, idempotencyKey: z.string().min(8).max(200) }),
+    outputSchema: readReceiptSchema,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    _meta: { securitySchemes: oauthSecurity },
+  }, async (input, extra) => {
+    const clientId = extra.authInfo?.clientId;
+    if (!clientId) throw new Error('Authenticated client identity is required');
+    return result(await runtime.operationStatus(input, { clientId }));
+  });
 
   if (workScope) server.registerTool('work-scope.identity', {
     title: 'Identify this connected client for owner scope management',
@@ -520,7 +534,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         previous: z.object({
           headSha: z.string().regex(/^[0-9a-f]{40}$/i),
           orchestrationState: z.enum([
-            'merged', 'draft', 'external-gate-pending', 'pre-seal-checkpoint',
+            'merged', 'closed-unmerged', 'draft', 'external-gate-pending', 'pre-seal-checkpoint',
             'sealed-head-verification-required', 'action-required',
             'verification-failed', 'merge-blocked', 'integration-ready', 'promotion-ready',
           ]).optional(),
@@ -795,7 +809,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
           project: projectSchema, workContext: workContextSchema, issueNumber: z.number().int().positive(),
           maxPolls: z.number().int().min(0).max(4).default(2), pollIntervalMs: z.number().int().min(0).max(1500).default(500),
           preparePromotion: z.boolean().default(false),
-          promotionWorkItemNumbers: z.array(z.number().int().positive()).max(20).optional(),
+          promotionWorkItemNumbers: z.array(z.number().int().positive().safe()).refine(releaseIdentityFitsTransport, { message: `Inline release identity exceeds the ${RELEASE_IDENTITY_MAX_BYTES}-byte transport budget` }).optional(),
           idempotencyKey: z.string().min(8).max(200), continuation: z.string().min(20).max(4096).optional(),
         }),
         outputSchema: compositeMutationOutputSchema,
@@ -906,7 +920,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
     server.registerTool('git.commit.create', {
       title: 'Commit files to a work branch',
-      description: 'Create one bounded commit, including tracked-file deletions via null content, and advance a work/* branch only when its head matches expectedHeadSha.',
+      description: 'Create one bounded commit, including tracked-file deletions via null content, and advance a work/* branch only from expectedHeadSha with non-force protection. operation.status can inspect the original idempotencyKey while pending or after response loss. An incomplete matching retry reconciles a known exact candidate read-only and never blindly restarts execution.',
       inputSchema: z.object({
         project: projectSchema,
         workContext: workContextSchema,
@@ -921,7 +935,9 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
       await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
-      return result(await runtime.createCommit(withoutWorkContext(input)));
+      const clientId = extra.authInfo?.clientId;
+      if (!clientId) throw new Error('Authenticated client identity is required');
+      return result(await runtime.createCommit(withoutWorkContext(input), { clientId }));
     });
 
     if (runtime.workflowCommitEnabled) {
@@ -958,7 +974,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         title: z.string().min(1).max(256),
         body: z.string().optional(),
         draft: z.boolean().optional(),
-        workItemNumbers: z.array(z.number().int().positive()).max(20).optional().describe('Canonical GitHub issue numbers carried by this transport/promotion PR'),
+        workItemNumbers: z.array(z.number().int().positive().safe()).refine(releaseIdentityFitsTransport, { message: `Inline release identity exceeds the ${RELEASE_IDENTITY_MAX_BYTES}-byte transport budget` }).optional().describe('Canonical GitHub issue numbers carried by this transport/promotion PR; bounded by serialized identity bytes, not issue count'),
         idempotencyKey: z.string().min(8).max(200),
       }),
       outputSchema: mutationOutputSchema,

@@ -1,8 +1,9 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v15' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v16' as const;
 
 export type ToolOperationName =
   | 'capabilities'
+  | 'operation.status'
   | 'preflight_project'
   | 'preflight_operation'
   | 'repository.acquire.preflight'
@@ -827,6 +828,7 @@ export type PullRequestMergeMethod = 'merge' | 'squash' | 'rebase';
 
 export type PullRequestOrchestrationState =
   | 'merged'
+  | 'closed-unmerged'
   | 'draft'
   | 'external-gate-pending'
   | 'pre-seal-checkpoint'
