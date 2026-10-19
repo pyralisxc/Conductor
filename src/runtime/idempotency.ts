@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { traceCommitBoundary } from '../transport/request-correlation.js';
 import { ConductorToolError, normalizeToolError } from './errors.js';
 import { assertCommitCheckpoint, type CommitCheckpoint, type CommitMutationProgress } from './commit-checkpoint.js';
 import {
@@ -169,7 +170,10 @@ export class IdempotentMutationExecutor {
     }
     const operationId = this.createOperationId();
     const startedAt = this.now().toISOString();
-    const claim = await this.store.claim({
+    if (input.operation === 'git.commit.create') traceCommitBoundary('claim-attempt');
+    let claim: IdempotencyClaim;
+    try {
+      claim = await this.store.claim({
       key: storageKey,
       fingerprint: input.fingerprint,
       operationId,
@@ -180,7 +184,12 @@ export class IdempotentMutationExecutor {
       target: input.target,
       updatedAt: startedAt,
       revision: 0,
-    });
+      });
+      if (input.operation === 'git.commit.create') traceCommitBoundary('claim-result', { claimStatus: claim.status });
+    } catch (error) {
+      if (input.operation === 'git.commit.create') traceCommitBoundary('claim-error');
+      throw error;
+    }
 
     if (claim.status !== 'claimed' && input.scope && !this.matchesScopedRecord(input, claim.record)) {
       return this.failureReceipt(input, operationId, startedAt, new ConductorToolError({ code: 'CONFLICT', message: 'Idempotency claim is not attributable to this scoped operation', source: 'idempotency' }), false);
