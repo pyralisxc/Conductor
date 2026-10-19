@@ -117,6 +117,8 @@ interface GitHubCompareResponse {
   ahead_by?: number;
   total_commits?: number;
   commits?: Array<{ sha: string }>;
+  base_commit?: { sha?: string; commit?: { tree?: { sha?: string } } };
+  merge_base_commit?: { sha?: string; commit?: { tree?: { sha?: string } } };
 }
 
 interface GitHubIssueResponse {
@@ -604,7 +606,21 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
     const aheadBy = Number.isSafeInteger(comparison.ahead_by) ? comparison.ahead_by! : comparison.commits?.length ?? 0;
     const commits = (comparison.commits ?? []).map((commit) => commit.sha.toLowerCase());
     if (!['ahead', 'identical'].includes(comparison.status ?? '')) {
-      throw { code: 'CONFLICT', message: `Preview head ${input.expectedHeadSha} is not a clean descendant of Main base ${input.expectedBaseSha}` };
+      const base = comparison.base_commit;
+      const mergeBase = comparison.merge_base_commit;
+      const baseTree = base?.commit?.tree?.sha;
+      const mergeBaseTree = mergeBase?.commit?.tree?.sha;
+      // A merge-commit promotion adds Main ancestry without requiring a return PR.
+      // Equal exact base/merge-base trees prove there is no Main-only content to reconcile.
+      const unchangedMainTree = ['behind', 'diverged'].includes(comparison.status ?? '')
+        && typeof base?.sha === 'string' && base.sha.toLowerCase() === input.expectedBaseSha.toLowerCase()
+        && typeof mergeBase?.sha === 'string' && /^[0-9a-f]{40}$/iu.test(mergeBase.sha)
+        && typeof baseTree === 'string' && /^[0-9a-f]{40}$/iu.test(baseTree)
+        && typeof mergeBaseTree === 'string' && /^[0-9a-f]{40}$/iu.test(mergeBaseTree)
+        && baseTree.toLowerCase() === mergeBaseTree.toLowerCase();
+      if (!unchangedMainTree) {
+        throw { code: 'CONFLICT', message: `Preview head ${input.expectedHeadSha} is not a clean descendant of Main base ${input.expectedBaseSha}, and exact comparison proof does not establish an unchanged Main tree` };
+      }
     }
     if (aheadBy > 100 || commits.length !== aheadBy) {
       throw { code: 'CONFLICT', message: `Release delta contains ${aheadBy} commit(s); exact release inventory is bounded to 100 commits` };
