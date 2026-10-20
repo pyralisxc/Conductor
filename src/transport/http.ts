@@ -77,7 +77,7 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
     return withRequestCorrelation(async () => {
       const started = Date.now();
       const lengthHeader = request.headers['content-length'];
-      const parsedLength = typeof lengthHeader === 'string' && /^\\d+$/.test(lengthHeader) ? Number(lengthHeader) : null;
+      const parsedLength = parseContentLength(lengthHeader);
       traceCommitBoundary('http-admitted', { contentLength: parsedLength !== null && Number.isSafeInteger(parsedLength) ? parsedLength : null });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       const server = createConductorMcpServer(options.runtime, options.workScope);
@@ -105,6 +105,13 @@ declare module 'node:http' {
   interface IncomingMessage {
     auth?: Awaited<ReturnType<AccessTokenVerifier['verifyAccessToken']>>;
   }
+}
+
+/** Parse a numeric Content-Length header without exposing request data. */
+export function parseContentLength(value: string | string[] | undefined): number | null {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function bearerToken(authorization?: string): string | undefined {
