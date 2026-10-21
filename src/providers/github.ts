@@ -110,7 +110,7 @@ interface GitHubPullRequestResponse {
   merged_at?: string | null;
   body?: string | null;
   head: { ref: string; sha: string };
-  base: { ref: string; sha: string; repo?: { full_name: string } };
+  base: { ref: string; sha: string; repo?: { full_name: string; default_branch?: string } };
   labels?: Array<{ name?: string | null }>;
 }
 
@@ -3357,16 +3357,30 @@ function derivePullRequestOrchestration(input: {
     shouldAct = false;
     summary = 'No recognized verification result is observed yet for the exact PR head; unrelated provider checks do not prove the development gate.';
     resumeWhen = 'The verify check/workflow appears or the pull-request head SHA changes.';
-  } else if (['preview', 'vercel-preview'].includes(input.pull.head.ref.toLowerCase())) {
-    state = 'promotion-ready';
-    action = 'promotion-gate';
-    shouldAct = true;
-    summary = 'Verified Preview candidate is technically ready for the caller-owned Main promotion/authorization gate.';
   } else {
-    state = 'integration-ready';
-    action = 'integration-merge';
-    shouldAct = true;
-    summary = 'Exact-head verification is settled for work-to-Preview integration. Ready to integrate into Preview; this is not Preview deployment/proof and does not authorize Main promotion.';
+    const sourceRef = input.pull.head.ref.toLowerCase();
+    const baseRef = input.pull.base.ref.toLowerCase();
+    const defaultBranch = input.pull.base.repo?.default_branch?.toLowerCase();
+    const supportedPreviewBase = ['preview', 'vercel-preview'].includes(baseRef);
+    const supportedIntegrationSource = ['work/', 'repair/', 'audit/'].some((prefix) => sourceRef.startsWith(prefix));
+    const verifiedPreviewSource = ['preview', 'vercel-preview'].includes(sourceRef);
+    if (verifiedPreviewSource && !!defaultBranch && baseRef === defaultBranch && !supportedPreviewBase) {
+      state = 'promotion-ready';
+      action = 'promotion-gate';
+      shouldAct = true;
+      summary = 'Verified Preview candidate targets the repository default branch and is technically ready for the caller-owned Main promotion/authorization gate.';
+    } else if (supportedIntegrationSource && supportedPreviewBase) {
+      state = 'integration-ready';
+      action = 'integration-merge';
+      shouldAct = true;
+      summary = 'Exact-head verification is settled for a supported work/repair/audit source targeting Preview; this is not Preview deployment/proof and does not authorize Main promotion.';
+    } else {
+      state = 'external-gate-pending';
+      action = 'wait';
+      shouldAct = false;
+      summary = 'The PR source/base combination is outside supported automatic integration or promotion paths; no action is recommended.';
+      resumeWhen = 'The PR source/base refs or authoritative repository default-branch metadata changes.';
+    }
   }
 
   const stateChanged = input.previous?.orchestrationState === undefined
