@@ -286,7 +286,12 @@ export class PrEvents {
     for (let attempt = 0; attempt < 3; attempt++) {
       const loaded = await this.options.store.load();
       if (loaded.state.subscription?.id !== id) return {};
-      if (this.options.delegatedRecipient && (loaded.state.subscription.generation !== auth!.extra!.grantGeneration || !this.bindingMatches(loaded.state.subscription))) throw new Error('Recipient binding requires owner teardown');
+      if (this.options.delegatedRecipient) {
+        if (!this.bindingMatches(loaded.state.subscription) || (loaded.state.subscription.generation !== auth!.extra!.grantGeneration && loaded.state.subscription.binding?.phase === 'active')) throw new Error('Recipient binding requires owner teardown');
+        // A fresh current grant may explicitly cancel the same principal/resource/recipient's
+        // obsolete non-delivering binding. It cannot refresh, activate or inherit that binding.
+        await this.grant(owner, auth!.extra!.grantGeneration);
+      }
       delete loaded.state.subscription;
       if (await this.options.store.save(loaded.version, loaded.state)) return {};
     }

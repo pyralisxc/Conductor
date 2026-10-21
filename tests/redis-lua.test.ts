@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { disposableRedis } from './helpers/disposable-redis.js';
 import { RedisOAuthGrantStore, GRANT_TRANSITION_SCRIPT, oauthGrantKey, requireOAuthGrant } from '../src/transport/oauth-grant-store.js';
-import { RedisPrEventStore, type PrEventState } from '../src/runtime/pr-events.js';
+import { VersionedProviderCredentialVault } from '../src/connections/universal/credential-vault.js';
+import type { PullRequestStatus } from '../src/runtime/types.js';
+import { PrEvents, RedisPrEventStore, type PrEventState } from '../src/runtime/pr-events.js';
 
 function deferred() {
   let resolve!: () => void;
@@ -123,6 +125,72 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     claim.state.subscription!.binding!.phase = 'active';
     assert.equal(await events.save(claim.version, claim.state), false);
     assert.equal((await events.load()).state.subscription!.binding!.phase, 'challenging');
+  });
+
+  await t.test('concurrent delegated subscribe and activation have one winner through production Lua', { timeout: 30000 }, async () => {
+    const owner = identity('concurrent-delegated'); const grant = await grants.consent(owner, ['conductor.read'], expiry());
+    const auth = { token: 'isolated-test', clientId: owner.clientId, scopes: ['conductor.read'], extra: { ...owner, grantGeneration: grant.generation } };
+    const target = { repository: 'owner/repo', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) };
+    const key = 'test:concurrent-delegated';
+    const store = new RedisPrEventStore(redis.client, key);
+    const delivery = { url: 'https://unused.example/callback', secret: `whsec_${Buffer.alloc(32, 9).toString('base64')}` };
+    const mode = { clientFingerprint: createHash('sha256').update(owner.clientId).digest('hex'), activation: undefined as undefined | { bindingId: string; url: string; generation: string; attemptId: string; expiresAt: number } };
+    const posts: string[][] = [[], []]; const reads = [0, 0];
+    const callers = posts.map((sent, caller) => new PrEvents({ target, owner, installationId: 123, delegatedRecipient: mode,
+      webhookSecret: 'isolated-only', grants, store: new RedisPrEventStore(redis.client, key), validateRecipient: async () => {},
+      vault: new VersionedProviderCredentialVault({ legacyPurpose: 'isolated', currentKey: 'isolated-vault-key'.repeat(3) }),
+      source: { async read() { reads[caller]++; return { ...target, head: { sha: target.headSha }, base: { sha: target.baseSha, ref: 'preview' },
+        state: 'open', merged: false, draft: false, checks: { total: 0, pending: 0, successful: 0, failed: 0, neutral: 0, skipped: 0 } } as unknown as PullRequestStatus; } },
+      post: async (_url, body) => { sent.push(body); const data = JSON.parse(body); return { status: 200, body: JSON.stringify({ challenge: data.challenge }) }; },
+    }));
+    // Hold both actual EVAL requests at the adapter boundary, then let Redis arbitrate.
+    // No modeled save result or modified production Lua is used.
+    const race = async (phase: string) => {
+      let arrivals = 0; const release = deferred();
+      redis.before(async args => {
+        if (String(args[0]).toLowerCase() !== 'eval' || args[3] !== key) return;
+        const serialized = args[Number(args[2]) + 4];
+        if (JSON.parse(String(serialized)).subscription?.binding?.phase !== phase) return;
+        if (++arrivals === 2) release.resolve();
+        await release.promise;
+      });
+      try {
+        const results = await Promise.allSettled(callers.map(caller => caller.subscribe(auth, target, delivery)));
+        assert.equal(arrivals, 2); return results;
+      } finally { redis.before(); }
+    };
+    const pending = await race('pending');
+    assert.equal(pending.filter(r => r.status === 'rejected' && /awaits explicit activation/.test(String(r.reason))).length, 1);
+    assert.equal(pending.filter(r => r.status === 'rejected' && /Pending binding changed/.test(String(r.reason))).length, 1);
+    assert.deepEqual(posts, [[], []]); assert.deepEqual(reads, [0, 0]);
+    const binding = (await store.load()).state.subscription!.binding!;
+    assert.equal(binding.phase, 'pending');
+    mode.activation = { bindingId: binding.id, url: delivery.url, generation: grant.generation, attemptId: randomUUID(), expiresAt: expiry() };
+    const activated = await race('challenging');
+    assert.equal(activated.filter(r => r.status === 'fulfilled').length, 1);
+    const loser = activated.findIndex(r => r.status === 'rejected'); assert.notEqual(loser, -1);
+    assert.match(String((activated[loser] as PromiseRejectedResult).reason), /Challenge claim changed/);
+    assert.deepEqual(posts[loser], []); assert.equal(reads[loser], 0);
+    assert.equal(posts.flat().length, 1); assert.equal(JSON.parse(posts.flat()[0]).type, 'verification');
+    const active = (await store.load()).state;
+    assert.equal(active.subscription!.binding!.id, binding.id); assert.equal(active.subscription!.binding!.phase, 'active');
+    assert.deepEqual(active.usedBindingAttempts, [mode.activation.attemptId]);
+    assert.equal(active.deliveries.length, 0);
+    // Real durable grant revocation and fresh consent recover only by explicit teardown.
+    await callers[0].unsubscribe(auth, target, delivery.url);
+    await assert.rejects(callers[0].subscribe(auth, target, delivery), /awaits explicit activation/);
+    const obsolete = (await store.load()).state.subscription!.binding!.id;
+    await grants.revoke(owner, grant.generation);
+    await assert.rejects(callers[0].unsubscribe(auth, target, delivery.url));
+    const freshGrant = await grants.consent(owner, ['conductor.read'], expiry());
+    const freshAuth = { ...auth, extra: { ...auth.extra, grantGeneration: freshGrant.generation } };
+    await assert.rejects(callers[0].subscribe(freshAuth, target, delivery), /teardown/);
+    await callers[0].unsubscribe(freshAuth, target, delivery.url);
+    await assert.rejects(callers[0].subscribe(freshAuth, target, delivery), /awaits explicit activation/);
+    assert.notEqual((await store.load()).state.subscription!.binding!.id, obsolete);
+    await assert.rejects(callers[0].subscribe(freshAuth, target, delivery), /awaits explicit activation/);
+    assert.equal(posts.flat().length, 1);
+
   });
 
 });

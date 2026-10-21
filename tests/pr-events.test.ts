@@ -534,3 +534,24 @@ test('delegated preflight, challenge claim and before-read revocation failures s
     assert.equal(f.posts.length, 0, failure); assert.equal(f.applicationPosts().length, 0, failure);
   }
 });
+
+test('fresh consent can explicitly unsubscribe an obsolete pending binding without inheriting it', async () => {
+  const f = delegatedFixture(); await f.pending(); f.approve();
+  const originalId = (await f.store.load()).state.subscription!.binding!.id;
+  await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+  await assert.rejects(f.bridge.unsubscribe(auth, target, delivery.url));
+  assert.equal(await f.bridge.reconcile('revoked-pending'), 'inactive');
+  const grant = await f.options.grants.consent(owner, ['conductor.read'], f.options.now() + 3600000);
+  const fresh = { ...auth, extra: { ...auth.extra, grantGeneration: grant.generation } };
+  await assert.rejects(f.bridge.subscribe(fresh, target, delivery), /teardown/);
+  await assert.rejects(f.bridge.unsubscribe({ ...fresh, clientId: 'foreign' }, target, delivery.url));
+  await assert.rejects(f.bridge.unsubscribe(fresh, { ...target, pullRequestNumber: 8 }, delivery.url));
+  await f.bridge.unsubscribe(fresh, target, delivery.url + '/other');
+  assert.equal((await f.store.load()).state.subscription!.binding!.id, originalId);
+  await f.bridge.unsubscribe(fresh, target, delivery.url);
+  assert.equal((await f.store.load()).state.subscription, undefined);
+  await assert.rejects(f.bridge.subscribe(fresh, target, delivery), /awaits explicit activation/);
+  assert.notEqual((await f.store.load()).state.subscription!.binding!.id, originalId);
+  await assert.rejects(f.bridge.subscribe(fresh, target, delivery), /awaits explicit activation/);
+  assert.equal(f.posts.length, 0); assert.equal(f.reads(), 0);
+});
