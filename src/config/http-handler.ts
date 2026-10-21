@@ -1,3 +1,4 @@
+import { createConfiguredPrEvents } from './pr-events.js';
 import { createRuntimeFromEnvironment, parseRuntimeBindings } from './runtime.js';
 import { createConductorHttpHandler } from '../transport/http.js';
 import { createWorkScopeHttpHandler } from '../transport/work-scope-http.js';
@@ -30,6 +31,7 @@ export function createConfiguredHttpHandler() {
   const store = redisUrl && redisToken ? new RedisWorkScopeStore(redisUrl, redisToken) : undefined;
   const conductorHandler = createConductorHttpHandler({
     runtime,
+    events: createConfiguredPrEvents(runtime),
     publicUrl,
     oauthIssuer: publicUrl,
     verifier: new SelfHostedAccessTokenVerifier(),

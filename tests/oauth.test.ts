@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
 import test from 'node:test';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import {
   assertOAuthConfiguration,
   ConductorToolRuntime,

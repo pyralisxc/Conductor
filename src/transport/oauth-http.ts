@@ -1,3 +1,4 @@
+import type { OAuthGrantStore } from './oauth-grant-store.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleVercelConnectionRequest } from './vercel-connection-http.js';
 import { handleAscProviderBridgeRequest } from './asc-provider-bridge.js';
@@ -11,6 +12,8 @@ import {
 } from './owner-auth.js';
 import {
   authorizationRedirect,
+  revokeOAuthGrant,
+  oauthEventsEnabled,
   exchangeOAuthToken,
   issueAuthorizationCode,
   oauthAuthorizationServerMetadata,
@@ -86,6 +89,7 @@ export async function handleOAuthHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
   requestUrl: URL,
+  grants?: OAuthGrantStore,
 ): Promise<boolean> {
   if (await handleAscProviderBridgeRequest(req, res, requestUrl)) return true;
   if (await handleVercelConnectionRequest(req, res, requestUrl)) return true;
@@ -102,7 +106,7 @@ export async function handleOAuthHttpRequest(
 
   if (requestUrl.pathname === '/.well-known/oauth-authorization-server' && req.method === 'GET') {
     try {
-      json(res, 200, oauthAuthorizationServerMetadata(), true);
+      json(res, 200, oauthAuthorizationServerMetadata(Boolean(grants)), true);
     } catch (error) {
       oauthError(res, error);
     }
@@ -148,7 +152,7 @@ export async function handleOAuthHttpRequest(
       }
       try {
         const request = parseOAuthAuthorizationRequest(await readForm(req));
-        const code = await issueAuthorizationCode(request);
+        const code = await issueAuthorizationCode(request, grants);
         res.writeHead(303, { location: authorizationRedirect(request, code), 'cache-control': 'no-store' });
         res.end();
       } catch (error) {
@@ -168,10 +172,22 @@ export async function handleOAuthHttpRequest(
       return true;
     }
     try {
-      json(res, 200, await exchangeOAuthToken(await readForm(req)));
+      json(res, 200, await exchangeOAuthToken(await readForm(req), grants));
     } catch (error) {
       oauthError(res, error);
     }
+    return true;
+  }
+
+  if (requestUrl.pathname === '/oauth/revoke' && oauthEventsEnabled()) {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return true; }
+    const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+    if (!token) { json(res, 401, { error: 'invalid_token' }); return true; }
+    try {
+      const form = await readForm(req);
+      await revokeOAuthGrant(token, form.get('client_id') ?? '', grants);
+      json(res, 200, {});
+    } catch { json(res, 401, { error: 'invalid_token' }); }
     return true;
   }
 
