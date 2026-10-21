@@ -1,6 +1,8 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { request } from 'node:https';
+import type { LookupAddress } from 'node:dns';
+import type { ClientRequest, IncomingMessage } from 'node:http';
+import { request, type RequestOptions } from 'node:https';
 import { BlockList, isIP } from 'node:net';
 
 const blocked = new BlockList();
@@ -36,18 +38,25 @@ export function webhookSignature(secret: string, id: string, timestamp: string, 
 export interface CallbackResponse { status: number; body: string }
 export type CallbackPost = (url: string, body: string, headers: Record<string, string>) => Promise<CallbackResponse>;
 
-export function safeCallbackPost(hostname: string): CallbackPost {
+/** Narrow I/O seam for offline DNS-to-socket tests. Production uses Node's resolver and HTTPS client. */
+export interface CallbackNetwork {
+  resolve(hostname: string, options: { all: true; family: 4 }): Promise<LookupAddress[]>;
+  request(url: URL, options: RequestOptions, receive: (response: IncomingMessage) => void): ClientRequest;
+}
+const callbackNetwork: CallbackNetwork = { resolve: lookup, request };
+
+export function safeCallbackPost(hostname: string, network: CallbackNetwork = callbackNetwork): CallbackPost {
   return async (value, body, headers) => {
     const url = callbackUrl(value, hostname);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const addresses = await Promise.race([
-      lookup(url.hostname, { all: true, family: 4 }),
+      network.resolve(url.hostname, { all: true, family: 4 }),
       new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Callback DNS timeout')), 2000); }),
     ]).finally(() => { if (timer) clearTimeout(timer); });
     if (!addresses.length || addresses.some(({ address }) => !publicCallbackAddress(address))) throw new Error('Callback address is not public');
     const address = addresses[0].address;
     return new Promise((resolve, reject) => {
-      const req = request(url, {
+      const req = network.request(url, {
         method: 'POST', headers: { ...headers, 'Content-Length': String(Buffer.byteLength(body)) },
         // Pin the validated address; the URL hostname remains the TLS identity. No redirects or connection reuse.
         agent: false, family: 4, lookup: (_host, _options, done) => done(null, address, 4),
