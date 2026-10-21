@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { withRequestCorrelation, traceCommitBoundary } from './request-correlation.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
 import { TOOL_RUNTIME_CONTRACT_VERSION } from '../runtime/types.js';
@@ -73,12 +74,17 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
       return;
     }
 
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    const server = createConductorMcpServer(options.runtime, options.workScope);
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(request, response);
-    } catch {
+    return withRequestCorrelation(async () => {
+      const started = Date.now();
+      const lengthHeader = request.headers['content-length'];
+      const parsedLength = parseContentLength(lengthHeader);
+      traceCommitBoundary('http-admitted', { contentLength: parsedLength !== null && Number.isSafeInteger(parsedLength) ? parsedLength : null });
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      const server = createConductorMcpServer(options.runtime, options.workScope);
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(request, response);
+      } catch {
       if (!response.headersSent) {
         json(response, 500, {
           jsonrpc: '2.0',
@@ -86,10 +92,12 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
           id: null,
         });
       }
-    } finally {
-      await transport.close().catch(() => undefined);
-      await server.close().catch(() => undefined);
-    }
+      } finally {
+        traceCommitBoundary('http-completed', { statusCode: response.statusCode, durationMs: Date.now() - started });
+        await transport.close().catch(() => undefined);
+        await server.close().catch(() => undefined);
+      }
+    });
   };
 }
 
@@ -97,6 +105,13 @@ declare module 'node:http' {
   interface IncomingMessage {
     auth?: Awaited<ReturnType<AccessTokenVerifier['verifyAccessToken']>>;
   }
+}
+
+/** Parse a numeric Content-Length header without exposing request data. */
+export function parseContentLength(value: string | string[] | undefined): number | null {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function bearerToken(authorization?: string): string | undefined {

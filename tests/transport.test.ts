@@ -14,7 +14,15 @@ import {
 } from '../src/index.js';
 import type { SourceControlMutationProvider, SourceArtifactReadProvider, CiReadProvider } from '../src/index.js';
 import { compositeMutationOutputSchema } from '../src/transport/mcp.js';
+import { parseContentLength } from '../src/transport/http.js';
 
+test('parseContentLength accepts numeric byte lengths and rejects malformed values', () => {
+  assert.equal(parseContentLength('1044736'), 1_044_736);
+  assert.equal(parseContentLength('0'), 0);
+  assert.equal(parseContentLength('\\d'), null);
+  assert.equal(parseContentLength(undefined), null);
+  assert.equal(parseContentLength('9007199254740992'), null);
+});
 async function within<T>(promise: Promise<T>, timeoutMs = 5000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
