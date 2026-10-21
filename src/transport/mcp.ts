@@ -1,5 +1,5 @@
-import { PrEvents, PR_EVENT, prEventArguments } from '../runtime/pr-events.js';
-import { McpServer } from '@modelcontextprotocol/server';
+import { type PrEventService, PR_EVENT, prEventArguments, prEventCatalog, eventOwner } from '../runtime/pr-events.js';
+import { McpServer, ProtocolError } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { releaseIdentityFitsTransport, RELEASE_IDENTITY_MAX_BYTES } from '../runtime/release-identities.js';
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
@@ -209,7 +209,7 @@ const readReceiptSchema = z.object({ receipt: z.union([
   failedReceiptSchema,
 ]) });
 
-export function createConductorMcpServer(runtime: ConductorToolRuntime, workScope?: WorkScopeAuthorizer, events?: PrEvents): McpServer {
+export function createConductorMcpServer(runtime: ConductorToolRuntime, workScope?: WorkScopeAuthorizer, events?: PrEventService): McpServer {
   async function requireScopedWrite(auth: AuthInfo | undefined, action: WorkAction, project: ProjectReference, workContext?: string): Promise<void> {
     requireWriteScope(auth?.scopes);
     if (!workScope) throw new Error('Owner-managed work scope is not configured');
@@ -243,16 +243,32 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     // MCP Events is a draft extension absent from the SDK's capability type;
     // use its custom-method registration over the native 2026 transport.
     server.server.registerCapabilities({ events: {} } as ServerCapabilities & { events: Record<string, never> });
-    const delivery = z.object({ mode: z.literal('webhook'), url: z.string().max(2048) }).strict();
-    const identity = z.object({ name: z.literal(PR_EVENT), arguments: prEventArguments, delivery }).strict();
-    server.server.setRequestHandler('events/list', { params: z.object({ cursor: z.null().optional() }).strict().optional() },
-      async (_params, ctx) => events.list(ctx.http?.authInfo));
-    server.server.setRequestHandler('events/subscribe', { params: identity.extend({
-      delivery: delivery.extend({ secret: z.string().max(100) }),
-      cursor: z.null().optional(), ttlMs: z.number().int().min(1000).nullable().optional(),
-    }) }, async (params, ctx) => events.subscribe(ctx.http?.authInfo, params.arguments, params.delivery, params.ttlMs));
-    server.server.setRequestHandler('events/unsubscribe', { params: identity },
-      async (params, ctx) => events.unsubscribe(ctx.http?.authInfo, params.arguments, params.delivery.url));
+    if (events === 'discovery-only') {
+      const authorize = (auth: AuthInfo | undefined) => {
+        try { eventOwner(auth); }
+        catch { throw new ProtocolError(-32001, 'Authenticated conductor.read principal required'); }
+      };
+      server.server.setRequestHandler('events/list', { params: z.object({ cursor: z.null().optional() }).strict().optional() },
+        async (_params, ctx) => { authorize(ctx.http?.authInfo); return prEventCatalog(); });
+      // Do not parse delivery parameters, URLs or secrets in a disabled service.
+      for (const method of ['events/subscribe', 'events/unsubscribe'] as const) {
+        server.server.setRequestHandler(method, { params: z.unknown().optional() }, async (_params, ctx) => {
+          authorize(ctx.http?.authInfo);
+          throw new ProtocolError(-32000, 'Event subscriptions are not enabled', { reason: 'events_not_enabled' });
+        });
+      }
+    } else {
+      const delivery = z.object({ mode: z.literal('webhook'), url: z.string().max(2048) }).strict();
+      const identity = z.object({ name: z.literal(PR_EVENT), arguments: prEventArguments, delivery }).strict();
+      server.server.setRequestHandler('events/list', { params: z.object({ cursor: z.null().optional() }).strict().optional() },
+        async (_params, ctx) => events.list(ctx.http?.authInfo));
+      server.server.setRequestHandler('events/subscribe', { params: identity.extend({
+        delivery: delivery.extend({ secret: z.string().max(100) }),
+        cursor: z.null().optional(), ttlMs: z.number().int().min(1000).nullable().optional(),
+      }) }, async (params, ctx) => events.subscribe(ctx.http?.authInfo, params.arguments, params.delivery, params.ttlMs));
+      server.server.setRequestHandler('events/unsubscribe', { params: identity },
+        async (params, ctx) => events.unsubscribe(ctx.http?.authInfo, params.arguments, params.delivery.url));
+    }
   }
 
   if (runtime.operationStatusEnabled) server.registerTool('operation.status', {

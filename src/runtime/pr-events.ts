@@ -38,6 +38,17 @@ export const prReviewEvidence = z.object({
 });
 export type PrReviewEvidence = z.infer<typeof prReviewEvidence>;
 export type PrEventSnapshot = PullRequestStatus & { reviews?: PrReviewEvidence };
+/** Generic protocol metadata only; never inspect a configured wait or live state. */
+export function prEventCatalog() {
+  return { events: [{ name: PR_EVENT, description: 'Current verification and bounded review metadata for one exact authorized Preview PR wait. Re-read current native PR and review state before any already-authorized continuation.',
+    delivery: ['webhook'], inputSchema: z.toJSONSchema(prEventArguments),
+    payloadSchema: { type: 'object', properties: {
+      repository: { type: 'string' }, pullRequestNumber: { type: 'integer' }, headSha: { type: 'string' }, baseSha: { type: 'string' },
+      state: { type: 'string' }, merged: { type: 'boolean' }, draft: { type: 'boolean' }, checks: { type: 'object' }, url: { type: 'string' }, reviews: z.toJSONSchema(prReviewEvidence),
+    }, required: ['repository', 'pullRequestNumber', 'headSha', 'baseSha', 'state', 'merged', 'draft', 'checks', 'url'], additionalProperties: false },
+  }] };
+}
+export type PrEventService = PrEvents | 'discovery-only';
 export interface PrEventSource {
   /** Revalidate principal/resource authority and current installation access on every call. */
   read(owner: EventOwner, target: PrEventArguments, generation: string): Promise<PrEventSnapshot>;
@@ -149,14 +160,9 @@ export class PrEvents {
   async list(auth?: AuthInfo) {
     const owner = await this.authorize(auth);
     await this.read(owner, auth!.extra!.grantGeneration as string);
-    return { events: [{ name: PR_EVENT, description: 'Current verification and bounded review metadata for one exact authorized Preview PR wait. Re-read current native PR and review state before any already-authorized continuation.',
-      delivery: ['webhook'], inputSchema: z.toJSONSchema(prEventArguments),
-      payloadSchema: { type: 'object', properties: {
-        repository: { type: 'string' }, pullRequestNumber: { type: 'integer' }, headSha: { type: 'string' }, baseSha: { type: 'string' },
-        state: { type: 'string' }, merged: { type: 'boolean' }, draft: { type: 'boolean' }, checks: { type: 'object' }, url: { type: 'string' }, reviews: z.toJSONSchema(prReviewEvidence),
-      }, required: ['repository', 'pullRequestNumber', 'headSha', 'baseSha', 'state', 'merged', 'draft', 'checks', 'url'], additionalProperties: false },
-    }] };
+    return prEventCatalog();
   }
+
   private identity(owner: EventOwner, url: string) { return `sub_${hash([owner.issuer, owner.subject, owner.clientId, url, PR_EVENT, this.options.target])}`; }
   private evidence(pull: PrEventSnapshot) {
     const target = this.options.target;
