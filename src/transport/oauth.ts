@@ -1,3 +1,4 @@
+import { oauthGrantStore, oauthGrantKey, requireOAuthGrant, type OAuthGrantStore, type GrantIdentity } from './oauth-grant-store.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
 import type { AuthInfo } from '@modelcontextprotocol/server';
@@ -274,10 +275,13 @@ export function renderOAuthConsent(request: OAuthAuthorizationRequest): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize — Conductor</title><style>:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#090b10;color:#f3f5f8}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 50% 12%,#262135 0,#090b10 48%)}.card{width:min(520px,calc(100vw - 28px));border:1px solid #393346;background:#111019e8;border-radius:18px;padding:26px;box-shadow:0 26px 70px #0008}.mark{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:#2b2340;border:1px solid #5b4b78;color:#e0d3ff;font-weight:800}.eyebrow{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#9a8bac;margin-top:20px}h1{font-size:24px;margin:7px 0}p{color:#aaa2b6;font-size:13px;line-height:1.55}.box{border:1px solid #40384d;background:#0c0b11;border-radius:10px;padding:12px;margin:16px 0;font-size:12px;line-height:1.6}.box strong{color:#eee7f8}button{width:100%;border:1px solid #6e5a91;background:#392d52;color:#f7f1ff;border-radius:10px;padding:11px;font-weight:700;cursor:pointer}.note{margin-top:16px;padding-top:14px;border-top:1px solid #312b3b;color:#887d94;font-size:10px;line-height:1.45}</style></head><body><main class="card"><div class="mark">C</div><div class="eyebrow">MCP authorization</div><h1>Allow ${escapeHtml(request.clientName)}?</h1><p>${accessDescription}</p><div class="box"><strong>Client</strong>: ${escapeHtml(request.clientName)}<br><strong>Return host</strong>: ${escapeHtml(redirectHost)}<br><strong>Scope</strong>: ${escapeHtml(request.scope)}</div><form method="post" action="/oauth/authorize">${hidden}<button type="submit">Authorize Conductor</button></form><div class="note">Only approve this request if you initiated it from ChatGPT or another trusted MCP client.</div></main></body></html>`;
 }
 
-export async function issueAuthorizationCode(request: OAuthAuthorizationRequest): Promise<string> {
+export async function issueAuthorizationCode(request: OAuthAuthorizationRequest, grants?: OAuthGrantStore): Promise<string> {
+  const grantIdentity = { issuer: oauthPublicBaseUrl(), subject: 'owner', clientId: request.clientId };
+  const grant = oauthEventsEnabled() ? await (grants ?? oauthGrantStore()).consent(grantIdentity, request.scope.split(/\s+/), Date.now() + refreshTokenTtl() * 1000) : undefined;
   const code = randomBytes(32).toString('base64url');
   await storeAuthorizationCode(code, {
     ...request,
+    ...(grant ? { grantIdentity, grantGeneration: grant.generation } : {}),
     expiresAt: nowSeconds() + AUTHORIZATION_CODE_TTL_SECONDS,
   }, AUTHORIZATION_CODE_TTL_SECONDS);
   return code;
@@ -308,12 +312,13 @@ function tokenSigningKey(): Uint8Array {
   return derivedSecret('oauth-token');
 }
 
-async function issueToken(kind: 'access' | 'refresh', clientId: string, scope: string): Promise<string> {
+async function issueToken(kind: 'access' | 'refresh', clientId: string, scope: string, generation?: string, grantExpiry = Infinity): Promise<string> {
   const ttl = kind === 'access' ? accessTokenTtl() : refreshTokenTtl();
   return await new SignJWT({
     token_use: kind,
     scope,
     client_id: clientId,
+    ...(generation ? { grant_generation: generation } : {}),
   })
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setIssuer(oauthPublicBaseUrl())
@@ -321,18 +326,22 @@ async function issueToken(kind: 'access' | 'refresh', clientId: string, scope: s
     .setSubject('owner')
     .setJti(randomBytes(16).toString('base64url'))
     .setIssuedAt()
-    .setExpirationTime(`${ttl}s`)
+    .setExpirationTime(Math.min(nowSeconds() + ttl, Math.floor(grantExpiry / 1000)))
     .sign(tokenSigningKey());
 }
 
-async function tokenResponse(clientId: string, scope: string): Promise<Record<string, unknown>> {
-  return {
-    access_token: await issueToken('access', clientId, scope),
+async function tokenResponse(clientId: string, scope: string, generation?: string, grants?: OAuthGrantStore): Promise<Record<string, unknown>> {
+  const identity = { issuer: oauthPublicBaseUrl(), subject: 'owner', clientId };
+  const grant = generation !== undefined ? await requireOAuthGrant(grants ?? oauthGrantStore(), identity, generation, scope.split(/\s+/)) : undefined;
+  const response = {
+    access_token: await issueToken('access', clientId, scope, generation, grant?.expiresAt),
     token_type: 'Bearer',
-    expires_in: accessTokenTtl(),
-    refresh_token: await issueToken('refresh', clientId, scope),
+    expires_in: Math.min(accessTokenTtl(), Math.floor((grant?.expiresAt ?? Infinity) / 1000) - nowSeconds()),
+    refresh_token: await issueToken('refresh', clientId, scope, generation, grant?.expiresAt),
     scope,
   };
+  if (generation !== undefined) await requireOAuthGrant(grants ?? oauthGrantStore(), identity, generation, scope.split(/\s+/));
+  return response;
 }
 
 function pkceMatches(verifier: string, challenge: string): boolean {
@@ -350,7 +359,7 @@ async function verifyToken(token: string, kind: 'access' | 'refresh'): Promise<J
   return verified.payload;
 }
 
-export async function exchangeOAuthToken(params: URLSearchParams): Promise<Record<string, unknown>> {
+export async function exchangeOAuthToken(params: URLSearchParams, grants?: OAuthGrantStore): Promise<Record<string, unknown>> {
   const grantType = params.get('grant_type');
   const clientId = params.get('client_id') ?? '';
   if (!clientId) throw Object.assign(new Error('client_id is required'), { status: 400, oauthError: 'invalid_client' });
@@ -366,13 +375,21 @@ export async function exchangeOAuthToken(params: URLSearchParams): Promise<Recor
     if (!pkceMatches(params.get('code_verifier') ?? '', record.codeChallenge)) {
       throw Object.assign(new Error('PKCE verification failed'), { status: 400, oauthError: 'invalid_grant' });
     }
-    return await tokenResponse(clientId, record.scope);
+    try {
+      const identity = { issuer: oauthPublicBaseUrl(), subject: 'owner', clientId };
+      if (record.grantGeneration === undefined && record.grantIdentity === undefined) return await tokenResponse(clientId, record.scope);
+      if (typeof record.grantGeneration !== 'string') throw new Error('Code grant binding missing');
+      if (!record.grantIdentity || oauthGrantKey(record.grantIdentity) !== oauthGrantKey(identity)) throw new Error('Code grant mismatch');
+      return await tokenResponse(clientId, record.scope, record.grantGeneration, grants ?? oauthGrantStore());
+    } catch { throw Object.assign(new Error('Authorization grant is inactive'), { status: 400, oauthError: 'invalid_grant' }); }
   }
   if (grantType === 'refresh_token') {
     try {
       const payload = await verifyToken(params.get('refresh_token') ?? '', 'refresh');
       if (payload.client_id !== clientId || typeof payload.scope !== 'string') throw new Error('Refresh token client mismatch');
-      return await tokenResponse(clientId, payload.scope);
+      if (payload.grant_generation === undefined) return await tokenResponse(clientId, payload.scope);
+      if (typeof payload.grant_generation !== 'string') throw new Error('Invalid grant generation');
+      return await tokenResponse(clientId, payload.scope, payload.grant_generation, grants ?? oauthGrantStore());
     } catch {
       throw Object.assign(new Error('Refresh token is invalid or expired'), { status: 400, oauthError: 'invalid_grant' });
     }
@@ -381,10 +398,28 @@ export async function exchangeOAuthToken(params: URLSearchParams): Promise<Recor
 }
 
 export class SelfHostedAccessTokenVerifier implements AccessTokenVerifier {
+  constructor(private readonly grants?: OAuthGrantStore) {}
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const payload = await verifyToken(token, 'access');
+    // Legacy JWTs retain ordinary-tool access only until expiry; events reject them.
+    if (payload.grant_generation !== undefined) {
+      await requireOAuthGrant(this.grants ?? oauthGrantStore(), tokenIdentity(payload), payload.grant_generation, typeof payload.scope === 'string' ? payload.scope.split(/\s+/) : []);
+    }
     return authInfoFromJwt(token, payload, oauthResourceUrl(), [CONDUCTOR_READ_SCOPE]);
   }
+}
+
+function tokenIdentity(payload: JWTPayload): GrantIdentity {
+  if (typeof payload.iss !== 'string' || typeof payload.sub !== 'string' || typeof payload.client_id !== 'string') throw new Error('Invalid grant identity');
+  return { issuer: payload.iss, subject: payload.sub, clientId: payload.client_id };
+}
+/** Revoke only the authenticated current token's tuple. A public client ID is never authentication. */
+export async function revokeOAuthGrant(token: string, clientId: string, grants: OAuthGrantStore = oauthGrantStore()): Promise<void> {
+  const payload = await verifyToken(token, 'access');
+  const identity = tokenIdentity(payload);
+  if (identity.clientId !== clientId || typeof payload.grant_generation !== 'string') throw new Error('Invalid revocation authority');
+  await requireOAuthGrant(grants, identity, payload.grant_generation);
+  await grants.revoke(identity, payload.grant_generation);
 }
 
 export function oauthProtectedResourceMetadata(): Record<string, unknown> {
@@ -397,10 +432,15 @@ export function oauthProtectedResourceMetadata(): Record<string, unknown> {
   };
 }
 
-export function oauthAuthorizationServerMetadata(): Record<string, unknown> {
+export function oauthEventsEnabled(): boolean {
+  return Boolean(process.env.CONDUCTOR_PR_EVENTS_JSON);
+}
+
+export function oauthAuthorizationServerMetadata(injectedGrantStore = false): Record<string, unknown> {
   const base = oauthPublicBaseUrl();
   return {
     issuer: base,
+    ...(oauthEventsEnabled() && (injectedGrantStore || sharedAuthorizationStateConfigured()) ? { revocation_endpoint: `${base}/oauth/revoke` } : {}),
     authorization_endpoint: `${base}/oauth/authorize`,
     token_endpoint: `${base}/oauth/token`,
     registration_endpoint: `${base}/oauth/register`,

@@ -1,3 +1,4 @@
+import { oauthGrantStore, requireOAuthGrant } from '../transport/oauth-grant-store.js';
 import { createHash } from 'node:crypto';
 import { Redis } from '@upstash/redis';
 import * as z from 'zod/v4';
@@ -30,14 +31,17 @@ export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environm
   vault.seal('configuration-check'); // Fail at startup if the existing vault is unavailable.
   const digest = createHash('sha256').update(JSON.stringify(config)).digest('hex');
   const redis = new Redis({ url, token, enableTelemetry: false, automaticDeserialization: false });
-  return new PrEvents({ ...config, webhookSecret, vault,
+  const grants = oauthGrantStore(environment);
+  return new PrEvents({ ...config, webhookSecret, vault, grants,
     store: new RedisPrEventStore(redis, `conductor:preview:pr-events:v1:${digest}`),
     post: safeCallbackPost(config.callbackHostname),
-    source: { async read(owner, target) {
+    source: { async read(owner, target, generation) {
       if (!eventOwnerEqual(owner, config.owner)) throw new Error('Event principal revoked');
+      await requireOAuthGrant(grants, owner, generation);
       // Native installation attestation is fresh, not a cached token/account or OAuth-client inference.
       await app.getRepositoryAttestation(target.repository, config.installationId);
       const project = runtime.resolveProjectReference({ id: target.repository, repository: target.repository });
+      await requireOAuthGrant(grants, owner, generation);
       const receipt = await runtime.pullRequestStatus({ project, pullRequestNumber: target.pullRequestNumber });
       if (receipt.status !== 'succeeded') throw new Error('Provider reconciliation unavailable');
       return receipt.result;

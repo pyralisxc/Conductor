@@ -1,3 +1,4 @@
+import { GrantRedisFixture } from './helpers/oauth-grants.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
@@ -20,7 +21,7 @@ class SnapshotStore implements PrEventStore {
 }
 const target = { repository: 'owner/repo', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) };
 const owner = { issuer: 'https://issuer.example', subject: 'service-principal', clientId: 'oauth-client' };
-const auth = { token: 'test', clientId: owner.clientId, scopes: ['conductor.read'], extra: { issuer: owner.issuer, subject: owner.subject } };
+const auth = { token: 'test', clientId: owner.clientId, scopes: ['conductor.read'], extra: { issuer: owner.issuer, subject: owner.subject, grantGeneration: '1:00000000-0000-4000-8000-000000000001' } };
 const secret = `whsec_${Buffer.alloc(32, 7).toString('base64')}`;
 const delivery = { mode: 'webhook' as const, url: 'https://receiver.example/callback', secret };
 function fixture() {
@@ -31,7 +32,9 @@ function fixture() {
   } as unknown as PullRequestStatus;
   const posts: { body: string; headers: Record<string, string> }[] = [];
   const store = new SnapshotStore();
-  const options = { target, owner, installationId: 123, callbackHostname: 'receiver.example', webhookSecret: 'local-only-webhook-secret', store,
+  const grantRedis = new GrantRedisFixture();
+  grantRedis.seed(owner, auth.extra.grantGeneration, now + 3600000);
+  const options = { grants: grantRedis.store(), target, owner, installationId: 123, callbackHostname: 'receiver.example', webhookSecret: 'local-only-webhook-secret', store,
     vault: new VersionedProviderCredentialVault({ legacyPurpose: 'test-events', currentKey: 'local-only-vault-key'.repeat(3) }), now: () => now,
     source: { async read() { reads++; if (denied) throw new Error('revoked'); return structuredClone(pull); } },
     post: async (_url: string, body: string, headers: Record<string, string>) => {
@@ -44,7 +47,7 @@ function fixture() {
     const body = Buffer.from(JSON.stringify({ action: 'completed', repository: { full_name: target.repository }, installation: { id: 123 }, check_run: { head_sha: target.headSha, pull_requests: [{ number: 7 }] }, ...patch }));
     return instance.ingest(body, event, id, `sha256=${createHmac('sha256', options.webhookSecret).update(body).digest('hex')}`);
   };
-  return { bridge, options, pull, posts, store, send, reads: () => reads, deny: () => { denied = true; }, advance: (ms: number) => { now += ms; }, status: (value: number) => { status = value; } };
+  return { bridge, options, pull, posts, store, send, grantRedis, reads: () => reads, deny: () => { denied = true; }, advance: (ms: number) => { now += ms; }, status: (value: number) => { status = value; } };
 }
 
 test('real HTTP protocol 2026-07-28 discovers and invokes authenticated event methods', async () => {

@@ -59,7 +59,7 @@ export function authInfoFromJwt(
     scopes,
     expiresAt: payload.exp,
     resource: new URL(audience),
-    extra: payload.sub ? { subject: payload.sub, issuer: payload.iss } : undefined,
+    extra: payload.sub ? { subject: payload.sub, issuer: payload.iss, grantGeneration: payload.grant_generation } : undefined,
   };
 }
 

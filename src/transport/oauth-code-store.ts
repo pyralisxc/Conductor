@@ -2,6 +2,8 @@ import { Redis } from '@upstash/redis';
 
 export interface StoredAuthorizationCode {
   clientId: string;
+  grantIdentity?: import('./oauth-grant-store.js').GrantIdentity;
+  grantGeneration?: string;
   clientName: string;
   redirectUri: string;
   scope: string;
