@@ -9,6 +9,8 @@ import type { VersionedProviderCredentialVault } from '../connections/universal/
 import type { PullRequestStatus } from './types.js';
 import { callbackUrl, signingKey, signedCallback, verifyCallback, type CallbackPost } from '../transport/event-callback.js';
 
+export const prEventIntegrationBranch = z.enum(['preview', 'vercel-preview']);
+export type PrEventIntegrationBranch = z.infer<typeof prEventIntegrationBranch>;
 export const PR_EVENT = 'pull_request.verification_changed';
 export const prEventArguments = z.object({
   repository: z.string().max(200).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
@@ -57,7 +59,7 @@ export interface PrEventSource {
 interface Subscription {
   id: string; owner: EventOwner; generation: string; url: string; secret: string; expiresAt: number;
   previousSecret?: string; rotationUntil?: number; verifiedUntil: number;
-  binding?: { id: string; approvalId: string; phase: 'pending' | 'challenging' | 'active'; fingerprint: string; target: PrEventArguments; attemptId?: string };
+  binding?: { id: string; approvalId: string; phase: 'pending' | 'challenging' | 'active'; fingerprint: string; target: PrEventArguments; integrationBranch?: PrEventIntegrationBranch; attemptId?: string };
 }
 interface Delivery {
   id: string; source: string; fingerprint: string; body: string; createdAt: number;
@@ -136,6 +138,7 @@ export function eventOwnerAuthorized(owner: EventOwner, expected: { issuer: stri
       : !!expected.clientId && owner.clientId === expected.clientId);
 }
 export interface PrEventsOptions {
+  integrationBranch?: PrEventIntegrationBranch;
   target: PrEventArguments; owner: { issuer: string; subject: string; clientId?: string }; installationId: number;
   callbackHostname?: string;
   delegatedRecipient?: { clientFingerprint: string; approval?: { id: string; expiresAt: number } };
@@ -148,6 +151,7 @@ export class PrEvents {
   private readonly now: () => number;
   constructor(private readonly options: PrEventsOptions) {
     this.now = options.now ?? Date.now;
+    prEventIntegrationBranch.parse(options.integrationBranch ?? 'preview');
     if (!options.delegatedRecipient && !options.owner.clientId) throw new Error('Fixed-host client identity is required');
     if (options.delegatedRecipient && !options.validateRecipient) throw new Error('Delegated recipient preflight is required');
     if (Boolean(options.callbackHostname) === Boolean(options.delegatedRecipient)) throw new Error('Exactly one recipient mode is required');
@@ -160,7 +164,7 @@ export class PrEvents {
     if (!mode) return !sub.binding;
     return !!sub.binding && sub.binding.fingerprint === mode.clientFingerprint &&
       clientFingerprint(sub.owner.clientId) === mode.clientFingerprint && eventOwnerAuthorized(sub.owner, this.options.owner, mode.clientFingerprint) &&
-      hash(sub.binding.target) === hash(this.options.target) && sub.id === this.identity(sub.owner, sub.url);
+      (sub.binding.integrationBranch ?? 'preview') === (this.options.integrationBranch ?? 'preview') && hash(sub.binding.target) === hash(this.options.target) && sub.id === this.identity(sub.owner, sub.url);
   }
   private activationMatches(sub: Subscription) {
     const approval = this.options.delegatedRecipient?.approval;
@@ -214,7 +218,7 @@ export class PrEvents {
   private identity(owner: EventOwner, url: string) { return `sub_${hash([owner.issuer, owner.subject, owner.clientId, url, PR_EVENT, this.options.target])}`; }
   private evidence(pull: PrEventSnapshot) {
     const target = this.options.target;
-    if (pull.repository !== target.repository || pull.pullRequestNumber !== target.pullRequestNumber || pull.head.sha !== target.headSha || pull.base.sha !== target.baseSha || pull.base.ref !== 'preview') throw new Error('Exact Preview wait no longer matches');
+    if (pull.repository !== target.repository || pull.pullRequestNumber !== target.pullRequestNumber || pull.head.sha !== target.headSha || pull.base.sha !== target.baseSha || pull.base.ref !== (this.options.integrationBranch ?? 'preview')) throw new Error('Exact Preview wait no longer matches');
     return { ...target, state: pull.state, merged: pull.merged, draft: pull.draft,
       ...(pull.reviews ? { reviews: prReviewEvidence.parse(pull.reviews) } : {}),
       checks: { total: pull.checks.total, pending: pull.checks.pending, successful: pull.checks.successful, failed: pull.checks.failed, neutral: pull.checks.neutral, skipped: pull.checks.skipped },
@@ -271,7 +275,7 @@ export class PrEvents {
       // Pending persistence consumes this approval; no provider read or callback yet.
       await this.options.validateRecipient!(url);
       const pending: Subscription = { id, owner, generation, url, secret: this.options.vault.seal(secret), expiresAt: Math.min(expiresAt, approval.expiresAt), verifiedUntil: 0,
-        binding: { id: randomUUID(), approvalId: approval.id, attemptId: randomUUID(), phase: 'pending', fingerprint: mode.clientFingerprint, target: args } };
+        binding: { id: randomUUID(), approvalId: approval.id, attemptId: randomUUID(), phase: 'pending', fingerprint: mode.clientFingerprint, target: args, integrationBranch: this.options.integrationBranch ?? 'preview' } };
       await this.grant(owner, generation);
       if (!await this.options.store.save(loaded.version, { subscription: pending, deliveries: [], usedBindingAttempts: [...(loaded.state.usedBindingAttempts ?? []), approval.id] })) throw new Error('Pending binding changed');
       loaded = await this.options.store.load();

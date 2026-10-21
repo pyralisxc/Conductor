@@ -144,19 +144,20 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     assert.equal(await redis.command(['GET', marker]), null);
   });
 
-  await t.test('concurrent delegated subscribe and activation have one winner through production Lua', { timeout: 30000 }, async () => {
-    const owner = identity('concurrent-delegated'); const grant = await grants.consent(owner, ['conductor.read'], expiry());
+  await t.test('concurrent delegated subscribe and activation have one winner through production Lua', { timeout: 60000 }, async () => {
+    for (const integrationBranch of ['preview', 'vercel-preview'] as const) {
+    const owner = identity(`concurrent-delegated-${integrationBranch}`); const grant = await grants.consent(owner, ['conductor.read'], expiry());
     const auth = { token: 'isolated-test', clientId: owner.clientId, scopes: ['conductor.read'], extra: { ...owner, grantGeneration: grant.generation } };
     const target = { repository: 'owner/repo', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) };
-    const key = 'test:concurrent-delegated';
+    const key = `test:concurrent-delegated-${integrationBranch}`;
     const store = new RedisPrEventStore(redis.client, key);
     const delivery = { url: 'https://unused.example/callback', secret: `whsec_${Buffer.alloc(32, 9).toString('base64')}` };
     const mode = { clientFingerprint: createHash('sha256').update(owner.clientId).digest('hex'), approval: { id: randomUUID(), expiresAt: expiry() } };
     const posts: string[][] = [[], []]; const reads = [0, 0];
-    const makeCallers = () => posts.map((sent, caller) => new PrEvents({ target, owner: { issuer: owner.issuer, subject: owner.subject }, installationId: 123, delegatedRecipient: mode,
+    const makeCallers = () => posts.map((sent, caller) => new PrEvents({ integrationBranch, target, owner: { issuer: owner.issuer, subject: owner.subject }, installationId: 123, delegatedRecipient: mode,
       webhookSecret: 'isolated-only', grants, store: new RedisPrEventStore(redis.client, key), validateRecipient: async () => {},
       vault: new VersionedProviderCredentialVault({ legacyPurpose: 'isolated', currentKey: 'isolated-vault-key'.repeat(3) }),
-      source: { async read() { reads[caller]++; return { ...target, head: { sha: target.headSha }, base: { sha: target.baseSha, ref: 'preview' },
+      source: { async read() { reads[caller]++; return { ...target, head: { sha: target.headSha }, base: { sha: target.baseSha, ref: integrationBranch },
         state: 'open', merged: false, draft: false, checks: { total: 0, pending: 0, successful: 0, failed: 0, neutral: 0, skipped: 0 } } as unknown as PullRequestStatus; } },
       post: async (_url, body) => { sent.push(body); const data = JSON.parse(body); return { status: 200, body: JSON.stringify({ challenge: data.challenge }) }; },
     }));
@@ -210,6 +211,7 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     assert.equal(posts.flat().length, 1); assert.equal(JSON.parse(posts.flat()[0]).type, 'verification');
     const active = (await store.load()).state;
     assert.equal(active.subscription!.binding!.id, binding.id); assert.equal(active.subscription!.binding!.phase, 'active');
+    assert.equal(active.subscription!.binding!.integrationBranch, integrationBranch);
     assert.deepEqual(active.usedBindingAttempts, [mode.approval.id]);
     assert.equal(active.deliveries.length, 0);
     await callers[0].unsubscribe(auth, target, delivery.url);
@@ -234,6 +236,7 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     assert.notEqual((await store.load()).state.subscription!.binding!.id, obsolete);
     assert.equal(posts.flat().length, 2);
 
+    }
   });
 
 });

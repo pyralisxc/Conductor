@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { Redis } from '@upstash/redis';
 import * as z from 'zod/v4';
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
-import { PrEvents, RedisPrEventStore, eventOwnerAuthorized, prEventArguments, type PrEventService } from '../runtime/pr-events.js';
+import { PrEvents, RedisPrEventStore, eventOwnerAuthorized, prEventArguments, prEventIntegrationBranch, type PrEventService } from '../runtime/pr-events.js';
 import { GitHubAppCredentialProvider } from '../connections/github/app-installation.js';
 import { providerCredentialVaultFromEnvironment } from '../connections/universal/credential-vault.js';
 import { GitHubRuntimeProvider } from '../providers/github.js';
@@ -12,6 +12,7 @@ import { safeCallbackPost } from '../transport/event-callback.js';
 
 const commonConfiguration = {
   target: prEventArguments,
+  integrationBranch: prEventIntegrationBranch.optional(),
   owner: z.object({ issuer: z.url(), subject: z.string().min(1).max(200), clientId: z.string().min(1).max(2048) }).strict(),
   installationId: z.number().int().positive(),
 };
@@ -63,7 +64,7 @@ export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environm
       await requireOAuthGrant(grants, owner, generation);
       const receipt = await runtime.pullRequestStatus({ project, pullRequestNumber: target.pullRequestNumber });
       if (receipt.status !== 'succeeded') throw new Error('Provider reconciliation unavailable');
-      const reviews = await reviewProvider.getPullRequestReviewState(target, config.installationId, () => requireOAuthGrant(grants, owner, generation));
+      const reviews = await reviewProvider.getPullRequestReviewState(target, config.installationId, () => requireOAuthGrant(grants, owner, generation), config.integrationBranch ?? 'preview');
       return { ...receipt.result, reviews };
     } },
   });

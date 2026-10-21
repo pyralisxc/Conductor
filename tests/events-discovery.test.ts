@@ -145,3 +145,15 @@ test('delegated recipient config is explicit, exclusive, and Preview-only', () =
   for (const env of ['production', 'development', undefined]) assert.throws(() => createConfiguredPrEvents(runtime, { VERCEL_ENV: env, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify({ ...base, delegatedRecipient }) }), /limited to Preview/);
   assert.throws(() => createConfiguredPrEvents(runtime, { ...preview, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify({ ...base, delegatedRecipient }) }), /mutually exclusive/);
 });
+
+
+test('event integration branch is a strict server-only enum', () => {
+  const runtime = new ConductorToolRuntime();
+  const config = { target: { repository: 'owner/private', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }, owner: { issuer: 'https://issuer.example', subject: 'owner', clientId: 'private-client' }, installationId: 123, callbackHostname: 'receiver.example' };
+  for (const integrationBranch of ['preview', 'vercel-preview', undefined]) {
+    assert.throws(() => createConfiguredPrEvents(runtime, { VERCEL_ENV: 'preview', CONDUCTOR_PR_EVENTS_JSON: JSON.stringify({ ...config, integrationBranch }) }), /require existing shared storage/);
+  }
+  for (const integrationBranch of ['main', 'master', 'arbitrary', 'Preview', 'refs/heads/preview', '*', '']) {
+    assert.throws(() => createConfiguredPrEvents(runtime, { VERCEL_ENV: 'preview', CONDUCTOR_PR_EVENTS_JSON: JSON.stringify({ ...config, integrationBranch }) }), /Invalid option/);
+  }
+});
