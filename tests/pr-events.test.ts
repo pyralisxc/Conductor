@@ -251,7 +251,7 @@ test('all supported review/comment actions use fresh metadata; duplicates and la
     const count = f.posts.length; await f.signal(id, action, event); assert.equal(f.posts.length, count);
   }
   const last = JSON.parse(f.posts.at(-1)!.body).data.reviews;
-  assert.equal(last.latest[0].state, 'DISMISSED'); assert.equal(last.currentHeadApprovals, 0);
+  assert.equal(last.latestActivity[0].state, 'DISMISSED'); assert.equal(last.currentHeadApprovals, 0);
   assert.deepEqual(last.comments.map((c: { id: number }) => c.id), [2]);
   const count = f.posts.length;
   assert.equal(await f.signal('late-approved-hint', 'submitted'), 'unchanged');
@@ -332,7 +332,7 @@ test('a delayed older review read cannot overwrite a newer committed review snap
   finally { release(); }
   assert.equal(await delayed, 'pending');
   assert.equal(f.posts.length, 2);
-  assert.equal(JSON.parse(f.posts[1].body).data.reviews.latest[0].state, 'DISMISSED');
+  assert.equal(JSON.parse(f.posts[1].body).data.reviews.latestActivity[0].state, 'DISMISSED');
   assert.equal(await f.signal('delayed-review', 'submitted', 'pull_request_review', {}, bridge), 'unchanged');
 });
 
@@ -345,4 +345,17 @@ test('review capability retains issuer/subject/client/generation isolation befor
     { ...auth, extra: { ...auth.extra, grantGeneration: '2:00000000-0000-4000-8000-000000000002' } },
   ]) await assert.rejects(f.bridge.subscribe(principal, target, delivery));
   assert.equal(f.reader.paths.length, before); assert.equal(f.posts.length, 0);
+});
+
+test('outbound review activity cannot hide an effective request for changes', async () => {
+  const f = reviewFixture(); f.reader.data.reviews[0].state = 'CHANGES_REQUESTED';
+  await f.bridge.subscribe(auth, target, delivery);
+  f.reader.data.reviews.push({ ...f.reader.data.reviews[0], id: 2, state: 'COMMENTED' });
+  assert.equal(await f.signal('comment-after-request', 'submitted'), 'accepted');
+  const reviews = JSON.parse(f.posts.at(-1)!.body).data.reviews;
+  assert.equal(reviews.latestActivity[0].state, 'COMMENTED');
+  assert.equal(reviews.effectiveDecisions[0].state, 'CHANGES_REQUESTED');
+  assert.equal(reviews.effectiveDecisions[0].reviewId, 1);
+  assert.equal(reviews.currentHeadApprovals, 0);
+  assert.doesNotMatch(JSON.stringify(reviews), /PRIVATE|UNTRUSTED/);
 });

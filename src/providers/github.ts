@@ -809,20 +809,42 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       version: digest([item.body ?? '', item.updated_at, item.commit_id]),
     }));
     const checked = prReviewEvidence.parse({ complete: true, reason: 'complete', revision: '0'.repeat(64),
-      currentHeadApprovals: 0, latest: reviewMetadata, comments: commentMetadata });
-    checked.latest.sort((a, b) => a.id - b.id); checked.comments.sort((a, b) => a.id - b.id);
-    if (new Set(checked.latest.map(r => r.id)).size !== checked.latest.length || new Set(checked.comments.map(c => c.id)).size !== checked.comments.length) throw new Error('Review pagination changed');
+      effectiveDecisions: [], currentHeadApprovals: 0, latestActivity: reviewMetadata, comments: commentMetadata });
+    checked.latestActivity.sort((a, b) => a.id - b.id); checked.comments.sort((a, b) => a.id - b.id);
+    if (new Set(checked.latestActivity.map(r => r.id)).size !== checked.latestActivity.length || new Set(checked.comments.map(c => c.id)).size !== checked.comments.length) throw new Error('Review pagination changed');
     const complete = reviews.complete && comments.complete;
-    const revision = digest([complete, checked.latest, checked.comments]);
+    const revision = digest([complete, checked.latestActivity, checked.comments]);
     // Never infer latest decisions or deletions from a truncated collection.
-    if (!complete) return { complete: false, reason: 'page-limit', revision, currentHeadApprovals: null, latest: [], comments: [] };
-    const latest = new Map<string, PrReviewEvidence['latest'][number]>();
-    for (const review of [...checked.latest].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt) || a.id - b.id)) {
-      latest.set(review.reviewer ? String(review.reviewer.id) : `deleted:${review.id}`, review);
+    if (!complete) return { complete: false, reason: 'page-limit', revision, effectiveDecisions: null, currentHeadApprovals: null, latestActivity: [], comments: [] };
+    const latest = new Map<string, PrReviewEvidence['latestActivity'][number]>();
+    const effective = new Map<string, NonNullable<PrReviewEvidence['effectiveDecisions']>[number]>();
+    // COMMENTED is activity only. Each row already contains provider-current state;
+    // a DISMISSED row must not clear another review's unresolved request.
+    for (const review of [...checked.latestActivity].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt) || a.id - b.id)) {
+      const key = review.reviewer ? String(review.reviewer.id) : `deleted:${review.id}`;
+      latest.set(key, review);
+      const prior = effective.get(key);
+      let state = prior?.state ?? 'NONE';
+      let evidence = prior ? { reviewId: prior.reviewId, commitSha: prior.commitSha } : { reviewId: null as number | null, commitSha: null as string | null };
+      if (!review.reviewer) state = 'UNKNOWN';
+      else if (review.state === 'CHANGES_REQUESTED') {
+        state = 'CHANGES_REQUESTED'; evidence = { reviewId: review.id, commitSha: review.commitSha };
+      } else if (review.state === 'APPROVED') {
+        if (review.currentHead) { state = 'APPROVED'; evidence = { reviewId: review.id, commitSha: review.commitSha }; }
+        else if (state !== 'CHANGES_REQUESTED') { state = 'UNKNOWN'; evidence = { reviewId: review.id, commitSha: review.commitSha }; }
+      } else if (review.state === 'DISMISSED' && state !== 'CHANGES_REQUESTED') {
+        // A dismissed later decision cannot revive an older approval. Its former
+        // state is unavailable, so retain uncertainty when older decisions exist.
+        state = prior && prior.state !== 'NONE' ? 'UNKNOWN' : 'NONE';
+        evidence = { reviewId: review.id, commitSha: review.commitSha };
+      }
+      effective.set(key, { reviewer: review.reviewer, state, ...evidence });
     }
-    const decisions = [...latest.values()].sort((a, b) => a.id - b.id);
-    return { complete: true, reason: 'complete', revision, currentHeadApprovals: decisions.filter(r => r.currentHead && r.reviewer && r.state === 'APPROVED').length,
-      latest: decisions, comments: checked.comments };
+    const activity = [...latest.values()].sort((a, b) => a.id - b.id);
+    const effectiveDecisions = activity.map(review => effective.get(review.reviewer ? String(review.reviewer.id) : `deleted:${review.id}`)!);
+    return { complete: true, reason: 'complete', revision, effectiveDecisions,
+      currentHeadApprovals: effectiveDecisions.some(r => r.state === 'UNKNOWN') ? null : effectiveDecisions.filter(r => r.state === 'APPROVED').length,
+      latestActivity: activity, comments: checked.comments };
   }
 
   async getPullRequestStatus(input: GetPullRequestStatusInput): Promise<PullRequestStatus> {

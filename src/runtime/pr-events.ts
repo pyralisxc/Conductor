@@ -23,8 +23,11 @@ const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const version = z.string().regex(/^[a-f0-9]{64}$/);
 export const prReviewEvidence = z.object({
   complete: z.boolean(), reason: z.enum(['complete', 'page-limit']),
-  revision: version, currentHeadApprovals: z.number().int().nonnegative().nullable(),
-  latest: z.array(z.object({ id: z.number().int().positive(), reviewer: reviewActor,
+  revision: version, effectiveDecisions: z.array(z.object({ reviewer: reviewActor,
+    state: z.enum(['APPROVED', 'CHANGES_REQUESTED', 'NONE', 'UNKNOWN']),
+    reviewId: z.number().int().positive().nullable(), commitSha: sha.nullable(),
+  })).max(100).nullable(), currentHeadApprovals: z.number().int().nonnegative().nullable(),
+  latestActivity: z.array(z.object({ id: z.number().int().positive(), reviewer: reviewActor,
     state: z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED']),
     commitSha: sha, currentHead: z.boolean(), submittedAt: z.iso.datetime(), version,
   })).max(100),
