@@ -9,7 +9,7 @@ import { clientFingerprint, parseWorkScopeGrant, WorkScopeAuthorizer, type WorkS
 
 process.env.CONDUCTOR_SESSION_SECRET = 'test-work-context-secret-long-enough-for-hmac';
 
-test('MCP refuses cross-repository branch writes before the provider executes', async () => {
+for (const events of [undefined, 'discovery-only'] as const) test(`MCP refuses cross-repository branch writes before the provider executes (${events ?? 'disabled'})`, async () => {
   let providerCalls = 0;
   let routedComments = 0;
   let routedStatuses = 0;
@@ -72,7 +72,7 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
     mutationExecutor: new IdempotentMutationExecutor({ store: new InMemoryIdempotencyStore() }),
   });
   const server = createServer((req, res) => void createConductorHttpHandler({
-    runtime,
+    runtime, events,
     publicUrl: 'http://127.0.0.1',
     oauthIssuer: 'http://127.0.0.1',
     workScope: new WorkScopeAuthorizer(store),

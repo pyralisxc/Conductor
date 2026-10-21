@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { Redis } from '@upstash/redis';
 import * as z from 'zod/v4';
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
-import { PrEvents, RedisPrEventStore, eventOwnerEqual, prEventArguments } from '../runtime/pr-events.js';
+import { PrEvents, RedisPrEventStore, eventOwnerEqual, prEventArguments, type PrEventService } from '../runtime/pr-events.js';
 import { GitHubAppCredentialProvider } from '../connections/github/app-installation.js';
 import { providerCredentialVaultFromEnvironment } from '../connections/universal/credential-vault.js';
 import { GitHubRuntimeProvider } from '../providers/github.js';
@@ -17,7 +17,14 @@ const configuration = z.object({
 }).strict();
 
 /** Disabled by default. Provisioning/approving a live Preview subscription is a separate gate. */
-export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environment: NodeJS.ProcessEnv = process.env): PrEvents | undefined {
+export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environment: NodeJS.ProcessEnv = process.env): PrEventService | undefined {
+  const discovery = environment.CONDUCTOR_PR_EVENTS_DISCOVERY_ONLY;
+  if (discovery !== undefined) {
+    if (discovery !== 'true') throw new Error('Discovery-only mode must be explicitly true or absent');
+    if (environment.VERCEL_ENV !== 'preview') throw new Error('Event discovery is limited to Preview');
+    if (environment.CONDUCTOR_PR_EVENTS_JSON !== undefined) throw new Error('Discovery-only and live events are mutually exclusive');
+    return 'discovery-only';
+  }
   if (!environment.CONDUCTOR_PR_EVENTS_JSON) return undefined;
   if (environment.VERCEL_ENV !== 'preview') throw new Error('PR events are limited to Preview');
   const config = configuration.parse(JSON.parse(environment.CONDUCTOR_PR_EVENTS_JSON));

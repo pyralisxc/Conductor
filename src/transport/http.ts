@@ -1,4 +1,4 @@
-import type { PrEvents } from '../runtime/pr-events.js';
+import type { PrEventService } from '../runtime/pr-events.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { withRequestCorrelation, traceCommitBoundary } from './request-correlation.js';
 import { toNodeHandler } from '@modelcontextprotocol/node';
@@ -12,7 +12,7 @@ import type { WorkScopeAuthorizer } from './work-scope.js';
 
 export interface ConductorHttpHandlerOptions {
   runtime: ConductorToolRuntime;
-  events?: PrEvents;
+  events?: PrEventService;
   verifier: AccessTokenVerifier;
   publicUrl: string;
   oauthIssuer: string;
@@ -38,7 +38,7 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
 
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', options.publicUrl);
-    if (url.pathname === '/events/github' && options.events) {
+    if (url.pathname === '/events/github' && options.events && options.events !== 'discovery-only') {
       if (request.method !== 'POST') { json(response, 405, { error: 'METHOD_NOT_ALLOWED' }); return; }
       try {
         const chunks: Buffer[] = []; let size = 0;
