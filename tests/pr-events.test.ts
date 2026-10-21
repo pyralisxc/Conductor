@@ -1,3 +1,5 @@
+import { reviewReaderFixture, commentRow } from './helpers/github-review-reader.js';
+import { requireOAuthGrant } from '../src/transport/oauth-grant-store.js';
 import { GrantRedisFixture } from './helpers/oauth-grants.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -200,7 +202,7 @@ test('unsubscribe during an in-flight receipt cannot be overwritten by completio
 
 test('signed PR and suite signals reconcile while nonmatching repository, head and actions do not', async () => {
   const f = fixture(); await f.bridge.subscribe(auth, target, delivery);
-  assert.equal(await f.send('opened', { action: 'opened', pull_request: { number: 7, head: { sha: target.headSha } } }, 'pull_request'), 'unchanged');
+  assert.equal(await f.send('opened', { action: 'opened', pull_request: { number: 7, head: { sha: target.headSha }, base: { sha: target.baseSha } } }, 'pull_request'), 'unchanged');
   f.pull.checks.pending = 0;
   assert.equal(await f.send('suite', { check_suite: { head_sha: target.headSha, pull_requests: [{ number: 7 }] } }, 'check_suite'), 'accepted');
   assert.equal(await f.send('wrong-head', { check_run: { head_sha: 'c'.repeat(40), pull_requests: [{ number: 7 }] } }), 'ignored');
@@ -216,4 +218,131 @@ test('an unchanged source delivery is deduplicated before a later unrelated tran
   assert.equal(await f.send('unchanged-source'), 'duplicate');
   assert.equal(f.posts.length, 1);
   assert.equal(await f.send('new-source'), 'accepted');
+});
+
+function reviewFixture() {
+  const f = fixture(); const reader = reviewReaderFixture();
+  const options = { ...f.options, source: { async read() {
+    const pull = await f.options.source.read();
+    const reviews = await reader.read(() => requireOAuthGrant(f.options.grants, owner, auth.extra.grantGeneration));
+    return { ...pull, reviews };
+  } } };
+  const bridge = new PrEvents(options);
+  const hint = (action: string, event = 'pull_request_review', patch: Record<string, unknown> = {}) => ({ action,
+    pull_request: { number: 7, head: { sha: target.headSha }, base: { sha: target.baseSha } },
+    [event === 'pull_request_review' ? 'review' : 'comment']: { body: 'UNTRUSTED SIGNAL INSTRUCTIONS', state: 'APPROVED' }, ...patch });
+  return { ...f, reader, bridge, reviewOptions: options, hint,
+    signal: (id: string, action: string, event = 'pull_request_review', patch: Record<string, unknown> = {}, instance = bridge) => f.send(id, hint(action, event, patch), event, instance) };
+}
+
+test('all supported review/comment actions use fresh metadata; duplicates and late hints cannot restore old state', async () => {
+  const f = reviewFixture(); await f.bridge.subscribe(auth, target, delivery);
+  const steps: [string, string, () => void][] = [
+    ['pull_request_review', 'submitted', () => { f.reader.data.reviews[0].state = 'CHANGES_REQUESTED'; }],
+    ['pull_request_review', 'edited', () => { f.reader.data.reviews[0].body = 'EDITED PRIVATE REVIEW'; }],
+    ['pull_request_review', 'dismissed', () => { f.reader.data.reviews[0].state = 'DISMISSED'; }],
+    ['pull_request_review_comment', 'created', () => { f.reader.data.comments.push(commentRow(2)); }],
+    ['pull_request_review_comment', 'edited', () => { f.reader.data.comments[0].body = 'EDITED PRIVATE COMMENT'; }],
+    ['pull_request_review_comment', 'deleted', () => { f.reader.data.comments.splice(0, 1); }],
+  ];
+  for (const [event, action, change] of steps) {
+    change(); const id = `${event}-${action}`.replaceAll('_', '-');
+    assert.equal(await f.signal(id, action, event), 'accepted');
+    const count = f.posts.length; await f.signal(id, action, event); assert.equal(f.posts.length, count);
+  }
+  const last = JSON.parse(f.posts.at(-1)!.body).data.reviews;
+  assert.equal(last.latest[0].state, 'DISMISSED'); assert.equal(last.currentHeadApprovals, 0);
+  assert.deepEqual(last.comments.map((c: { id: number }) => c.id), [2]);
+  const count = f.posts.length;
+  assert.equal(await f.signal('late-approved-hint', 'submitted'), 'unchanged');
+  assert.equal(f.posts.length, count);
+  assert.doesNotMatch(JSON.stringify(f.posts) + f.store.raw, /PRIVATE|UNTRUSTED|INSTRUCTIONS|malicious|SECRET|test-token/);
+  assert.match((await f.store.load()).state.deliveries[0].source, /^owner\/repo:123:/);
+  // Delivery identity is shared across event categories within repository/installation.
+  f.reader.data.comments.push(commentRow(3));
+  assert.equal(await f.signal('late-approved-hint', 'created', 'pull_request_review_comment'), 'duplicate');
+});
+
+test('review hints reject forged signatures, oversize bodies, invalid delivery IDs, unsupported actions and foreign exact resources', async () => {
+  const f = reviewFixture(); await f.bridge.subscribe(auth, target, delivery);
+  const before = f.reader.paths.length;
+  for (const event of ['pull_request_review', 'pull_request_review_comment']) {
+    const action = event === 'pull_request_review' ? 'submitted' : 'created';
+    for (const unsupported of ['opened', 'closed', 'synchronize', 'unknown', event === 'pull_request_review' ? 'created' : 'dismissed']) {
+      assert.equal(await f.signal(`unsupported-${event}-${unsupported}`.replaceAll('_', '-'), unsupported, event), 'ignored');
+    }
+    for (const pull of [{ number: 8, head: { sha: target.headSha }, base: { sha: target.baseSha } },
+      { number: 7, head: { sha: 'c'.repeat(40) }, base: { sha: target.baseSha } },
+      { number: 7, head: { sha: target.headSha }, base: { sha: 'c'.repeat(40) } }]) {
+      assert.equal(await f.signal('foreign-pr', action, event, { pull_request: pull }), 'ignored');
+    }
+    await assert.rejects(f.signal('foreign-install', action, event, { installation: { id: 456 } }));
+    await assert.rejects(f.signal('foreign-repo', action, event, { repository: { full_name: 'foreign/repo' } }));
+    const body = Buffer.from(JSON.stringify(f.hint(action, event)));
+    await assert.rejects(f.bridge.ingest(body, event, 'forged', `sha256=${'0'.repeat(64)}`));
+    await assert.rejects(f.signal('invalid/id', action, event));
+    await assert.rejects(f.signal('oversize', action, event, { padding: 'x'.repeat(262144) }));
+  }
+  assert.equal(await f.signal('target', 'opened', 'pull_request_target'), 'ignored');
+  assert.equal(f.reader.paths.length, before); assert.equal(f.posts.length, 1);
+});
+
+test('review retries and process restart retain stable IDs and bound deduplication', async () => {
+  const f = reviewFixture(); await f.bridge.subscribe(auth, target, delivery);
+  f.reader.data.reviews[0].state = 'DISMISSED'; f.status(503);
+  assert.equal(await f.signal('retry-review', 'dismissed'), 'failed');
+  const attempts = f.posts.slice(1); assert.equal(attempts.length, 3);
+  assert.equal(new Set(attempts.map(p => p.headers['webhook-id'])).size, 1);
+  const restarted = new PrEvents(f.reviewOptions);
+  assert.equal(await f.signal('retry-review', 'dismissed', 'pull_request_review', {}, restarted), 'failed');
+  assert.equal(await f.signal('old-review', 'submitted', 'pull_request_review', {}, restarted), 'unchanged');
+  assert.equal(f.posts.length, 4);
+});
+
+test('review reads and sends stop for revoked or expired grants and in-flight revocation', async () => {
+  for (const mode of ['revoked', 'expired', 'in-flight']) {
+    const f = reviewFixture(); await f.bridge.subscribe(auth, target, delivery);
+    const before = f.reader.paths.length; f.reader.data.reviews[0].state = 'DISMISSED';
+    if (mode === 'revoked') await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+    if (mode === 'expired') f.advance(3600001);
+    if (mode === 'in-flight') f.reader.beforeFetch(async () => { f.reader.beforeFetch(); await f.options.grants.revoke(owner, auth.extra.grantGeneration); });
+    assert.ok(['blocked', 'inactive'].includes(await f.signal(`stop-${mode}`, 'dismissed')));
+    assert.equal(f.posts.length, 1);
+    assert.equal(f.reader.paths.length, before + (mode === 'in-flight' ? 1 : 0));
+  }
+});
+
+test('a delayed older review read cannot overwrite a newer committed review snapshot', async () => {
+  const f = reviewFixture();
+  let release!: () => void; let entered!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  let hold = false;
+  const bridge = new PrEvents({ ...f.reviewOptions, source: { async read() {
+    const result = await f.reviewOptions.source.read();
+    if (hold) { hold = false; entered(); await resume; }
+    return result;
+  } } });
+  await bridge.subscribe(auth, target, delivery);
+  f.reader.data.reviews[0].state = 'COMMENTED'; hold = true;
+  const delayed = f.signal('delayed-review', 'submitted', 'pull_request_review', {}, bridge);
+  await waiting;
+  f.reader.data.reviews[0].state = 'DISMISSED';
+  try { assert.equal(await f.signal('new-review', 'dismissed', 'pull_request_review', {}, bridge), 'accepted'); }
+  finally { release(); }
+  assert.equal(await delayed, 'pending');
+  assert.equal(f.posts.length, 2);
+  assert.equal(JSON.parse(f.posts[1].body).data.reviews.latest[0].state, 'DISMISSED');
+  assert.equal(await f.signal('delayed-review', 'submitted', 'pull_request_review', {}, bridge), 'unchanged');
+});
+
+test('review capability retains issuer/subject/client/generation isolation before private reads', async () => {
+  const f = reviewFixture(); const before = f.reader.paths.length;
+  for (const principal of [
+    { ...auth, clientId: 'other' },
+    { ...auth, extra: { ...auth.extra, issuer: 'https://foreign.example' } },
+    { ...auth, extra: { ...auth.extra, subject: 'other' } },
+    { ...auth, extra: { ...auth.extra, grantGeneration: '2:00000000-0000-4000-8000-000000000002' } },
+  ]) await assert.rejects(f.bridge.subscribe(principal, target, delivery));
+  assert.equal(f.reader.paths.length, before); assert.equal(f.posts.length, 0);
 });

@@ -6,6 +6,7 @@ import type { ConductorToolRuntime } from '../runtime/runtime.js';
 import { PrEvents, RedisPrEventStore, eventOwnerEqual, prEventArguments } from '../runtime/pr-events.js';
 import { GitHubAppCredentialProvider } from '../connections/github/app-installation.js';
 import { providerCredentialVaultFromEnvironment } from '../connections/universal/credential-vault.js';
+import { GitHubRuntimeProvider } from '../providers/github.js';
 import { safeCallbackPost } from '../transport/event-callback.js';
 
 const configuration = z.object({
@@ -27,6 +28,7 @@ export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environm
   const webhookSecret = environment.CONDUCTOR_GITHUB_WEBHOOK_SECRET;
   if (!url || !token || !appId || !privateKey || !webhookSecret || webhookSecret.length < 32) throw new Error('PR events require existing shared storage and approved GitHub App webhook configuration');
   const app = new GitHubAppCredentialProvider({ appId, privateKey });
+  const reviewProvider = new GitHubRuntimeProvider({ credentials: app, bindings: [{ id: config.target.repository, repository: config.target.repository, write: false }] });
   const vault = providerCredentialVaultFromEnvironment('pr-events', environment);
   vault.seal('configuration-check'); // Fail at startup if the existing vault is unavailable.
   const digest = createHash('sha256').update(JSON.stringify(config)).digest('hex');
@@ -44,7 +46,8 @@ export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environm
       await requireOAuthGrant(grants, owner, generation);
       const receipt = await runtime.pullRequestStatus({ project, pullRequestNumber: target.pullRequestNumber });
       if (receipt.status !== 'succeeded') throw new Error('Provider reconciliation unavailable');
-      return receipt.result;
+      const reviews = await reviewProvider.getPullRequestReviewState(target, config.installationId, () => requireOAuthGrant(grants, owner, generation));
+      return { ...receipt.result, reviews };
     } },
   });
 }
