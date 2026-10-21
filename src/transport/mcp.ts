@@ -1,9 +1,10 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { PrEvents, PR_EVENT, prEventArguments } from '../runtime/pr-events.js';
+import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { releaseIdentityFitsTransport, RELEASE_IDENTITY_MAX_BYTES } from '../runtime/release-identities.js';
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
 import { CONDUCTOR_WRITE_SCOPE } from './auth.js';
-import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import type { AuthInfo, ServerContext, ServerCapabilities } from '@modelcontextprotocol/server';
 import type { ProjectReference } from '../runtime/types.js';
 import type { WorkAction, WorkScopeAuthorizer } from './work-scope.js';
 import { clientFingerprint, issueBootstrapEvidence, verifyBootstrapEvidence, issueLifecycleGate, verifyLifecycleGate, issueWorkScopeApprovalGate, verifyWorkScopeApprovalGate } from './work-scope.js';
@@ -208,18 +209,18 @@ const readReceiptSchema = z.object({ receipt: z.union([
   failedReceiptSchema,
 ]) });
 
-export function createConductorMcpServer(runtime: ConductorToolRuntime, workScope?: WorkScopeAuthorizer): McpServer {
+export function createConductorMcpServer(runtime: ConductorToolRuntime, workScope?: WorkScopeAuthorizer, events?: PrEvents): McpServer {
   async function requireScopedWrite(auth: AuthInfo | undefined, action: WorkAction, project: ProjectReference, workContext?: string): Promise<void> {
     requireWriteScope(auth?.scopes);
     if (!workScope) throw new Error('Owner-managed work scope is not configured');
     await workScope.assertAllowed(auth, action, runtime.resolveProjectReference(project), workContext);
   }
 
-  function withBootstrapReadEvidence(input: Record<string, any>, extra: { authInfo?: AuthInfo }): Record<string, any> {
+  function withBootstrapReadEvidence(input: Record<string, any>, extra: ServerContext): Record<string, any> {
     const handle = typeof input.bootstrapEvidence === 'string' ? input.bootstrapEvidence : undefined;
     const { bootstrapEvidence: _handle, ...rest } = input;
     if (!handle) return rest;
-    const clientId = extra.authInfo?.clientId;
+    const clientId = extra.http?.authInfo?.clientId;
     if (!clientId) throw new Error('Authenticated client identity is required for bootstrap evidence reuse');
     const project = runtime.resolveProjectReference(input.project as ProjectReference);
     const repository = project.repository ?? project.id;
@@ -238,6 +239,22 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     },
   );
 
+  if (events) {
+    // MCP Events is a draft extension absent from the SDK's capability type;
+    // use its custom-method registration over the native 2026 transport.
+    server.server.registerCapabilities({ events: {} } as ServerCapabilities & { events: Record<string, never> });
+    const delivery = z.object({ mode: z.literal('webhook'), url: z.string().max(2048) }).strict();
+    const identity = z.object({ name: z.literal(PR_EVENT), arguments: prEventArguments, delivery }).strict();
+    server.server.setRequestHandler('events/list', { params: z.object({ cursor: z.null().optional() }).strict().optional() },
+      async (_params, ctx) => events.list(ctx.http?.authInfo));
+    server.server.setRequestHandler('events/subscribe', { params: identity.extend({
+      delivery: delivery.extend({ secret: z.string().max(100) }),
+      cursor: z.null().optional(), ttlMs: z.number().int().min(1000).nullable().optional(),
+    }) }, async (params, ctx) => events.subscribe(ctx.http?.authInfo, params.arguments, params.delivery, params.ttlMs));
+    server.server.setRequestHandler('events/unsubscribe', { params: identity },
+      async (params, ctx) => events.unsubscribe(ctx.http?.authInfo, params.arguments, params.delivery.url));
+  }
+
   if (runtime.operationStatusEnabled) server.registerTool('operation.status', {
     title: 'Look up an exact commit operation',
     description: 'Look up this authenticated OAuth client’s git.commit.create claim in one exact repository using the original idempotencyKey, including while its initial call is pending. Reports last durable phase, not process liveness. A known candidate may be reconciled through provider reads only; no execution or ref update is resumed. Missing records do not prove that no effect happened. Records are retained for seven days after the last durable write.',
@@ -246,7 +263,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     _meta: { securitySchemes: oauthSecurity },
   }, async (input, extra) => {
-    const clientId = extra.authInfo?.clientId;
+    const clientId = extra.http?.authInfo?.clientId;
     if (!clientId) throw new Error('Authenticated client identity is required');
     return result(await runtime.operationStatus(input, { clientId }));
   });
@@ -258,7 +275,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: { securitySchemes: oauthSecurity },
   }, async (_input, extra) => {
-    const clientId = extra.authInfo?.clientId;
+    const clientId = extra.http?.authInfo?.clientId;
     if (!clientId) throw new Error('Authenticated client identity is required');
     const scope = await workScope.describe(clientId);
     return { content: [{ type: 'text', text: JSON.stringify(scope) }] };
@@ -271,8 +288,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     _meta: { securitySchemes: oauthWriteSecurity },
   }, async ({ repository }, extra) => {
-    requireWriteScope(extra.authInfo?.scopes);
-    const clientId = extra.authInfo?.clientId;
+    requireWriteScope(extra.http?.authInfo?.scopes);
+    const clientId = extra.http?.authInfo?.clientId;
     if (!clientId) throw new Error('Authenticated client identity is required');
     return { content: [{ type: 'text', text: JSON.stringify(workScope.begin(clientId, repository)) }] };
   });
@@ -289,8 +306,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     _meta: { securitySchemes: oauthWriteSecurity },
   }, async (input, extra) => {
-    requireWriteScope(extra.authInfo?.scopes);
-    const clientId = extra.authInfo?.clientId;
+    requireWriteScope(extra.http?.authInfo?.scopes);
+    const clientId = extra.http?.authInfo?.clientId;
     if (!clientId) throw new Error('Authenticated client identity is required');
     const issued = issueWorkScopeApprovalGate(clientId, input);
     const result = {
@@ -313,8 +330,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: { securitySchemes: oauthWriteSecurity },
   }, async (input, extra) => {
-    requireWriteScope(extra.authInfo?.scopes);
-    const clientId = extra.authInfo?.clientId;
+    requireWriteScope(extra.http?.authInfo?.scopes);
+    const clientId = extra.http?.authInfo?.clientId;
     if (!clientId) throw new Error('Authenticated client identity is required');
     const gate = verifyWorkScopeApprovalGate(input.gate, clientId, input.workContext);
     const grant = await workScope.approveAdditionalScope(clientId, input.workContext, gate);
@@ -343,8 +360,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      requireWriteScope(extra.authInfo?.scopes);
-      const clientId = extra.authInfo?.clientId;
+      requireWriteScope(extra.http?.authInfo?.scopes);
+      const clientId = extra.http?.authInfo?.clientId;
       if (!clientId) throw new Error('Authenticated client identity is required');
       const project = runtime.resolveProjectReference(input.project);
       const repository = project.repository ?? project.id;
@@ -437,7 +454,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       const action = writeAction(input.operation);
       if (receipt.status === 'succeeded' && action) {
         try {
-          await requireScopedWrite(extra.authInfo, action, input.project, input.workContext);
+          await requireScopedWrite(extra.http?.authInfo, action, input.project, input.workContext);
           receipt.result.checks.push({ provider: 'work-scope', status: 'ready', summary: 'Owner-managed repository scope permits this operation', diagnostics: [] });
         } catch {
           receipt.result.status = 'blocked';
@@ -639,7 +656,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
   if (runtime.deploymentReadEnabled) {
     const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
-    const readTool = (name: 'deployment.audit' | 'deployment.runtime-logs' | 'deployment.env.list' | 'deployment.vcr.get' | 'deployment.vcr.list' | 'deployment.vcr.images.list', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any, extra: { authInfo?: AuthInfo }) => Promise<object>) => {
+    const readTool = (name: 'deployment.audit' | 'deployment.runtime-logs' | 'deployment.env.list' | 'deployment.vcr.get' | 'deployment.vcr.list' | 'deployment.vcr.images.list', title: string, description: string, inputSchema: z.ZodObject<any>, run: (input: any, extra: ServerContext) => Promise<object>) => {
       server.registerTool(name, { title, description, inputSchema, outputSchema: readReceiptSchema, annotations: readOnly, _meta: { securitySchemes: oauthSecurity } },
         async (input, extra) => result(await run(input, extra)));
     };
@@ -662,7 +679,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       server.registerTool(name, { title, description, inputSchema, outputSchema: mutationOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: destructive, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity } }, async (input, extra) => {
-        await requireScopedWrite(extra.authInfo, 'develop', input.project as ProjectReference, input.workContext as string);
+        await requireScopedWrite(extra.http?.authInfo, 'develop', input.project as ProjectReference, input.workContext as string);
         return result(await run(withoutWorkContext(input)));
       });
     };
@@ -698,7 +715,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.workerRuntimeDispatch({ project: input.project, issueNumber: input.issueNumber }));
     });
 
@@ -710,7 +727,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.workerRuntimeStopDispatch({ project: input.project }));
     });
 
@@ -728,7 +745,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: action !== 'terminate', openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {
-        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
         return result(await runtime.workerRuntimeControl(operation, { project: input.project, identifier: input.identifier }));
       });
     }
@@ -793,7 +810,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {
-        requireWriteScope(extra.authInfo?.scopes);
+        requireWriteScope(extra.http?.authInfo?.scopes);
         return result(await runtime.acquireRepository(input));
       });
     }
@@ -816,8 +833,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {
-        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
-        const clientId = extra.authInfo?.clientId;
+        await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
+        const clientId = extra.http?.authInfo?.clientId;
         if (!clientId) throw new Error('Authenticated client identity is required');
         const resolved = runtime.resolveProjectReference(input.project);
         const repository = resolved.repository ?? resolved.id;
@@ -846,8 +863,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {
-        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
-        const clientId = extra.authInfo?.clientId;
+        await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
+        const clientId = extra.http?.authInfo?.clientId;
         if (!clientId) throw new Error('Authenticated client identity is required');
         const resolved = runtime.resolveProjectReference(input.project);
         const repository = resolved.repository ?? resolved.id;
@@ -877,7 +894,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.createBranch(withoutWorkContext(input)));
     });
 
@@ -896,7 +913,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.bootstrapIntegrationBranch(withoutWorkContext(input)));
     });
 
@@ -914,7 +931,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.deleteBranch(withoutWorkContext(input)));
     });
 
@@ -934,8 +951,8 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
-      const clientId = extra.authInfo?.clientId;
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
+      const clientId = extra.http?.authInfo?.clientId;
       if (!clientId) throw new Error('Authenticated client identity is required');
       return result(await runtime.createCommit(withoutWorkContext(input), { clientId }));
     });
@@ -958,7 +975,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {
-        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
         return result(await runtime.createWorkflowCommit(withoutWorkContext(input)));
       });
     }
@@ -981,7 +998,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.createPullRequest(withoutWorkContext(input)));
     });
 
@@ -999,7 +1016,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.commentPullRequest(withoutWorkContext(input)));
     });
 
@@ -1019,7 +1036,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.updatePullRequestLabels(withoutWorkContext(input)));
     });
 
@@ -1041,7 +1058,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {
-        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
         return result(await runtime.closePullRequest(withoutWorkContext(input)));
       });
 
@@ -1053,7 +1070,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {
-        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
         return result(await runtime.readyPullRequestForReview(withoutWorkContext(input)));
       });
 
@@ -1065,7 +1082,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
         _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {
-        await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+        await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
         return result(await runtime.rerunPullRequestVerification(withoutWorkContext(input)));
       });
     }
@@ -1086,7 +1103,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.mergeIntegrationPullRequest(withoutWorkContext(input)));
     });
 
@@ -1105,7 +1122,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.reconcilePreviewPullRequest(withoutWorkContext(input)));
     });
 
@@ -1127,7 +1144,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'develop', input.project, input.workContext);
+      await requireScopedWrite(extra.http?.authInfo, 'develop', input.project, input.workContext);
       return result(await runtime.promotePullRequest(withoutWorkContext(input)));
     });
   }
@@ -1154,7 +1171,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'route-work', input.project);
+      await requireScopedWrite(extra.http?.authInfo, 'route-work', input.project);
       return result(await runtime.createWorkItem(input));
     });
 
@@ -1171,7 +1188,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'route-work', input.project);
+      await requireScopedWrite(extra.http?.authInfo, 'route-work', input.project);
       return result(await runtime.commentWorkItem(input));
     });
 
@@ -1191,7 +1208,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'route-work', input.project);
+      await requireScopedWrite(extra.http?.authInfo, 'route-work', input.project);
       return result(await runtime.updateWorkItemClassification(input));
     });
 
@@ -1212,7 +1229,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'route-work', input.project);
+      await requireScopedWrite(extra.http?.authInfo, 'route-work', input.project);
       return result(await runtime.updateWorkItemTriage(input));
     });
 
@@ -1229,7 +1246,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       _meta: { securitySchemes: oauthWriteSecurity },
     }, async (input, extra) => {
-      await requireScopedWrite(extra.authInfo, 'route-work', input.project);
+      await requireScopedWrite(extra.http?.authInfo, 'route-work', input.project);
       return result(await runtime.updateWorkItemStatus(input));
     });
   }

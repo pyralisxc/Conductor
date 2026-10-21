@@ -1,6 +1,8 @@
+import type { PrEvents } from '../runtime/pr-events.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { withRequestCorrelation, traceCommitBoundary } from './request-correlation.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { toNodeHandler } from '@modelcontextprotocol/node';
+import { createMcpHandler } from '@modelcontextprotocol/server';
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
 import { TOOL_RUNTIME_CONTRACT_VERSION } from '../runtime/types.js';
 import type { AccessTokenVerifier } from './auth.js';
@@ -10,6 +12,7 @@ import type { WorkScopeAuthorizer } from './work-scope.js';
 
 export interface ConductorHttpHandlerOptions {
   runtime: ConductorToolRuntime;
+  events?: PrEvents;
   verifier: AccessTokenVerifier;
   publicUrl: string;
   oauthIssuer: string;
@@ -23,6 +26,7 @@ export interface ConductorHttpHandlerOptions {
 }
 
 export function createConductorHttpHandler(options: ConductorHttpHandlerOptions) {
+  const mcpHandler = toNodeHandler(createMcpHandler(ctx => createConductorMcpServer(options.runtime, options.workScope, ctx.era === 'modern' ? options.events : undefined)));
   const mcpUrl = new URL('/mcp', ensureTrailingSlash(options.publicUrl));
   const metadata = {
     resource: mcpUrl.toString(),
@@ -34,6 +38,21 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
 
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', options.publicUrl);
+    if (url.pathname === '/events/github' && options.events) {
+      if (request.method !== 'POST') { json(response, 405, { error: 'METHOD_NOT_ALLOWED' }); return; }
+      try {
+        const chunks: Buffer[] = []; let size = 0;
+        for await (const chunk of request) {
+          const bytes = Buffer.from(chunk); size += bytes.length;
+          if (size > 262144) { json(response, 413, { error: 'PAYLOAD_TOO_LARGE' }); return; }
+          chunks.push(bytes);
+        }
+        const header = (name: string) => typeof request.headers[name] === 'string' ? request.headers[name] as string : '';
+        const status = await options.events.ingest(Buffer.concat(chunks), header('x-github-event'), header('x-github-delivery'), header('x-hub-signature-256'));
+        json(response, status === 'pending' || status === 'failed' || status === 'capacity' ? 503 : 200, { status });
+      } catch { json(response, 400, { error: 'EVENT_REJECTED' }); }
+      return;
+    }
     if (request.method === 'GET' && url.pathname === '/') {
       response.statusCode = 303;
       response.setHeader('Location', '/connections/vercel');
@@ -79,11 +98,8 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
       const lengthHeader = request.headers['content-length'];
       const parsedLength = parseContentLength(lengthHeader);
       traceCommitBoundary('http-admitted', { contentLength: parsedLength !== null && Number.isSafeInteger(parsedLength) ? parsedLength : null });
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      const server = createConductorMcpServer(options.runtime, options.workScope);
       try {
-        await server.connect(transport);
-        await transport.handleRequest(request, response);
+        await mcpHandler(request, response);
       } catch {
       if (!response.headersSent) {
         json(response, 500, {
@@ -94,8 +110,6 @@ export function createConductorHttpHandler(options: ConductorHttpHandlerOptions)
       }
       } finally {
         traceCommitBoundary('http-completed', { statusCode: response.statusCode, durationMs: Date.now() - started });
-        await transport.close().catch(() => undefined);
-        await server.close().catch(() => undefined);
       }
     });
   };

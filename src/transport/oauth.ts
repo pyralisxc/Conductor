@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
-import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import type { AuthInfo } from '@modelcontextprotocol/server';
 import { authInfoFromJwt, CONDUCTOR_READ_SCOPE, CONDUCTOR_WRITE_SCOPE, type AccessTokenVerifier } from './auth.js';
 import { derivedSecret, sessionSecret } from './owner-auth.js';
 import {

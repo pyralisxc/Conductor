@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import {
   ConductorToolRuntime, GitHubRuntimeProvider, IdempotentMutationExecutor, InMemoryIdempotencyStore,
   createConductorHttpHandler,
@@ -253,7 +253,7 @@ test('HTTP MCP status uses verified client identity and read scope while commit 
   assert.ok(address && typeof address === 'object');
   const clients: Client[] = [];
   async function connect(token: string) {
-    const client = new Client({ name: 'commit-recovery-proof', version: '1.0.0' });
+    const client = new Client({ name: 'commit-recovery-proof', version: '1.0.0' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${(address as { port: number }).port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
     clients.push(client); return client;
   }

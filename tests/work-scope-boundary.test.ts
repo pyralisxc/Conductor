@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { ConductorToolRuntime, createConductorHttpHandler, IdempotentMutationExecutor, InMemoryIdempotencyStore } from '../src/index.js';
 import { clientFingerprint, parseWorkScopeGrant, WorkScopeAuthorizer, type WorkScopeGrant, type WorkScopeStore } from '../src/transport/work-scope.js';
 
@@ -82,7 +82,7 @@ test('MCP refuses cross-repository branch writes before the provider executes', 
   await once(server, 'listening');
   const address = server.address();
   assert.ok(address && typeof address === 'object');
-  const client = new Client({ name: 'scope-test', version: '1.0.0' });
+  const client = new Client({ name: 'scope-test', version: '1.0.0' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`), {
       requestInit: { headers: { Authorization: 'Bearer test-token' } },

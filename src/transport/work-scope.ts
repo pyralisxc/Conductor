@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import type { AuthInfo } from '@modelcontextprotocol/server';
 import { Redis } from '@upstash/redis';
 import type { ProjectReference, VercelReadEvidence, LifecycleGateSpec, LifecycleGateKind } from '../runtime/types.js';
 import { derivedSecret } from './owner-auth.js';

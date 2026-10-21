@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
-import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import type { AuthInfo } from '@modelcontextprotocol/server';
 
 export const CONDUCTOR_READ_SCOPE = 'conductor.read';
 export const CONDUCTOR_WRITE_SCOPE = 'conductor.write';
@@ -59,7 +59,7 @@ export function authInfoFromJwt(
     scopes,
     expiresAt: payload.exp,
     resource: new URL(audience),
-    extra: payload.sub ? { subject: payload.sub } : undefined,
+    extra: payload.sub ? { subject: payload.sub, issuer: payload.iss } : undefined,
   };
 }
 
