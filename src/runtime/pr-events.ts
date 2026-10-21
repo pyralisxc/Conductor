@@ -17,9 +17,27 @@ export const prEventArguments = z.object({
 }).strict();
 export type PrEventArguments = z.infer<typeof prEventArguments>;
 export interface EventOwner { issuer: string; subject: string; clientId: string }
+// Allowlisted metadata only; unknown provider fields (including bodies) are stripped.
+const reviewActor = z.object({ id: z.number().int().positive(), login: z.string().max(100).regex(/^[A-Za-z0-9_\[\]-]+$/).nullable() }).nullable();
+const sha = z.string().regex(/^[a-f0-9]{40}$/);
+const version = z.string().regex(/^[a-f0-9]{64}$/);
+export const prReviewEvidence = z.object({
+  complete: z.boolean(), reason: z.enum(['complete', 'page-limit']),
+  revision: version, currentHeadApprovals: z.number().int().nonnegative().nullable(),
+  latest: z.array(z.object({ id: z.number().int().positive(), reviewer: reviewActor,
+    state: z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED']),
+    commitSha: sha, currentHead: z.boolean(), submittedAt: z.iso.datetime(), version,
+  })).max(100),
+  comments: z.array(z.object({ id: z.number().int().positive(), reviewId: z.number().int().positive().nullable(),
+    author: reviewActor, commitSha: sha, currentHead: z.boolean(), updatedAt: z.iso.datetime(),
+    url: z.string().max(400).regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[0-9]+#discussion_r[0-9]+$/), version,
+  })).max(100),
+});
+export type PrReviewEvidence = z.infer<typeof prReviewEvidence>;
+export type PrEventSnapshot = PullRequestStatus & { reviews?: PrReviewEvidence };
 export interface PrEventSource {
   /** Revalidate principal/resource authority and current installation access on every call. */
-  read(owner: EventOwner, target: PrEventArguments, generation: string): Promise<PullRequestStatus>;
+  read(owner: EventOwner, target: PrEventArguments, generation: string): Promise<PrEventSnapshot>;
 }
 interface Subscription {
   id: string; owner: EventOwner; generation: string; url: string; secret: string; expiresAt: number;
@@ -128,19 +146,20 @@ export class PrEvents {
   async list(auth?: AuthInfo) {
     const owner = await this.authorize(auth);
     await this.read(owner, auth!.extra!.grantGeneration as string);
-    return { events: [{ name: PR_EVENT, description: 'Current verification evidence for one exact authorized Preview PR wait. Re-read pull-request.status before any already-authorized continuation.',
+    return { events: [{ name: PR_EVENT, description: 'Current verification and bounded review metadata for one exact authorized Preview PR wait. Re-read current native PR and review state before any already-authorized continuation.',
       delivery: ['webhook'], inputSchema: z.toJSONSchema(prEventArguments),
       payloadSchema: { type: 'object', properties: {
         repository: { type: 'string' }, pullRequestNumber: { type: 'integer' }, headSha: { type: 'string' }, baseSha: { type: 'string' },
-        state: { type: 'string' }, merged: { type: 'boolean' }, draft: { type: 'boolean' }, checks: { type: 'object' }, url: { type: 'string' },
+        state: { type: 'string' }, merged: { type: 'boolean' }, draft: { type: 'boolean' }, checks: { type: 'object' }, url: { type: 'string' }, reviews: z.toJSONSchema(prReviewEvidence),
       }, required: ['repository', 'pullRequestNumber', 'headSha', 'baseSha', 'state', 'merged', 'draft', 'checks', 'url'], additionalProperties: false },
     }] };
   }
   private identity(owner: EventOwner, url: string) { return `sub_${hash([owner.issuer, owner.subject, owner.clientId, url, PR_EVENT, this.options.target])}`; }
-  private evidence(pull: PullRequestStatus) {
+  private evidence(pull: PrEventSnapshot) {
     const target = this.options.target;
     if (pull.repository !== target.repository || pull.pullRequestNumber !== target.pullRequestNumber || pull.head.sha !== target.headSha || pull.base.sha !== target.baseSha || pull.base.ref !== 'preview') throw new Error('Exact Preview wait no longer matches');
     return { ...target, state: pull.state, merged: pull.merged, draft: pull.draft,
+      ...(pull.reviews ? { reviews: prReviewEvidence.parse(pull.reviews) } : {}),
       checks: { total: pull.checks.total, pending: pull.checks.pending, successful: pull.checks.successful, failed: pull.checks.failed, neutral: pull.checks.neutral, skipped: pull.checks.skipped },
       url: `https://github.com/${target.repository}/pull/${target.pullRequestNumber}` };
   }

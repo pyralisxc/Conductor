@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { prReviewEvidence, type PrReviewEvidence, type PrEventArguments } from '../runtime/pr-events.js';
 import { assertReleaseIdentityTransport, RELEASE_IDENTITY_MAX_BYTES } from '../runtime/release-identities.js';
 import { assertCommitCheckpoint, type CommitCheckpoint, type CommitMutationProgress } from '../runtime/commit-checkpoint.js';
 import type {
@@ -108,7 +110,7 @@ interface GitHubPullRequestResponse {
   merged_at?: string | null;
   body?: string | null;
   head: { ref: string; sha: string };
-  base: { ref: string; sha: string };
+  base: { ref: string; sha: string; repo?: { full_name: string } };
   labels?: Array<{ name?: string | null }>;
 }
 
@@ -755,6 +757,72 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
         ? 'current'
         : 'stale';
     return { pullRequest, seal, sealState };
+  }
+
+  /** Exact-wait review metadata only. Every private request rechecks the caller's grant. */
+  async getPullRequestReviewState(target: PrEventArguments, installationId: number, authorize: () => Promise<unknown>): Promise<PrReviewEvidence> {
+    await authorize();
+    const { repository, credential } = await this.readableRepository(
+      { id: target.repository, repository: target.repository }, { pull_requests: 'read' });
+    if (credential.kind !== 'app-installation' || credential.identity.installationId !== installationId || credential.repository !== repository) throw new Error('Review installation identity mismatch');
+    const read = async <T>(path: string): Promise<T> => {
+      await authorize();
+      const result = await this.request<T>(repository, path, {}, credential);
+      await authorize();
+      return result;
+    };
+    const assertIdentity = async () => {
+      const pull = await read<GitHubPullRequestResponse>(`/pulls/${target.pullRequestNumber}`);
+      if (pull.number !== target.pullRequestNumber || pull.head.sha !== target.headSha || pull.base.sha !== target.baseSha || pull.base.ref !== 'preview' || pull.base.repo?.full_name !== repository) throw new Error('Exact review wait changed');
+    };
+    assertPullRequestNumber(target.pullRequestNumber);
+    await assertIdentity();
+    // A full final page is explicitly incomplete, even at exactly 100 items.
+    const pages = async (kind: 'reviews' | 'comments') => {
+      const items: Record<string, unknown>[] = [];
+      for (let page = 1; page <= 2; page++) {
+        const result = await read<unknown>(`/pulls/${target.pullRequestNumber}/${kind}?per_page=50&page=${page}`);
+        if (!Array.isArray(result) || result.length > 50 || result.some(item => !item || typeof item !== 'object')) throw new Error('Invalid review collection');
+        items.push(...result);
+        if (result.length < 50) return { items, complete: true };
+      }
+      return { items, complete: false };
+    };
+    const reviews = await pages('reviews'); const comments = await pages('comments');
+    await assertIdentity(); // Pagination is not an atomic provider snapshot.
+    const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const actor = (value: unknown) => {
+      if (value === null) return null;
+      const user = value as { id?: unknown; login?: unknown } | undefined;
+      return { id: user?.id, login: user?.login ?? null };
+    };
+    const reviewMetadata = reviews.items.filter(item => item.state !== 'PENDING').map(item => ({
+      id: item.id, reviewer: actor(item.user), state: item.state, commitSha: item.commit_id,
+      currentHead: item.commit_id === target.headSha, submittedAt: item.submitted_at,
+      version: digest([item.body ?? '', item.state, item.commit_id, item.submitted_at]),
+    }));
+    const commentMetadata = comments.items.map(item => ({
+      id: item.id, reviewId: item.pull_request_review_id ?? null, author: actor(item.user),
+      commitSha: item.commit_id, currentHead: item.commit_id === target.headSha, updatedAt: item.updated_at,
+      // Derive URLs from validated resource identity, never payload-controlled URLs.
+      url: `https://github.com/${repository}/pull/${target.pullRequestNumber}#discussion_r${item.id}`,
+      version: digest([item.body ?? '', item.updated_at, item.commit_id]),
+    }));
+    const checked = prReviewEvidence.parse({ complete: true, reason: 'complete', revision: '0'.repeat(64),
+      currentHeadApprovals: 0, latest: reviewMetadata, comments: commentMetadata });
+    checked.latest.sort((a, b) => a.id - b.id); checked.comments.sort((a, b) => a.id - b.id);
+    if (new Set(checked.latest.map(r => r.id)).size !== checked.latest.length || new Set(checked.comments.map(c => c.id)).size !== checked.comments.length) throw new Error('Review pagination changed');
+    const complete = reviews.complete && comments.complete;
+    const revision = digest([complete, checked.latest, checked.comments]);
+    // Never infer latest decisions or deletions from a truncated collection.
+    if (!complete) return { complete: false, reason: 'page-limit', revision, currentHeadApprovals: null, latest: [], comments: [] };
+    const latest = new Map<string, PrReviewEvidence['latest'][number]>();
+    for (const review of [...checked.latest].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt) || a.id - b.id)) {
+      latest.set(review.reviewer ? String(review.reviewer.id) : `deleted:${review.id}`, review);
+    }
+    const decisions = [...latest.values()].sort((a, b) => a.id - b.id);
+    return { complete: true, reason: 'complete', revision, currentHeadApprovals: decisions.filter(r => r.currentHead && r.reviewer && r.state === 'APPROVED').length,
+      latest: decisions, comments: checked.comments };
   }
 
   async getPullRequestStatus(input: GetPullRequestStatusInput): Promise<PullRequestStatus> {
