@@ -1,16 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { checkServerIdentity, type PeerCertificate } from 'node:tls';
 import { PassThrough } from 'node:stream';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import type { LookupAddress } from 'node:dns';
-import { safeCallbackPost, type CallbackNetwork } from '../src/transport/event-callback.js';
+import { safeCallbackPost, validateCallbackRecipient, type CallbackNetwork } from '../src/transport/event-callback.js';
 
 const url = 'https://receiver.example/callback';
 const publicAnswer = { address: '8.8.8.8', family: 4 };
 const privateAnswer = { address: '127.0.0.1', family: 4 };
 
 /** Controlled Node request boundary; no DNS, socket, TLS or live callback is contacted. */
-function networkFixture(initialAnswers: LookupAddress[], status = 204) {
+function networkFixture(initialAnswers: LookupAddress[], status = 204, peer = publicAnswer.address, authorized = true) {
   let answers = initialAnswers;
   let resolves = 0; let requests = 0;
   const peers: string[] = [];
@@ -49,6 +51,10 @@ function networkFixture(initialAnswers: LookupAddress[], status = 204) {
             (response as unknown as PassThrough).end();
           } catch (error) { req.emit('error', error); }
         });
+      });
+      queueMicrotask(() => {
+        const socket = Object.assign(new EventEmitter(), { remoteAddress: peer, authorized });
+        req.emit('socket', socket); socket.emit('secureConnect');
       });
       return req;
     },
@@ -90,4 +96,23 @@ test('safeCallbackPost fails closed for IPv6-only or empty IPv4 resolution resul
     await assert.rejects(safeCallbackPost('receiver.example', f.network)(url, '{}', {}), /not public/);
     assert.equal(f.resolves(), 1); assert.equal(f.requests(), 0);
   }
+});
+
+
+test('pending preflight resolves only public addresses and opens no request', async () => {
+  for (const answers of [[publicAnswer], [publicAnswer, privateAnswer], [{ address: '192.0.2.1', family: 4 }]]) {
+    const f = networkFixture(answers);
+    if (answers.length === 1 && answers[0] === publicAnswer) await validateCallbackRecipient(url, f.network);
+    else await assert.rejects(validateCallbackRecipient(url, f.network), /not public/);
+    assert.equal(f.requests(), 0);
+  }
+});
+
+test('socket mismatch and unauthorized TLS cannot send a body; Node hostname validation remains required', async () => {
+  for (const [peer, authorized] of [[privateAnswer.address, true], [publicAnswer.address, false]] as const) {
+    const f = networkFixture([publicAnswer], 204, peer, authorized);
+    await assert.rejects(safeCallbackPost('receiver.example', f.network)(url, '{}', {}), /socket identity mismatch/);
+    assert.deepEqual(f.peers, []); // request body never finished
+  }
+  assert.ok(checkServerIdentity('receiver.example', { subjectaltname: 'DNS:other.example' } as PeerCertificate));
 });

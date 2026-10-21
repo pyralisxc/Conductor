@@ -3,6 +3,7 @@ import { lookup } from 'node:dns/promises';
 import type { LookupAddress } from 'node:dns';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import { request, type RequestOptions } from 'node:https';
+import type { TLSSocket } from 'node:tls';
 import { BlockList, isIP } from 'node:net';
 
 const blocked = new BlockList();
@@ -45,21 +46,30 @@ export interface CallbackNetwork {
 }
 const callbackNetwork: CallbackNetwork = { resolve: lookup, request };
 
+/** DNS-only preflight; each actual send resolves and pins again. */
+export async function validateCallbackRecipient(value: string, network: CallbackNetwork = callbackNetwork): Promise<void> {
+  const url = callbackUrl(value, new URL(value).hostname);
+  await resolveCallbackAddress(url, network);
+}
+async function resolveCallbackAddress(url: URL, network: CallbackNetwork): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const addresses = await Promise.race([
+    network.resolve(url.hostname, { all: true, family: 4 }),
+    new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Callback DNS timeout')), 2000); }),
+  ]).finally(() => { if (timer) clearTimeout(timer); });
+  if (!addresses.length || addresses.some(({ address }) => !publicCallbackAddress(address))) throw new Error('Callback address is not public');
+  return addresses[0].address;
+}
+
 export function safeCallbackPost(hostname: string, network: CallbackNetwork = callbackNetwork): CallbackPost {
   return async (value, body, headers) => {
     const url = callbackUrl(value, hostname);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const addresses = await Promise.race([
-      network.resolve(url.hostname, { all: true, family: 4 }),
-      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Callback DNS timeout')), 2000); }),
-    ]).finally(() => { if (timer) clearTimeout(timer); });
-    if (!addresses.length || addresses.some(({ address }) => !publicCallbackAddress(address))) throw new Error('Callback address is not public');
-    const address = addresses[0].address;
+    const address = await resolveCallbackAddress(url, network);
     return new Promise((resolve, reject) => {
       const req = network.request(url, {
         method: 'POST', headers: { ...headers, 'Content-Length': String(Buffer.byteLength(body)) },
         // Pin the validated address; the URL hostname remains the TLS identity. No redirects or connection reuse.
-        agent: false, family: 4, lookup: (_host, _options, done) => done(null, address, 4),
+        agent: false, family: 4, rejectUnauthorized: true, servername: url.hostname, lookup: (_host, _options, done) => done(null, address, 4),
         signal: AbortSignal.timeout(5000),
       }, res => {
         let size = 0; const chunks: Buffer[] = [];
@@ -72,7 +82,15 @@ export function safeCallbackPost(hostname: string, network: CallbackNetwork = ca
         res.on('end', () => resolve({ status: res.statusCode ?? 500, body: Buffer.concat(chunks).toString('utf8') }));
       });
       req.on('error', reject);
-      req.end(body);
+      req.on('socket', socket => {
+        const tls = socket as TLSSocket;
+        tls.once('secureConnect', () => {
+          if (!tls.authorized || tls.remoteAddress?.replace(/^::ffff:/, '') !== address) {
+            req.destroy(new Error('Callback socket identity mismatch')); return;
+          }
+          req.end(body);
+        });
+      });
     });
   };
 }

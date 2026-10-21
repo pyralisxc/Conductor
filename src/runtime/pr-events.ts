@@ -1,3 +1,4 @@
+import { clientFingerprint } from '../transport/work-scope.js';
 import { oauthGrantKey, requireOAuthGrant, grantGenerationSchema, type OAuthGrantStore } from '../transport/oauth-grant-store.js';
 import { ingestGitHubPrEvent } from '../providers/github-events.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -56,6 +57,7 @@ export interface PrEventSource {
 interface Subscription {
   id: string; owner: EventOwner; generation: string; url: string; secret: string; expiresAt: number;
   previousSecret?: string; rotationUntil?: number; verifiedUntil: number;
+  binding?: { id: string; phase: 'pending' | 'challenging' | 'active'; fingerprint: string; target: PrEventArguments; attemptId?: string };
 }
 interface Delivery {
   id: string; source: string; fingerprint: string; body: string; createdAt: number;
@@ -65,6 +67,7 @@ export interface PrEventState {
   subscription?: Subscription; baseline?: string;
   deliveries: Delivery[];
   sources?: { id: string; observedAt: number }[];
+  usedBindingAttempts?: string[];
 }
 export interface PrEventStore {
   load(): Promise<{ version: string | null; state: PrEventState }>;
@@ -113,16 +116,39 @@ const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(cano
 export const eventOwnerEqual = (a: EventOwner, b: EventOwner) => a.issuer === b.issuer && a.subject === b.subject && a.clientId === b.clientId;
 export interface PrEventsOptions {
   target: PrEventArguments; owner: EventOwner; installationId: number;
-  callbackHostname: string; webhookSecret: string; store: PrEventStore;
+  callbackHostname?: string;
+  delegatedRecipient?: { clientFingerprint: string; activation?: { bindingId: string; url: string; generation: string; attemptId: string; expiresAt: number } };
+  validateRecipient?: (url: string) => Promise<void>;
+  webhookSecret: string; store: PrEventStore;
   grants: OAuthGrantStore;
   source: PrEventSource; vault: VersionedProviderCredentialVault; post: CallbackPost; now?: () => number;
 }
 export class PrEvents {
   private readonly now: () => number;
-  constructor(private readonly options: PrEventsOptions) { this.now = options.now ?? Date.now; }
+  constructor(private readonly options: PrEventsOptions) {
+    this.now = options.now ?? Date.now;
+    if (options.delegatedRecipient && !options.validateRecipient) throw new Error('Delegated recipient preflight is required');
+    if (Boolean(options.callbackHostname) === Boolean(options.delegatedRecipient)) throw new Error('Exactly one recipient mode is required');
+  }
+  private recipientUrl(value: string) {
+    return callbackUrl(value, this.options.callbackHostname ?? new URL(value).hostname).toString();
+  }
+  private bindingMatches(sub: Subscription) {
+    const mode = this.options.delegatedRecipient;
+    if (!mode) return !sub.binding;
+    return !!sub.binding && sub.binding.fingerprint === mode.clientFingerprint &&
+      clientFingerprint(sub.owner.clientId) === mode.clientFingerprint && eventOwnerEqual(sub.owner, this.options.owner) &&
+      hash(sub.binding.target) === hash(this.options.target) && sub.id === this.identity(sub.owner, sub.url);
+  }
+  private activationMatches(sub: Subscription) {
+    const approval = this.options.delegatedRecipient?.activation;
+    return !!approval && approval.bindingId === sub.binding?.id && approval.url === sub.url && approval.generation === sub.generation &&
+      approval.attemptId === sub.binding?.attemptId && approval.expiresAt > this.now();
+  }
   private async authorize(auth: AuthInfo | undefined, args?: PrEventArguments) {
     const owner = eventOwner(auth);
     if (!eventOwnerEqual(owner, this.options.owner) || (args && hash(args) !== hash(this.options.target))) throw new Error('Event resource is not authorized');
+    if (this.options.delegatedRecipient && clientFingerprint(owner.clientId) !== this.options.delegatedRecipient.clientFingerprint) throw new Error('Event client fingerprint is not authorized');
     await this.grant(owner, auth?.extra?.grantGeneration);
     return owner;
   }
@@ -136,6 +162,7 @@ export class PrEvents {
     return result;
   }
   private async checkSubscription(sub: Subscription) {
+    if (!this.bindingMatches(sub) || (sub.binding && (sub.binding.phase !== 'active' || !this.activationMatches(sub)))) throw new Error('Recipient binding is not active');
     if (sub.expiresAt <= this.now()) throw new Error('Subscription expired');
     await this.grant(sub.owner, sub.generation);
     if (sub.expiresAt <= this.now()) throw new Error('Subscription expired');
@@ -175,7 +202,8 @@ export class PrEvents {
   async subscribe(auth: AuthInfo | undefined, args: PrEventArguments, delivery: { url: string; secret: string }, ttlMs?: number | null) {
     const owner = await this.authorize(auth, args);
     const generation = auth!.extra!.grantGeneration as string;
-    const url = callbackUrl(delivery.url, this.options.callbackHostname).toString(); signingKey(delivery.secret);
+    const url = this.recipientUrl(delivery.url); signingKey(delivery.secret);
+    if (this.options.delegatedRecipient) return this.subscribeDelegated(auth!, args, owner, generation, url, delivery.secret, ttlMs);
     const id = this.identity(owner, url);
     const initial = this.evidence(await this.read(owner, generation, args));
     const loaded = await this.options.store.load();
@@ -200,12 +228,65 @@ export class PrEvents {
     await this.checkSubscription(subscription).catch(async error => { await this.stop(subscription); throw error; });
     return { id, refreshBefore: new Date(expiresAt).toISOString(), cursor: null, truncated: false };
   }
+  private async subscribeDelegated(auth: AuthInfo, args: PrEventArguments, owner: EventOwner, generation: string, url: string, secret: string, ttlMs?: number | null) {
+    const mode = this.options.delegatedRecipient!;
+    const loaded = await this.options.store.load();
+    const old = loaded.state.subscription;
+    const id = this.identity(owner, url);
+    const grant = await this.grant(owner, generation);
+    const expiresAt = Math.min(grant.expiresAt, this.now() + Math.min(ttlMs ?? 3600000, 3600000), auth.expiresAt === undefined ? Infinity : auth.expiresAt * 1000);
+    if (expiresAt <= this.now()) throw new Error('Event authorization expired');
+    if (old) {
+      if (!this.bindingMatches(old) || old.id !== id || old.generation !== generation || old.expiresAt <= this.now() || this.options.vault.open(old.secret).plaintext !== secret) throw new Error('Recipient changed; explicit teardown and rebind required');
+      if (old.binding!.phase === 'active') {
+        await this.checkSubscription(old);
+        return { id, refreshBefore: new Date(old.expiresAt).toISOString(), cursor: null, truncated: false };
+      }
+      if (old.binding!.phase !== 'pending') throw new Error('Incomplete challenge; explicit teardown and rebind required');
+    } else {
+      // No provider read, challenge or application payload while approval is absent.
+      await this.options.validateRecipient!(url);
+      const pending: Subscription = { id, owner, generation, url, secret: this.options.vault.seal(secret), expiresAt, verifiedUntil: 0,
+        binding: { id: randomUUID(), phase: 'pending', fingerprint: mode.clientFingerprint, target: args } };
+      await this.grant(owner, generation);
+      if (!await this.options.store.save(loaded.version, { subscription: pending, deliveries: [], usedBindingAttempts: loaded.state.usedBindingAttempts })) throw new Error('Pending binding changed');
+      throw new ProtocolError(-32000, 'Recipient binding awaits explicit activation approval', { reason: 'recipient_pending', bindingId: pending.binding!.id });
+    }
+    const approval = mode.activation;
+    if (!approval || approval.bindingId !== old.binding!.id || approval.url !== url || approval.generation !== generation || approval.expiresAt <= this.now()) throw new ProtocolError(-32000, 'Recipient binding awaits explicit activation approval', { reason: 'recipient_pending', bindingId: old.binding!.id });
+    if ((loaded.state.usedBindingAttempts ?? []).includes(approval.attemptId) || (loaded.state.usedBindingAttempts?.length ?? 0) >= 16) throw new Error('Activation attempt already used or capacity reached');
+    loaded.state.usedBindingAttempts = [...(loaded.state.usedBindingAttempts ?? []), approval.attemptId];
+    // Persist a single-use challenge claim. Restart/failure never automatically replays it.
+    old.expiresAt = Math.min(old.expiresAt, approval.expiresAt);
+    old.binding!.phase = 'challenging'; old.binding!.attemptId = approval.attemptId;
+    await this.grant(owner, generation);
+    if (!await this.options.store.save(loaded.version, loaded.state)) throw new Error('Challenge claim changed');
+    const claim = JSON.stringify(loaded.state);
+    const check = async () => {
+      await this.grant(owner, generation);
+      if (old.expiresAt <= this.now() || approval.expiresAt <= this.now() || (await this.options.store.load()).version !== claim) throw new Error('Challenge authority changed');
+    };
+    await check();
+    const initial = this.evidence(await this.read(owner, generation, args));
+    await check();
+    try { await verifyCallback(async (...params) => { await check(); return this.options.post(...params); }, { id, url, secret }); }
+    catch { throw new ProtocolError(-32015, 'Callback verification failed', { reason: 'challenge_failed' }); }
+    await check();
+    old.binding!.phase = 'active'; old.verifiedUntil = this.now() + 300000;
+    loaded.state.baseline = hash(initial);
+    if (!await this.options.store.save(claim, loaded.state)) throw new Error('Recipient activation changed');
+    await this.checkSubscription(old);
+    await this.reconcile(`baseline_${randomUUID()}`);
+    await this.checkSubscription(old).catch(async error => { await this.stop(old); throw error; });
+    return { id, refreshBefore: new Date(old.expiresAt).toISOString(), cursor: null, truncated: false };
+  }
   async unsubscribe(auth: AuthInfo | undefined, args: PrEventArguments, url: string) {
     const owner = await this.authorize(auth, args);
-    const id = this.identity(owner, callbackUrl(url, this.options.callbackHostname).toString());
+    const id = this.identity(owner, this.recipientUrl(url));
     for (let attempt = 0; attempt < 3; attempt++) {
       const loaded = await this.options.store.load();
       if (loaded.state.subscription?.id !== id) return {};
+      if (this.options.delegatedRecipient && (loaded.state.subscription.generation !== auth!.extra!.grantGeneration || !this.bindingMatches(loaded.state.subscription))) throw new Error('Recipient binding requires owner teardown');
       delete loaded.state.subscription;
       if (await this.options.store.save(loaded.version, loaded.state)) return {};
     }
@@ -218,7 +299,7 @@ export class PrEvents {
   async reconcile(source: string): Promise<string> {
     let loaded = await this.options.store.load();
     const sub = loaded.state.subscription;
-    if (!sub) return 'inactive';
+    if (!sub || (sub.binding && sub.binding.phase !== 'active')) return 'inactive';
     if (sub.expiresAt <= this.now()) { await this.stop(sub); return 'inactive'; }
     try { await this.checkSubscription(sub); } catch { await this.stop(sub); return 'blocked'; }
     const existing = loaded.state.deliveries.find(d => d.source === source);
@@ -253,6 +334,7 @@ export class PrEvents {
       if (active.expiresAt <= this.now()) { await this.stop(active); return 'inactive'; }
       if (record?.status === 'pending' && (record.leaseUntil ?? 0) > this.now()) return 'pending';
       if (!record || record.status === 'accepted' || record.status === 'stopped' || record.attempts >= 3) return record?.status ?? 'inactive';
+      try { await this.checkSubscription(active); } catch { await this.stop(active); return 'blocked'; }
       // Access and exact heads are revalidated before each attempt, including retries.
       try { if (hash(this.evidence(await this.read(active.owner, active.generation))) !== record.fingerprint) return 'superseded'; } catch { await this.stop(sub); return 'blocked'; }
       record.attempts++; record.status = 'pending'; record.leaseUntil = this.now() + 30000;

@@ -1,3 +1,6 @@
+import { clientFingerprint } from '../transport/work-scope.js';
+import { grantGenerationSchema } from '../transport/oauth-grant-store.js';
+import { callbackUrl, validateCallbackRecipient } from '../transport/event-callback.js';
 import { oauthGrantStore, requireOAuthGrant } from '../transport/oauth-grant-store.js';
 import { createHash } from 'node:crypto';
 import { Redis } from '@upstash/redis';
@@ -9,12 +12,19 @@ import { providerCredentialVaultFromEnvironment } from '../connections/universal
 import { GitHubRuntimeProvider } from '../providers/github.js';
 import { safeCallbackPost } from '../transport/event-callback.js';
 
-const configuration = z.object({
+const commonConfiguration = {
   target: prEventArguments,
   owner: z.object({ issuer: z.url(), subject: z.string().min(1).max(200), clientId: z.string().min(1).max(2048) }).strict(),
   installationId: z.number().int().positive(),
-  callbackHostname: z.string().max(253).regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)+$/),
-}).strict();
+};
+const configuration = z.union([
+  z.object({ ...commonConfiguration, callbackHostname: z.string().max(253).regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)+$/) }).strict(),
+  z.object({ ...commonConfiguration, delegatedRecipient: z.object({
+    clientFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    activation: z.object({ bindingId: z.uuid(), url: z.string().max(2048), generation: grantGenerationSchema,
+      attemptId: z.uuid(), expiresAt: z.number().int().positive() }).strict().optional(),
+  }).strict() }).strict(),
+]);
 
 /** Disabled by default. Provisioning/approving a live Preview subscription is a separate gate. */
 export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environment: NodeJS.ProcessEnv = process.env): PrEventService | undefined {
@@ -28,6 +38,9 @@ export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environm
   if (!environment.CONDUCTOR_PR_EVENTS_JSON) return undefined;
   if (environment.VERCEL_ENV !== 'preview') throw new Error('PR events are limited to Preview');
   const config = configuration.parse(JSON.parse(environment.CONDUCTOR_PR_EVENTS_JSON));
+  const delegated = 'delegatedRecipient' in config ? config.delegatedRecipient : undefined;
+  if (delegated && delegated.clientFingerprint !== clientFingerprint(config.owner.clientId)) throw new Error('Configured client fingerprint does not match owner');
+  if (delegated?.activation) callbackUrl(delegated.activation.url, new URL(delegated.activation.url).hostname);
   const url = environment.UPSTASH_REDIS_REST_URL ?? environment.KV_REST_API_URL;
   const token = environment.UPSTASH_REDIS_REST_TOKEN ?? environment.KV_REST_API_TOKEN;
   const appId = environment.CONDUCTOR_GITHUB_APP_ID;
@@ -38,12 +51,14 @@ export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environm
   const reviewProvider = new GitHubRuntimeProvider({ credentials: app, bindings: [{ id: config.target.repository, repository: config.target.repository, write: false }] });
   const vault = providerCredentialVaultFromEnvironment('pr-events', environment);
   vault.seal('configuration-check'); // Fail at startup if the existing vault is unavailable.
-  const digest = createHash('sha256').update(JSON.stringify(config)).digest('hex');
+  // Stable single delegated slot prevents config edits silently moving existing authority.
+  const digest = createHash('sha256').update(delegated ? `delegated:${config.installationId}` : JSON.stringify(config)).digest('hex');
   const redis = new Redis({ url, token, enableTelemetry: false, automaticDeserialization: false });
   const grants = oauthGrantStore(environment);
   return new PrEvents({ ...config, webhookSecret, vault, grants,
     store: new RedisPrEventStore(redis, `conductor:preview:pr-events:v1:${digest}`),
-    post: safeCallbackPost(config.callbackHostname),
+    validateRecipient: delegated ? validateCallbackRecipient : undefined,
+    post: 'callbackHostname' in config ? safeCallbackPost(config.callbackHostname) : (url, body, headers) => safeCallbackPost(new URL(url).hostname)(url, body, headers),
     source: { async read(owner, target, generation) {
       if (!eventOwnerEqual(owner, config.owner)) throw new Error('Event principal revoked');
       await requireOAuthGrant(grants, owner, generation);

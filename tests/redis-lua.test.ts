@@ -107,4 +107,22 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     assert.equal(await events.save(first.version, active), false);
     assert.equal((await events.load()).state.baseline, 'newer');
   });
+  await t.test('delegated pending/challenge/active serialization retains CAS and current-grant fences', async () => {
+    const owner = identity('delegated'); const grant = await grants.consent(owner, ['conductor.read'], expiry());
+    const events = new RedisPrEventStore(redis.client, 'test:delegated'); const pending = state(owner, grant.generation);
+    pending.subscription!.binding = { id: randomUUID(), phase: 'pending', fingerprint: 'a'.repeat(64),
+      target: { repository: 'owner/repo', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) } };
+    assert.equal(await events.save(null, pending), true);
+    const first = await events.load(); first.state.subscription!.binding!.phase = 'challenging';
+    first.state.subscription!.binding!.attemptId = randomUUID();
+    first.state.usedBindingAttempts = [first.state.subscription!.binding!.attemptId!];
+    assert.equal(await events.save(first.version, first.state), true);
+    assert.equal(await events.save(first.version, pending), false);
+    const claim = await events.load(); assert.equal(claim.state.usedBindingAttempts!.length, 1);
+    await grants.revoke(owner, grant.generation);
+    claim.state.subscription!.binding!.phase = 'active';
+    assert.equal(await events.save(claim.version, claim.state), false);
+    assert.equal((await events.load()).state.subscription!.binding!.phase, 'challenging');
+  });
+
 });

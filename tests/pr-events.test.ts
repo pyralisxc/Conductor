@@ -3,7 +3,7 @@ import { requireOAuthGrant } from '../src/transport/oauth-grant-store.js';
 import { GrantRedisFixture } from './helpers/oauth-grants.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -358,4 +358,179 @@ test('outbound review activity cannot hide an effective request for changes', as
   assert.equal(reviews.effectiveDecisions[0].reviewId, 1);
   assert.equal(reviews.currentHeadApprovals, 0);
   assert.doesNotMatch(JSON.stringify(reviews), /PRIVATE|UNTRUSTED/);
+});
+
+function delegatedFixture() {
+  const f = fixture();
+  const { callbackHostname: _hostname, ...base } = f.options;
+  const mode = { clientFingerprint: createHash('sha256').update(owner.clientId).digest('hex'), activation: undefined as undefined | { bindingId: string; url: string; generation: string; attemptId: string; expiresAt: number } };
+  const options = { ...base, delegatedRecipient: mode, validateRecipient: async (_url: string) => {} };
+  const bridge = new PrEvents(options);
+  const approve = () => { mode.activation = { bindingId: JSON.parse(f.store.raw!).subscription.binding.id, url: delivery.url, generation: auth.extra.grantGeneration, attemptId: '00000000-0000-4000-8000-000000000099', expiresAt: options.now() + 300000 }; };
+  const pending = () => assert.rejects(bridge.subscribe(auth, target, delivery), /awaits explicit activation/);
+  const activate = async () => { await pending(); approve(); await bridge.subscribe(auth, target, delivery); };
+  return { ...f, bridge, options, mode, approve, pending, activate, applicationPosts: () => f.posts.filter(p => JSON.parse(p.body).type !== 'verification') };
+}
+
+test('delegated recipient is pending without approval, challenge-bound after approval, and durable across restart', async () => {
+  const f = delegatedFixture();
+  await f.pending(); assert.equal(f.reads(), 0); assert.equal(f.posts.length, 0);
+  assert.equal((await f.store.load()).state.subscription?.binding?.phase, 'pending');
+  assert.equal(await new PrEvents(f.options).reconcile('pending-restart'), 'inactive');
+  await f.pending(); assert.equal(f.posts.length, 0);
+  f.approve(); await new PrEvents(f.options).subscribe(auth, target, delivery);
+  assert.equal(f.posts.length, 1); assert.equal(f.applicationPosts().length, 0);
+  assert.equal((await f.store.load()).state.subscription?.binding?.phase, 'active');
+  f.pull.checks.pending = 0;
+  assert.equal(await new PrEvents(f.options).reconcile('change'), 'accepted');
+  assert.equal(f.applicationPosts().length, 1);
+  await f.bridge.unsubscribe(auth, target, delivery.url);
+  await f.pending();
+  f.approve();
+  await assert.rejects(f.bridge.subscribe(auth, target, delivery), /already used/);
+});
+
+test('delegated identity, exact resource, URL safety and current grant fail before pending writes or provider reads', async () => {
+  for (const mutate of ['client', 'fingerprint', 'issuer', 'subject', 'repository', 'pr', 'head', 'base', 'http', 'ip', 'revoked', 'missing', 'stale', 'unavailable', 'expired'] as const) {
+    const f = delegatedFixture(); let principal = structuredClone(auth); let args = { ...target }; let dest = { ...delivery };
+    if (mutate === 'client') principal.clientId = 'other';
+    if (mutate === 'fingerprint') f.mode.clientFingerprint = '0'.repeat(64);
+    if (mutate === 'issuer') principal.extra.issuer = 'https://other.example';
+    if (mutate === 'subject') principal.extra.subject = 'other';
+    if (mutate === 'repository') args.repository = 'other/repo';
+    if (mutate === 'pr') args.pullRequestNumber++;
+    if (mutate === 'head') args.headSha = 'c'.repeat(40);
+    if (mutate === 'base') args.baseSha = 'c'.repeat(40);
+    if (mutate === 'http') dest.url = 'http://receiver.example/';
+    if (mutate === 'ip') dest.url = 'https://127.0.0.1/';
+    if (mutate === 'revoked') await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+    if (mutate === 'missing') f.options.grants.read = async () => null;
+    if (mutate === 'unavailable') f.options.grants.read = async () => { throw new Error('unavailable'); };
+    if (mutate === 'stale') principal.extra.grantGeneration = '2:00000000-0000-4000-8000-000000000002';
+    if (mutate === 'expired') f.advance(3600001);
+    await assert.rejects(f.bridge.subscribe(principal, args, dest), `reject ${mutate}`);
+    assert.equal(f.store.raw, null, mutate); assert.equal(f.posts.length, 0, mutate); assert.equal(f.reads(), 0, mutate);
+  }
+});
+
+test('pending binding rejects changed identity, resource, generation, secret and recipient instead of migrating', async () => {
+  for (const change of ['url', 'generation', 'secret', 'fingerprint', 'resource'] as const) {
+    const f = delegatedFixture(); await f.pending(); f.approve(); const before = f.store.raw;
+    let principal = structuredClone(auth); let dest = { ...delivery };
+    if (change === 'url') dest.url += '/changed';
+    if (change === 'secret') dest.secret = `whsec_${Buffer.alloc(32, 8).toString('base64')}`;
+    if (change === 'fingerprint') f.mode.clientFingerprint = '0'.repeat(64);
+    if (change === 'resource') f.options.target = { ...target, headSha: 'c'.repeat(40) };
+    if (change === 'generation') { principal.extra.grantGeneration = '2:00000000-0000-4000-8000-000000000002'; f.grantRedis.seed(owner, principal.extra.grantGeneration, f.options.now() + 3600000); }
+    await assert.rejects(new PrEvents(f.options).subscribe(principal, f.options.target, dest));
+    assert.equal(f.store.raw, before); assert.equal(f.posts.length, 0); assert.equal(f.reads(), 0);
+  }
+});
+
+test('failed challenge, timeout, storage loss and CAS conflict never activate or replay incomplete binding', async () => {
+  for (const failure of ['mismatch', 'timeout', 'redirect', 'lost', 'cas', 'revoke', 'expiry'] as const) {
+    const f = delegatedFixture(); await f.pending(); f.approve(); let challenges = 0;
+    const bridge = new PrEvents({ ...f.options, post: async (_url, body) => {
+      challenges++; const data = JSON.parse(body); assert.equal(data.type, 'verification');
+      if (failure === 'timeout') throw new Error('timeout');
+      if (failure === 'lost') f.store.raw = null;
+      if (failure === 'cas') f.store.raw = JSON.stringify({ ...(await f.store.load()).state, baseline: 'concurrent' });
+      if (failure === 'revoke') await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+      if (failure === 'expiry') f.advance(3600001);
+      return { status: failure === 'redirect' ? 302 : 200, body: JSON.stringify({ challenge: failure === 'mismatch' ? 'wrong' : data.challenge }) };
+    } });
+    await assert.rejects(bridge.subscribe(auth, target, delivery), failure);
+    const state = (await f.store.load()).state;
+    assert.notEqual(state.subscription?.binding?.phase, 'active');
+    assert.equal(await new PrEvents(f.options).reconcile('restart'), 'inactive');
+    assert.equal(challenges, 1); assert.equal(f.applicationPosts().length, 0);
+  }
+  const f = delegatedFixture(); f.store.save = async () => false;
+  await assert.rejects(f.bridge.subscribe(auth, target, delivery), /Pending binding changed/);
+  assert.equal(f.posts.length, 0); assert.equal(f.reads(), 0);
+});
+
+test('delegated active sends stop on changed approval, revoked grant and expiry, including in-flight retry', async () => {
+  for (const change of ['approval', 'recipient', 'resource', 'fingerprint', 'grant', 'expiry', 'in-flight'] as const) {
+    const f = delegatedFixture(); await f.activate(); f.pull.checks.pending = 0;
+    if (change === 'approval') f.mode.activation = undefined;
+    if (change === 'recipient') f.mode.activation!.url += '/changed';
+    if (change === 'resource') f.options.target = { ...target, headSha: 'c'.repeat(40) };
+    if (change === 'fingerprint') f.mode.clientFingerprint = '0'.repeat(64);
+    if (change === 'grant') await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+    if (change === 'expiry') f.advance(300001);
+    const reads = f.reads(); let attempts = 0;
+    const bridge = new PrEvents({ ...f.options, post: async (...params) => {
+      attempts++; await f.options.grants.revoke(owner, auth.extra.grantGeneration); return { status: 503, body: '' };
+    } });
+    assert.equal(await bridge.reconcile('stop'), change === 'expiry' ? 'inactive' : 'blocked');
+    assert.equal(attempts, change === 'in-flight' ? 1 : 0);
+    if (change !== 'in-flight') assert.equal(f.reads(), reads);
+    assert.equal((await f.store.load()).state.subscription, undefined);
+  }
+});
+
+test('delegated mode over real HTTP authenticates signed identity, rejects body identity claims, and stays pending', async () => {
+  const { SignJWT, jwtVerify } = await import('jose');
+  const { authInfoFromJwt } = await import('../src/transport/auth.js');
+  const f = delegatedFixture(); const key = Buffer.alloc(32, 19); const audience = 'https://local.example/mcp';
+  const token = (changes: Record<string, unknown> = {}) => new SignJWT({ iss: owner.issuer, aud: audience, sub: owner.subject, client_id: owner.clientId,
+    scope: 'conductor.read', grant_generation: auth.extra.grantGeneration, exp: Math.floor(Date.now() / 1000) + 3600, ...changes }).setProtectedHeader({ alg: 'HS256' }).sign(key);
+  const handler = createConductorHttpHandler({ runtime: new ConductorToolRuntime(), publicUrl: 'http://127.0.0.1', oauthIssuer: owner.issuer,
+    verifier: { async verifyAccessToken(value) { const result = await jwtVerify(value, key, { issuer: owner.issuer, audience }); return authInfoFromJwt(value, result.payload, audience); } }, events: f.bridge });
+  const server = createServer((req, res) => { void handler(req, res); }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const rpc = (bearer?: string, params: unknown = { name: PR_EVENT, arguments: target, delivery }) => fetch(`http://127.0.0.1:${address.port}/mcp`, { method: 'POST', headers: {
+    ...(bearer ? { authorization: `Bearer ${bearer}` } : {}), 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2026-07-28',
+  }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'events/subscribe', params }) });
+  const invoke = async (bearer: string, params: Record<string, unknown> = { name: PR_EVENT, arguments: target, delivery }) => {
+    const client = new Client({ name: 'delegated-proof', version: '1' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
+    try {
+      await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${bearer}` } } }));
+      await client.request({ method: 'events/subscribe', params }, z.looseObject({}));
+      return 'unexpected success';
+    } catch (error) { return String(error); }
+    finally { await client.close(); }
+  };
+  try {
+    for (const invalid of [undefined, 'invalid', await token({ iss: 'https://wrong.example' }), await token({ aud: 'wrong' }), await token({ scope: 'wrong' }), await token({ exp: 1 })]) assert.equal((await rpc(invalid)).status, 401);
+    for (const claims of [{ client_id: 'other' }, { sub: 'other' }, { grant_generation: '2:00000000-0000-4000-8000-000000000002' }]) {
+      assert.match(await invoke(await token(claims)), /not authorized|grant|Grant/); assert.equal(f.store.raw, null);
+    }
+    // Test clock must agree with the JWT expiry supplied by the real verifier.
+    f.advance(Date.now() - f.options.now()); f.grantRedis.seed(owner, auth.extra.grantGeneration, Date.now() + 3600000);
+    const jwt = await token();
+    assert.match(await invoke(jwt, { name: PR_EVENT, arguments: { ...target, clientId: owner.clientId }, delivery }), /Invalid|invalid|Unrecognized/);
+    assert.equal(f.store.raw, null);
+    assert.match(await invoke(jwt), /awaits explicit activation/);
+    assert.equal(f.reads(), 0); assert.equal(f.posts.length, 0);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('delegated preflight, challenge claim and before-read revocation failures send no application data', async () => {
+  for (const failure of ['dns', 'preflight-revoke', 'claim-cas', 'before-read', 'read-revoke', 'before-challenge', 'wrong-approval', 'lost-pending'] as const) {
+    const f = delegatedFixture();
+    if (failure === 'dns' || failure === 'preflight-revoke') {
+      const bridge = new PrEvents({ ...f.options, validateRecipient: async () => {
+        if (failure === 'dns') throw new Error('unsafe DNS');
+        await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+      } });
+      await assert.rejects(bridge.subscribe(auth, target, delivery)); assert.equal(f.store.raw, null);
+    } else {
+      await f.pending(); f.approve();
+      if (failure === 'claim-cas') f.store.save = async () => false;
+      if (failure === 'before-read') await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+      if (failure === 'read-revoke') f.options.source.read = async () => { await f.options.grants.revoke(owner, auth.extra.grantGeneration); return f.pull; };
+      if (failure === 'before-challenge') {
+        let providerReturned = false;
+        f.options.source.read = async () => { providerReturned = true; return f.pull; };
+        const load = f.store.load.bind(f.store);
+        f.store.load = async () => { if (providerReturned) { providerReturned = false; await f.options.grants.revoke(owner, auth.extra.grantGeneration); } return load(); };
+      }
+      if (failure === 'wrong-approval') f.mode.activation!.bindingId = '00000000-0000-4000-8000-000000000098';
+      if (failure === 'lost-pending') { f.store.raw = null; await f.pending(); }
+      await assert.rejects(new PrEvents(f.options).subscribe(auth, target, delivery));
+    }
+    assert.equal(f.posts.length, 0, failure); assert.equal(f.applicationPosts().length, 0, failure);
+  }
 });
