@@ -3362,14 +3362,16 @@ function derivePullRequestOrchestration(input: {
     const baseRef = input.pull.base.ref.toLowerCase();
     const defaultBranch = input.pull.base.repo?.default_branch?.toLowerCase();
     const supportedPreviewBase = ['preview', 'vercel-preview'].includes(baseRef);
-    const supportedIntegrationSource = ['work/', 'repair/', 'audit/'].some((prefix) => sourceRef.startsWith(prefix));
+    const supportedIntegrationSource = safeMergeBranch(input.pull.head.ref)
+      && /^(?:work|repair|audit)\//.test(input.pull.head.ref);
     const verifiedPreviewSource = ['preview', 'vercel-preview'].includes(sourceRef);
+    const supportedNonDefaultPreviewBase = supportedPreviewBase && !!defaultBranch && baseRef !== defaultBranch;
     if (verifiedPreviewSource && !!defaultBranch && baseRef === defaultBranch && !supportedPreviewBase) {
       state = 'promotion-ready';
       action = 'promotion-gate';
       shouldAct = true;
       summary = 'Verified Preview candidate targets the repository default branch and is technically ready for the caller-owned Main promotion/authorization gate.';
-    } else if (supportedIntegrationSource && supportedPreviewBase) {
+    } else if (supportedIntegrationSource && supportedNonDefaultPreviewBase) {
       state = 'integration-ready';
       action = 'integration-merge';
       shouldAct = true;

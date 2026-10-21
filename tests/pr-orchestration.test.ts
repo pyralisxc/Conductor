@@ -369,9 +369,13 @@ test('verified Preview head is promotion-ready while preserving the owner gate',
 
 test('integration readiness requires a supported source branch and supported Preview base', async () => {
   const cases = [
-    { name: 'work to preview', headRef: 'work/fix', baseRef: 'preview', expected: 'integration-ready' },
-    { name: 'repair to vercel-preview', headRef: 'repair/fix', baseRef: 'vercel-preview', expected: 'integration-ready' },
-    { name: 'audit to preview', headRef: 'audit/fix', baseRef: 'preview', expected: 'integration-ready' },
+    { name: 'work to preview', headRef: 'work/fix', baseRef: 'preview', defaultBranch: 'main', expected: 'integration-ready' },
+    { name: 'repair to vercel-preview', headRef: 'repair/fix', baseRef: 'vercel-preview', defaultBranch: 'main', expected: 'integration-ready' },
+    { name: 'audit to preview', headRef: 'audit/fix', baseRef: 'preview', defaultBranch: 'main', expected: 'integration-ready' },
+    { name: 'work to preview when preview is default', headRef: 'work/fix', baseRef: 'preview', defaultBranch: 'preview', expected: 'external-gate-pending' },
+    { name: 'work to vercel-preview when vercel-preview is default', headRef: 'work/fix', baseRef: 'vercel-preview', defaultBranch: 'vercel-preview', expected: 'external-gate-pending' },
+    { name: 'uppercase WORK prefix is rejected', headRef: 'WORK/fix', baseRef: 'preview', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'unsafe plus in work branch is rejected', headRef: 'work/fix+test', baseRef: 'preview', defaultBranch: 'main', expected: 'external-gate-pending' },
     { name: 'Dependabot to Main', headRef: 'dependabot/npm_and_yarn/pkg-1', baseRef: 'main', expected: 'external-gate-pending' },
     { name: 'work to Main', headRef: 'work/fix', baseRef: 'main', expected: 'external-gate-pending' },
     { name: 'Dependabot to Preview', headRef: 'dependabot/npm_and_yarn/pkg-1', baseRef: 'preview', expected: 'external-gate-pending' },
@@ -381,6 +385,7 @@ test('integration readiness requires a supported source branch and supported Pre
     const provider = providerFor({
       headRef: candidate.headRef,
       baseRef: candidate.baseRef,
+      defaultBranch: candidate.defaultBranch,
       checks: [{ id: 1, name: 'verify', status: 'completed', conclusion: 'success' }],
       workflowRuns: [{ id: 9, name: 'verify', status: 'completed', conclusion: 'success' }],
     });
