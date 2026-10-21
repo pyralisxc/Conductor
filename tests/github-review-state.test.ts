@@ -102,3 +102,37 @@ test('stale approval and unidentified reviewer remain unknown; comments cannot m
   f.data.reviews = [reviewRow(1, { state: 'COMMENTED' })];
   assert.equal((await f.read()).effectiveDecisions![0].state, 'NONE');
 });
+
+test('review integration branch is server-selected and cannot be the authoritative repository default', async () => {
+  for (const branch of ['preview', 'vercel-preview'] as const) {
+    const f = reviewReaderFixture(); f.data.baseRef = branch;
+    assert.equal((await f.read(async () => {}, branch)).complete, true);
+    assert.equal(f.paths.filter(path => path === '/repos/owner/repo').length, 2);
+    f.data.defaultBranch = branch;
+    await assert.rejects(f.read(async () => {}, branch), /default branch/);
+    f.data.defaultBranch = 'master';
+    for (const ref of ['main', 'master', 'arbitrary', branch === 'preview' ? 'vercel-preview' : 'preview']) {
+      f.data.baseRef = ref; await assert.rejects(f.read(async () => {}, branch), /wait changed/);
+    }
+    for (const defaultBranch of ['', ' ']) {
+      f.data.baseRef = branch; f.data.defaultBranch = defaultBranch;
+      await assert.rejects(f.read(async () => {}, branch), /default branch/);
+    }
+    f.data.defaultBranch = 'main'; f.data.metadataRepository = 'foreign/repo';
+    await assert.rejects(f.read(async () => {}, branch), /default branch/);
+  }
+});
+
+test('pagination cannot cross integration branch, default-branch or repository identity changes', async () => {
+  for (const branch of ['preview', 'vercel-preview'] as const) for (const drift of ['branch', 'default', 'repository'] as const) {
+    const f = reviewReaderFixture(); f.data.baseRef = branch;
+    f.beforeFetch(() => {
+      if (f.paths.at(-1)?.includes('/comments?')) {
+        if (drift === 'branch') f.data.baseRef = branch === 'preview' ? 'vercel-preview' : 'preview';
+        if (drift === 'default') f.data.defaultBranch = branch;
+        if (drift === 'repository') f.data.metadataRepository = 'foreign/repo';
+      }
+    });
+    await assert.rejects(f.read(async () => {}, branch), /wait changed|default branch/);
+  }
+});

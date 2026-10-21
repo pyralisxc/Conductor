@@ -506,6 +506,8 @@ test('delegated mode over real HTTP authenticates signed identity, rejects body 
     const jwt = await token();
     assert.match(await invoke(jwt, { name: PR_EVENT, arguments: { ...target, clientId: owner.clientId }, delivery }), /Invalid|invalid|Unrecognized/);
     assert.equal(f.store.raw, null);
+    assert.match(await invoke(jwt, { name: PR_EVENT, arguments: { ...target, integrationBranch: 'vercel-preview' }, delivery }), /Invalid|invalid|Unrecognized/);
+    assert.equal(f.store.raw, null);
     assert.match(await invoke(jwt), /not approved/);
     assert.equal(f.reads(), 0); assert.equal(f.posts.length, 0);
     f.approve(); assert.equal(await invoke(jwt), 'subscribed'); assert.equal(f.posts.length, 1);
@@ -568,4 +570,41 @@ test('delegated approval expiry and maximum window fail before state or callback
     await assert.rejects(f.bridge.subscribe(auth, target, delivery), /not approved/);
     assert.equal(f.store.raw, null); assert.equal(f.posts.length, 0); assert.equal(f.reads(), 0);
   }
+});
+
+test('fixed and delegated exact waits support only the server-selected integration branch', async () => {
+  for (const branch of ['preview', 'vercel-preview'] as const) for (const delegated of [false, true]) {
+    const f = delegated ? delegatedFixture() : fixture();
+    if ('approve' in f) f.approve();
+    f.pull.base.ref = branch;
+    const bridge = new PrEvents({ ...f.options, integrationBranch: branch });
+    await bridge.subscribe(auth, target, delivery);
+    if (delegated) assert.equal((await f.store.load()).state.subscription!.binding!.integrationBranch, branch);
+    f.pull.checks.pending = 0;
+    assert.equal(await bridge.reconcile('good'), 'accepted');
+    const count = f.posts.length;
+    const active = f.store.raw;
+    for (const wrong of ['main', 'master', 'other', branch === 'preview' ? 'vercel-preview' : 'preview']) {
+      f.store.raw = active; f.pull.base.ref = wrong;
+      assert.equal(await bridge.reconcile(`wrong-${wrong}`), 'blocked');
+    }
+    assert.equal(f.posts.length, count);
+    await assert.rejects(bridge.subscribe(auth, { ...target, integrationBranch: branch } as typeof target, delivery), /not authorized/);
+    const badIngress = { action: 'synchronize', pull_request: { number: target.pullRequestNumber, head: { sha: target.headSha }, base: { sha: target.baseSha, ref: 'main' } } };
+    assert.equal(await f.send('wrong-branch', badIngress, 'pull_request', bridge), 'ignored');
+    assert.equal(await f.send('wrong-pr', { check_run: { head_sha: target.headSha, pull_requests: [{ number: 8 }] } }, 'check_run', bridge), 'ignored');
+  }
+});
+
+test('delegated stable slot cannot reinterpret branch; legacy absent means preview only', async () => {
+  const f = delegatedFixture(); await f.activate();
+  const legacy = (await f.store.load()).state;
+  delete legacy.subscription!.binding!.integrationBranch;
+  f.store.raw = JSON.stringify(legacy);
+  await new PrEvents({ ...f.options, integrationBranch: 'preview' }).subscribe(auth, target, delivery);
+  const count = f.posts.length; const reads = f.reads();
+  const changed = new PrEvents({ ...f.options, integrationBranch: 'vercel-preview' });
+  await assert.rejects(changed.subscribe(auth, target, delivery), /teardown/);
+  assert.equal(await changed.reconcile('changed-branch'), 'blocked');
+  assert.equal(f.posts.length, count); assert.equal(f.reads(), reads);
 });

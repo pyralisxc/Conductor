@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { prReviewEvidence, type PrReviewEvidence, type PrEventArguments } from '../runtime/pr-events.js';
+import { prEventIntegrationBranch, type PrEventIntegrationBranch, prReviewEvidence, type PrReviewEvidence, type PrEventArguments } from '../runtime/pr-events.js';
 import { assertReleaseIdentityTransport, RELEASE_IDENTITY_MAX_BYTES } from '../runtime/release-identities.js';
 import { assertCommitCheckpoint, type CommitCheckpoint, type CommitMutationProgress } from '../runtime/commit-checkpoint.js';
 import type {
@@ -760,7 +760,7 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
   }
 
   /** Exact-wait review metadata only. Every private request rechecks the caller's grant. */
-  async getPullRequestReviewState(target: PrEventArguments, installationId: number, authorize: () => Promise<unknown>): Promise<PrReviewEvidence> {
+  async getPullRequestReviewState(target: PrEventArguments, installationId: number, authorize: () => Promise<unknown>, integrationBranch: PrEventIntegrationBranch = 'preview'): Promise<PrReviewEvidence> {
     await authorize();
     const { repository, credential } = await this.readableRepository(
       { id: target.repository, repository: target.repository }, { pull_requests: 'read' });
@@ -771,9 +771,12 @@ export class GitHubRuntimeProvider implements ProjectPreflightProvider, Operatio
       await authorize();
       return result;
     };
+    prEventIntegrationBranch.parse(integrationBranch);
     const assertIdentity = async () => {
+      const metadata = await read<GitHubRepositoryResponse>('');
+      if (metadata.full_name !== repository || !metadata.default_branch?.trim() || metadata.default_branch === integrationBranch) throw new Error('Event integration branch cannot be the repository default branch');
       const pull = await read<GitHubPullRequestResponse>(`/pulls/${target.pullRequestNumber}`);
-      if (pull.number !== target.pullRequestNumber || pull.head.sha !== target.headSha || pull.base.sha !== target.baseSha || pull.base.ref !== 'preview' || pull.base.repo?.full_name !== repository) throw new Error('Exact review wait changed');
+      if (pull.number !== target.pullRequestNumber || pull.head.sha !== target.headSha || pull.base.sha !== target.baseSha || pull.base.ref !== integrationBranch || pull.base.repo?.full_name !== repository) throw new Error('Exact review wait changed');
     };
     assertPullRequestNumber(target.pullRequestNumber);
     await assertIdentity();
