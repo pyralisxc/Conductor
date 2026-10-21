@@ -1,6 +1,5 @@
 import { clientFingerprint } from '../transport/work-scope.js';
-import { grantGenerationSchema } from '../transport/oauth-grant-store.js';
-import { callbackUrl, validateCallbackRecipient } from '../transport/event-callback.js';
+import { validateCallbackRecipient } from '../transport/event-callback.js';
 import { oauthGrantStore, requireOAuthGrant } from '../transport/oauth-grant-store.js';
 import { createHash } from 'node:crypto';
 import { Redis } from '@upstash/redis';
@@ -21,8 +20,7 @@ const configuration = z.union([
   z.object({ ...commonConfiguration, callbackHostname: z.string().max(253).regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)+$/) }).strict(),
   z.object({ ...commonConfiguration, delegatedRecipient: z.object({
     clientFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-    activation: z.object({ bindingId: z.uuid(), url: z.string().max(2048), generation: grantGenerationSchema,
-      attemptId: z.uuid(), expiresAt: z.number().int().positive() }).strict().optional(),
+    approval: z.object({ id: z.uuid(), expiresAt: z.number().int().positive() }).strict().optional(),
   }).strict() }).strict(),
 ]);
 
@@ -40,7 +38,6 @@ export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environm
   const config = configuration.parse(JSON.parse(environment.CONDUCTOR_PR_EVENTS_JSON));
   const delegated = 'delegatedRecipient' in config ? config.delegatedRecipient : undefined;
   if (delegated && delegated.clientFingerprint !== clientFingerprint(config.owner.clientId)) throw new Error('Configured client fingerprint does not match owner');
-  if (delegated?.activation) callbackUrl(delegated.activation.url, new URL(delegated.activation.url).hostname);
   const url = environment.UPSTASH_REDIS_REST_URL ?? environment.KV_REST_API_URL;
   const token = environment.UPSTASH_REDIS_REST_TOKEN ?? environment.KV_REST_API_TOKEN;
   const appId = environment.CONDUCTOR_GITHUB_APP_ID;

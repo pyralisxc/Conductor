@@ -138,7 +138,7 @@ test('delegated recipient config is explicit, exclusive, and Preview-only', () =
   const runtime = new ConductorToolRuntime();
   const base = { target: { repository: 'owner/private', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }, owner: { issuer: 'https://issuer.example', subject: 'owner', clientId: 'private-client' }, installationId: 123 };
   const delegatedRecipient = { clientFingerprint: '0'.repeat(64) };
-  for (const config of [{ ...base }, { ...base, delegatedRecipient: true }, { ...base, delegatedRecipient: { ...delegatedRecipient, enabled: true } }, { ...base, delegatedRecipient, callbackHostname: 'receiver.example' }]) {
+  for (const config of [{ ...base }, { ...base, delegatedRecipient: true }, { ...base, delegatedRecipient: { ...delegatedRecipient, activation: {} } }, { ...base, delegatedRecipient: { ...delegatedRecipient, enabled: true } }, { ...base, delegatedRecipient, callbackHostname: 'receiver.example' }]) {
     assert.throws(() => createConfiguredPrEvents(runtime, { VERCEL_ENV: 'preview', CONDUCTOR_PR_EVENTS_JSON: JSON.stringify(config) }));
   }
   for (const env of ['production', 'development', undefined]) assert.throws(() => createConfiguredPrEvents(runtime, { VERCEL_ENV: env, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify({ ...base, delegatedRecipient }) }), /limited to Preview/);

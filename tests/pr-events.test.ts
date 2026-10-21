@@ -3,7 +3,7 @@ import { requireOAuthGrant } from '../src/transport/oauth-grant-store.js';
 import { GrantRedisFixture } from './helpers/oauth-grants.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -363,36 +363,38 @@ test('outbound review activity cannot hide an effective request for changes', as
 function delegatedFixture() {
   const f = fixture();
   const { callbackHostname: _hostname, ...base } = f.options;
-  const mode = { clientFingerprint: createHash('sha256').update(owner.clientId).digest('hex'), activation: undefined as undefined | { bindingId: string; url: string; generation: string; attemptId: string; expiresAt: number } };
+  const mode = { clientFingerprint: createHash('sha256').update(owner.clientId).digest('hex'), approval: undefined as undefined | { id: string; expiresAt: number } };
   const options = { ...base, delegatedRecipient: mode, validateRecipient: async (_url: string) => {} };
   const bridge = new PrEvents(options);
-  const approve = () => { mode.activation = { bindingId: JSON.parse(f.store.raw!).subscription.binding.id, url: delivery.url, generation: auth.extra.grantGeneration, attemptId: '00000000-0000-4000-8000-000000000099', expiresAt: options.now() + 300000 }; };
-  const pending = () => assert.rejects(bridge.subscribe(auth, target, delivery), /awaits explicit activation/);
-  const activate = async () => { await pending(); approve(); await bridge.subscribe(auth, target, delivery); };
+  const approve = () => { mode.approval = { id: randomUUID(), expiresAt: options.now() + 300000 }; };
+  const pending = async () => {
+    if (!mode.approval) approve();
+    const save = f.store.save.bind(f.store);
+    f.store.save = async (version, state) => { const saved = await save(version, state); if (saved && state.subscription?.binding?.phase === 'pending') throw new Error('isolated pending restart'); return saved; };
+    try { await assert.rejects(bridge.subscribe(auth, target, delivery), /isolated pending restart/); }
+    finally { f.store.save = save; }
+  };
+  const activate = async () => { approve(); await bridge.subscribe(auth, target, delivery); };
+
   return { ...f, bridge, options, mode, approve, pending, activate, applicationPosts: () => f.posts.filter(p => JSON.parse(p.body).type !== 'verification') };
 }
 
-test('delegated recipient is pending without approval, challenge-bound after approval, and durable across restart', async () => {
+test('delegated approved client binds and challenges in one request; absent approval does nothing', async () => {
   const f = delegatedFixture();
-  await f.pending(); assert.equal(f.reads(), 0); assert.equal(f.posts.length, 0);
-  assert.equal((await f.store.load()).state.subscription?.binding?.phase, 'pending');
-  assert.equal(await new PrEvents(f.options).reconcile('pending-restart'), 'inactive');
-  await f.pending(); assert.equal(f.posts.length, 0);
-  f.approve(); await new PrEvents(f.options).subscribe(auth, target, delivery);
+  await assert.rejects(f.bridge.subscribe(auth, target, delivery), /not approved/);
+  assert.equal(f.store.raw, null); assert.equal(f.reads(), 0); assert.equal(f.posts.length, 0);
+  await f.activate();
   assert.equal(f.posts.length, 1); assert.equal(f.applicationPosts().length, 0);
-  assert.equal((await f.store.load()).state.subscription?.binding?.phase, 'active');
-  f.pull.checks.pending = 0;
-  assert.equal(await new PrEvents(f.options).reconcile('change'), 'accepted');
-  assert.equal(f.applicationPosts().length, 1);
+  assert.equal((await f.store.load()).state.subscription!.binding!.phase, 'active');
+  await new PrEvents(f.options).subscribe(auth, target, delivery); assert.equal(f.posts.length, 1);
+  f.pull.checks.pending = 0; assert.equal(await f.bridge.reconcile('change'), 'accepted');
   await f.bridge.unsubscribe(auth, target, delivery.url);
-  await f.pending();
-  f.approve();
-  await assert.rejects(f.bridge.subscribe(auth, target, delivery), /already used/);
+  await assert.rejects(f.bridge.subscribe(auth, target, delivery), /already consumed/);
 });
 
 test('delegated identity, exact resource, URL safety and current grant fail before pending writes or provider reads', async () => {
   for (const mutate of ['client', 'fingerprint', 'issuer', 'subject', 'repository', 'pr', 'head', 'base', 'http', 'ip', 'revoked', 'missing', 'stale', 'unavailable', 'expired'] as const) {
-    const f = delegatedFixture(); let principal = structuredClone(auth); let args = { ...target }; let dest = { ...delivery };
+    const f = delegatedFixture(); f.approve(); let principal = structuredClone(auth); let args = { ...target }; let dest = { ...delivery };
     if (mutate === 'client') principal.clientId = 'other';
     if (mutate === 'fingerprint') f.mode.clientFingerprint = '0'.repeat(64);
     if (mutate === 'issuer') principal.extra.issuer = 'https://other.example';
@@ -415,7 +417,7 @@ test('delegated identity, exact resource, URL safety and current grant fail befo
 
 test('pending binding rejects changed identity, resource, generation, secret and recipient instead of migrating', async () => {
   for (const change of ['url', 'generation', 'secret', 'fingerprint', 'resource'] as const) {
-    const f = delegatedFixture(); await f.pending(); f.approve(); const before = f.store.raw;
+    const f = delegatedFixture(); await f.pending(); const before = f.store.raw;
     let principal = structuredClone(auth); let dest = { ...delivery };
     if (change === 'url') dest.url += '/changed';
     if (change === 'secret') dest.secret = `whsec_${Buffer.alloc(32, 8).toString('base64')}`;
@@ -429,7 +431,7 @@ test('pending binding rejects changed identity, resource, generation, secret and
 
 test('failed challenge, timeout, storage loss and CAS conflict never activate or replay incomplete binding', async () => {
   for (const failure of ['mismatch', 'timeout', 'redirect', 'lost', 'cas', 'revoke', 'expiry'] as const) {
-    const f = delegatedFixture(); await f.pending(); f.approve(); let challenges = 0;
+    const f = delegatedFixture(); await f.pending(); let challenges = 0;
     const bridge = new PrEvents({ ...f.options, post: async (_url, body) => {
       challenges++; const data = JSON.parse(body); assert.equal(data.type, 'verification');
       if (failure === 'timeout') throw new Error('timeout');
@@ -445,7 +447,7 @@ test('failed challenge, timeout, storage loss and CAS conflict never activate or
     assert.equal(await new PrEvents(f.options).reconcile('restart'), 'inactive');
     assert.equal(challenges, 1); assert.equal(f.applicationPosts().length, 0);
   }
-  const f = delegatedFixture(); f.store.save = async () => false;
+  const f = delegatedFixture(); f.approve(); f.store.save = async () => false;
   await assert.rejects(f.bridge.subscribe(auth, target, delivery), /Pending binding changed/);
   assert.equal(f.posts.length, 0); assert.equal(f.reads(), 0);
 });
@@ -453,8 +455,8 @@ test('failed challenge, timeout, storage loss and CAS conflict never activate or
 test('delegated active sends stop on changed approval, revoked grant and expiry, including in-flight retry', async () => {
   for (const change of ['approval', 'recipient', 'resource', 'fingerprint', 'grant', 'expiry', 'in-flight'] as const) {
     const f = delegatedFixture(); await f.activate(); f.pull.checks.pending = 0;
-    if (change === 'approval') f.mode.activation = undefined;
-    if (change === 'recipient') f.mode.activation!.url += '/changed';
+    if (change === 'approval') f.mode.approval = undefined;
+    if (change === 'recipient') f.mode.approval!.id = randomUUID();
     if (change === 'resource') f.options.target = { ...target, headSha: 'c'.repeat(40) };
     if (change === 'fingerprint') f.mode.clientFingerprint = '0'.repeat(64);
     if (change === 'grant') await f.options.grants.revoke(owner, auth.extra.grantGeneration);
@@ -470,7 +472,7 @@ test('delegated active sends stop on changed approval, revoked grant and expiry,
   }
 });
 
-test('delegated mode over real HTTP authenticates signed identity, rejects body identity claims, and stays pending', async () => {
+test('delegated mode over real HTTP authenticates signed identity, rejects body identity claims, and binds in one approved request', async () => {
   const { SignJWT, jwtVerify } = await import('jose');
   const { authInfoFromJwt } = await import('../src/transport/auth.js');
   const f = delegatedFixture(); const key = Buffer.alloc(32, 19); const audience = 'https://local.example/mcp';
@@ -488,7 +490,7 @@ test('delegated mode over real HTTP authenticates signed identity, rejects body 
     try {
       await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${bearer}` } } }));
       await client.request({ method: 'events/subscribe', params }, z.looseObject({}));
-      return 'unexpected success';
+      return 'subscribed';
     } catch (error) { return String(error); }
     finally { await client.close(); }
   };
@@ -502,14 +504,15 @@ test('delegated mode over real HTTP authenticates signed identity, rejects body 
     const jwt = await token();
     assert.match(await invoke(jwt, { name: PR_EVENT, arguments: { ...target, clientId: owner.clientId }, delivery }), /Invalid|invalid|Unrecognized/);
     assert.equal(f.store.raw, null);
-    assert.match(await invoke(jwt), /awaits explicit activation/);
+    assert.match(await invoke(jwt), /not approved/);
     assert.equal(f.reads(), 0); assert.equal(f.posts.length, 0);
+    f.approve(); assert.equal(await invoke(jwt), 'subscribed'); assert.equal(f.posts.length, 1);
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
 test('delegated preflight, challenge claim and before-read revocation failures send no application data', async () => {
   for (const failure of ['dns', 'preflight-revoke', 'claim-cas', 'before-read', 'read-revoke', 'before-challenge', 'wrong-approval', 'lost-pending'] as const) {
-    const f = delegatedFixture();
+    const f = delegatedFixture(); f.approve();
     if (failure === 'dns' || failure === 'preflight-revoke') {
       const bridge = new PrEvents({ ...f.options, validateRecipient: async () => {
         if (failure === 'dns') throw new Error('unsafe DNS');
@@ -517,7 +520,7 @@ test('delegated preflight, challenge claim and before-read revocation failures s
       } });
       await assert.rejects(bridge.subscribe(auth, target, delivery)); assert.equal(f.store.raw, null);
     } else {
-      await f.pending(); f.approve();
+      await f.pending();
       if (failure === 'claim-cas') f.store.save = async () => false;
       if (failure === 'before-read') await f.options.grants.revoke(owner, auth.extra.grantGeneration);
       if (failure === 'read-revoke') f.options.source.read = async () => { await f.options.grants.revoke(owner, auth.extra.grantGeneration); return f.pull; };
@@ -527,8 +530,8 @@ test('delegated preflight, challenge claim and before-read revocation failures s
         const load = f.store.load.bind(f.store);
         f.store.load = async () => { if (providerReturned) { providerReturned = false; await f.options.grants.revoke(owner, auth.extra.grantGeneration); } return load(); };
       }
-      if (failure === 'wrong-approval') f.mode.activation!.bindingId = '00000000-0000-4000-8000-000000000098';
-      if (failure === 'lost-pending') { f.store.raw = null; await f.pending(); }
+      if (failure === 'wrong-approval') f.mode.approval!.id = randomUUID();
+      if (failure === 'lost-pending') { f.store.raw = null; f.store.save = async () => false; }
       await assert.rejects(new PrEvents(f.options).subscribe(auth, target, delivery));
     }
     assert.equal(f.posts.length, 0, failure); assert.equal(f.applicationPosts().length, 0, failure);
@@ -536,7 +539,7 @@ test('delegated preflight, challenge claim and before-read revocation failures s
 });
 
 test('fresh consent can explicitly unsubscribe an obsolete pending binding without inheriting it', async () => {
-  const f = delegatedFixture(); await f.pending(); f.approve();
+  const f = delegatedFixture(); await f.pending();
   const originalId = (await f.store.load()).state.subscription!.binding!.id;
   await f.options.grants.revoke(owner, auth.extra.grantGeneration);
   await assert.rejects(f.bridge.unsubscribe(auth, target, delivery.url));
@@ -550,8 +553,17 @@ test('fresh consent can explicitly unsubscribe an obsolete pending binding witho
   assert.equal((await f.store.load()).state.subscription!.binding!.id, originalId);
   await f.bridge.unsubscribe(fresh, target, delivery.url);
   assert.equal((await f.store.load()).state.subscription, undefined);
-  await assert.rejects(f.bridge.subscribe(fresh, target, delivery), /awaits explicit activation/);
+  await assert.rejects(f.bridge.subscribe(fresh, target, delivery), /already consumed/);
+  f.approve(); await f.bridge.subscribe(fresh, target, delivery);
   assert.notEqual((await f.store.load()).state.subscription!.binding!.id, originalId);
-  await assert.rejects(f.bridge.subscribe(fresh, target, delivery), /awaits explicit activation/);
-  assert.equal(f.posts.length, 0); assert.equal(f.reads(), 0);
+  assert.equal(f.posts.length, 1); assert.equal(f.applicationPosts().length, 0);
+});
+
+
+test('delegated approval expiry and maximum window fail before state or callback activity', async () => {
+  for (const offset of [-1, 0, 3600001]) {
+    const f = delegatedFixture(); f.approve(); f.mode.approval!.expiresAt = f.options.now() + offset;
+    await assert.rejects(f.bridge.subscribe(auth, target, delivery), /not approved/);
+    assert.equal(f.store.raw, null); assert.equal(f.posts.length, 0); assert.equal(f.reads(), 0);
+  }
 });

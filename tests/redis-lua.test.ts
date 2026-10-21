@@ -112,7 +112,7 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
   await t.test('delegated pending/challenge/active serialization retains CAS and current-grant fences', async () => {
     const owner = identity('delegated'); const grant = await grants.consent(owner, ['conductor.read'], expiry());
     const events = new RedisPrEventStore(redis.client, 'test:delegated'); const pending = state(owner, grant.generation);
-    pending.subscription!.binding = { id: randomUUID(), phase: 'pending', fingerprint: 'a'.repeat(64),
+    pending.subscription!.binding = { id: randomUUID(), approvalId: randomUUID(), phase: 'pending', fingerprint: 'a'.repeat(64),
       target: { repository: 'owner/repo', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) } };
     assert.equal(await events.save(null, pending), true);
     const first = await events.load(); first.state.subscription!.binding!.phase = 'challenging';
@@ -127,6 +127,23 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     assert.equal((await events.load()).state.subscription!.binding!.phase, 'challenging');
   });
 
+  await t.test('consumed approval marker is durable and missing authority cannot be reconstructed', async () => {
+    const owner = identity('approval-marker'); const grant = await grants.consent(owner, ['conductor.read'], expiry());
+    const events = new RedisPrEventStore(redis.client, 'test:approval-marker'); const pending = state(owner, grant.generation);
+    const approvalId = randomUUID();
+    pending.subscription!.binding = { id: randomUUID(), approvalId, attemptId: randomUUID(), phase: 'pending', fingerprint: 'a'.repeat(64),
+      target: { repository: 'owner/repo', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) } };
+    assert.equal(await events.save(null, pending), true);
+    const marker = `conductor:preview:pr-events:approval:${approvalId}`;
+    assert.equal(await redis.command(['PTTL', marker]), -1);
+    const loaded = await events.load(); await redis.command(['DEL', marker]);
+    loaded.state.subscription!.binding!.phase = 'challenging';
+    assert.equal(await events.save(loaded.version, loaded.state), false);
+    loaded.state.subscription!.binding!.phase = 'pending';
+    assert.equal(await events.save(loaded.version, loaded.state), false);
+    assert.equal(await redis.command(['GET', marker]), null);
+  });
+
   await t.test('concurrent delegated subscribe and activation have one winner through production Lua', { timeout: 30000 }, async () => {
     const owner = identity('concurrent-delegated'); const grant = await grants.consent(owner, ['conductor.read'], expiry());
     const auth = { token: 'isolated-test', clientId: owner.clientId, scopes: ['conductor.read'], extra: { ...owner, grantGeneration: grant.generation } };
@@ -134,15 +151,16 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     const key = 'test:concurrent-delegated';
     const store = new RedisPrEventStore(redis.client, key);
     const delivery = { url: 'https://unused.example/callback', secret: `whsec_${Buffer.alloc(32, 9).toString('base64')}` };
-    const mode = { clientFingerprint: createHash('sha256').update(owner.clientId).digest('hex'), activation: undefined as undefined | { bindingId: string; url: string; generation: string; attemptId: string; expiresAt: number } };
+    const mode = { clientFingerprint: createHash('sha256').update(owner.clientId).digest('hex'), approval: { id: randomUUID(), expiresAt: expiry() } };
     const posts: string[][] = [[], []]; const reads = [0, 0];
-    const callers = posts.map((sent, caller) => new PrEvents({ target, owner, installationId: 123, delegatedRecipient: mode,
+    const makeCallers = () => posts.map((sent, caller) => new PrEvents({ target, owner, installationId: 123, delegatedRecipient: mode,
       webhookSecret: 'isolated-only', grants, store: new RedisPrEventStore(redis.client, key), validateRecipient: async () => {},
       vault: new VersionedProviderCredentialVault({ legacyPurpose: 'isolated', currentKey: 'isolated-vault-key'.repeat(3) }),
       source: { async read() { reads[caller]++; return { ...target, head: { sha: target.headSha }, base: { sha: target.baseSha, ref: 'preview' },
         state: 'open', merged: false, draft: false, checks: { total: 0, pending: 0, successful: 0, failed: 0, neutral: 0, skipped: 0 } } as unknown as PullRequestStatus; } },
       post: async (_url, body) => { sent.push(body); const data = JSON.parse(body); return { status: 200, body: JSON.stringify({ challenge: data.challenge }) }; },
     }));
+    let callers = makeCallers();
     // Hold both actual EVAL requests at the adapter boundary, then let Redis arbitrate.
     // No modeled save result or modified production Lua is used.
     const race = async (phase: string) => {
@@ -159,26 +177,50 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
         assert.equal(arrivals, 2); return results;
       } finally { redis.before(); }
     };
-    const pending = await race('pending');
-    assert.equal(pending.filter(r => r.status === 'rejected' && /awaits explicit activation/.test(String(r.reason))).length, 1);
-    assert.equal(pending.filter(r => r.status === 'rejected' && /Pending binding changed/.test(String(r.reason))).length, 1);
-    assert.deepEqual(posts, [[], []]); assert.deepEqual(reads, [0, 0]);
+    const created = await race('pending');
+    assert.equal(created.filter(r => r.status === 'fulfilled').length, 1);
+    let loser = created.findIndex(r => r.status === 'rejected');
+    assert.match(String((created[loser] as PromiseRejectedResult).reason), /Pending binding changed/);
+    assert.deepEqual(posts[loser], []); assert.equal(reads[loser], 0);
+    assert.equal(posts.flat().length, 1); assert.equal(JSON.parse(posts.flat()[0]).type, 'verification');
+    assert.equal((await store.load()).state.subscription!.binding!.phase, 'active');
+    await callers[0].unsubscribe(auth, target, delivery.url);
+    await assert.rejects(callers[0].subscribe(auth, target, delivery), /already consumed/);
+    // Even loss of the bounded state record cannot reconsume this approved attempt.
+    await redis.command(['DEL', key]);
+    await assert.rejects(callers[0].subscribe(auth, target, delivery), /Pending binding changed/);
+    assert.equal(posts.flat().length, 1);
+
+    mode.approval = { id: randomUUID(), expiresAt: expiry() };
+    // Interrupt after the real pending EVAL commits, before any challenge claim.
+    redis.before(async args => {
+      if (String(args[0]).toLowerCase() === 'get' && args[1] === key && (await redis.command(['GET', key]))) {
+        redis.before(); throw new Error('isolated restart after pending');
+      }
+    });
+    await assert.rejects(callers[0].subscribe(auth, target, delivery), /isolated restart/);
     const binding = (await store.load()).state.subscription!.binding!;
     assert.equal(binding.phase, 'pending');
-    mode.activation = { bindingId: binding.id, url: delivery.url, generation: grant.generation, attemptId: randomUUID(), expiresAt: expiry() };
+    posts.forEach(p => p.length = 0); reads.fill(0); callers = makeCallers();
     const activated = await race('challenging');
     assert.equal(activated.filter(r => r.status === 'fulfilled').length, 1);
-    const loser = activated.findIndex(r => r.status === 'rejected'); assert.notEqual(loser, -1);
+    loser = activated.findIndex(r => r.status === 'rejected'); assert.notEqual(loser, -1);
     assert.match(String((activated[loser] as PromiseRejectedResult).reason), /Challenge claim changed/);
     assert.deepEqual(posts[loser], []); assert.equal(reads[loser], 0);
     assert.equal(posts.flat().length, 1); assert.equal(JSON.parse(posts.flat()[0]).type, 'verification');
     const active = (await store.load()).state;
     assert.equal(active.subscription!.binding!.id, binding.id); assert.equal(active.subscription!.binding!.phase, 'active');
-    assert.deepEqual(active.usedBindingAttempts, [mode.activation.attemptId]);
+    assert.deepEqual(active.usedBindingAttempts, [mode.approval.id]);
     assert.equal(active.deliveries.length, 0);
-    // Real durable grant revocation and fresh consent recover only by explicit teardown.
     await callers[0].unsubscribe(auth, target, delivery.url);
-    await assert.rejects(callers[0].subscribe(auth, target, delivery), /awaits explicit activation/);
+    mode.approval = { id: randomUUID(), expiresAt: expiry() };
+    redis.before(async args => {
+      if (String(args[0]).toLowerCase() === 'get' && args[1] === key) {
+        const raw = await redis.command(['GET', key]);
+        if (raw && JSON.parse(String(raw)).subscription?.binding?.phase === 'pending') { redis.before(); throw new Error('isolated restart'); }
+      }
+    });
+    await assert.rejects(callers[0].subscribe(auth, target, delivery), /isolated restart/);
     const obsolete = (await store.load()).state.subscription!.binding!.id;
     await grants.revoke(owner, grant.generation);
     await assert.rejects(callers[0].unsubscribe(auth, target, delivery.url));
@@ -186,10 +228,11 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     const freshAuth = { ...auth, extra: { ...auth.extra, grantGeneration: freshGrant.generation } };
     await assert.rejects(callers[0].subscribe(freshAuth, target, delivery), /teardown/);
     await callers[0].unsubscribe(freshAuth, target, delivery.url);
-    await assert.rejects(callers[0].subscribe(freshAuth, target, delivery), /awaits explicit activation/);
+    await assert.rejects(callers[0].subscribe(freshAuth, target, delivery), /already consumed/);
+    mode.approval = { id: randomUUID(), expiresAt: expiry() };
+    await callers[0].subscribe(freshAuth, target, delivery);
     assert.notEqual((await store.load()).state.subscription!.binding!.id, obsolete);
-    await assert.rejects(callers[0].subscribe(freshAuth, target, delivery), /awaits explicit activation/);
-    assert.equal(posts.flat().length, 1);
+    assert.equal(posts.flat().length, 2);
 
   });
 

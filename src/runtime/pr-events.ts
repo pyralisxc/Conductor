@@ -57,7 +57,7 @@ export interface PrEventSource {
 interface Subscription {
   id: string; owner: EventOwner; generation: string; url: string; secret: string; expiresAt: number;
   previousSecret?: string; rotationUntil?: number; verifiedUntil: number;
-  binding?: { id: string; phase: 'pending' | 'challenging' | 'active'; fingerprint: string; target: PrEventArguments; attemptId?: string };
+  binding?: { id: string; approvalId: string; phase: 'pending' | 'challenging' | 'active'; fingerprint: string; target: PrEventArguments; attemptId?: string };
 }
 interface Delivery {
   id: string; source: string; fingerprint: string; body: string; createdAt: number;
@@ -86,6 +86,7 @@ export class RedisPrEventStore implements PrEventStore {
     if (Buffer.byteLength(serialized) > 262144) throw new Error('Event state capacity reached');
     const sub = state.subscription;
     if (sub && !grantGenerationSchema.safeParse(sub.generation).success) return false;
+    if (sub?.binding && (!z.uuid().safeParse(sub.binding.id).success || !z.uuid().safeParse(sub.binding.approvalId).success)) return false;
     return Number(await this.redis.eval(
       `if ARGV[4] ~= '' then
         local clock = redis.call('TIME')
@@ -95,8 +96,22 @@ export class RedisPrEventStore implements PrEventStore {
         local ok, grant = pcall(cjson.decode, raw)
         if not ok or grant.status ~= 'active' or grant.generation ~= ARGV[4] or type(grant.expiresAt) ~= 'number' or grant.expiresAt <= now then return 0 end
       end
-      local current = redis.call('GET', KEYS[1]); if (current or '') ~= ARGV[1] then return 0 end; redis.call('SET', KEYS[1], ARGV[2], 'EX', 172800); return 1`,
-      sub ? [this.key, oauthGrantKey(sub.owner)] : [this.key], [version ?? '', serialized, Date.now(), sub?.generation ?? '', sub?.expiresAt ?? 0],
+      local current = redis.call('GET', KEYS[1]); if (current or '') ~= ARGV[1] then return 0 end
+      if ARGV[6] ~= '' then
+        local marker = redis.call('GET', KEYS[3])
+        if marker then
+          if marker ~= ARGV[6] then return 0 end
+        else
+          if ARGV[7] ~= 'pending' then return 0 end
+          if current then
+            local ok, prior = pcall(cjson.decode, current)
+            if not ok or prior.subscription then return 0 end
+          end
+          redis.call('SET', KEYS[3], ARGV[6])
+        end
+      end
+      redis.call('SET', KEYS[1], ARGV[2], 'EX', 172800); return 1`,
+      sub ? [this.key, oauthGrantKey(sub.owner), ...(sub.binding ? [`conductor:preview:pr-events:approval:${sub.binding.approvalId}`] : [])] : [this.key], [version ?? '', serialized, Date.now(), sub?.generation ?? '', sub?.expiresAt ?? 0, sub?.binding?.id ?? '', sub?.binding?.phase ?? ''],
     )) === 1;
   }
 }
@@ -117,7 +132,7 @@ export const eventOwnerEqual = (a: EventOwner, b: EventOwner) => a.issuer === b.
 export interface PrEventsOptions {
   target: PrEventArguments; owner: EventOwner; installationId: number;
   callbackHostname?: string;
-  delegatedRecipient?: { clientFingerprint: string; activation?: { bindingId: string; url: string; generation: string; attemptId: string; expiresAt: number } };
+  delegatedRecipient?: { clientFingerprint: string; approval?: { id: string; expiresAt: number } };
   validateRecipient?: (url: string) => Promise<void>;
   webhookSecret: string; store: PrEventStore;
   grants: OAuthGrantStore;
@@ -141,9 +156,8 @@ export class PrEvents {
       hash(sub.binding.target) === hash(this.options.target) && sub.id === this.identity(sub.owner, sub.url);
   }
   private activationMatches(sub: Subscription) {
-    const approval = this.options.delegatedRecipient?.activation;
-    return !!approval && approval.bindingId === sub.binding?.id && approval.url === sub.url && approval.generation === sub.generation &&
-      approval.attemptId === sub.binding?.attemptId && approval.expiresAt > this.now();
+    const approval = this.options.delegatedRecipient?.approval;
+    return !!approval && approval.id === sub.binding?.approvalId && approval.expiresAt > this.now();
   }
   private async authorize(auth: AuthInfo | undefined, args?: PrEventArguments) {
     const owner = eventOwner(auth);
@@ -230,35 +244,36 @@ export class PrEvents {
   }
   private async subscribeDelegated(auth: AuthInfo, args: PrEventArguments, owner: EventOwner, generation: string, url: string, secret: string, ttlMs?: number | null) {
     const mode = this.options.delegatedRecipient!;
-    const loaded = await this.options.store.load();
-    const old = loaded.state.subscription;
+    const approval = mode.approval;
+    if (!approval || approval.expiresAt <= this.now() || approval.expiresAt > this.now() + 3600000) throw new ProtocolError(-32000, 'Recipient delegation is not approved', { reason: 'delegation_not_approved' });
+    let loaded = await this.options.store.load();
+    let old = loaded.state.subscription;
     const id = this.identity(owner, url);
     const grant = await this.grant(owner, generation);
     const expiresAt = Math.min(grant.expiresAt, this.now() + Math.min(ttlMs ?? 3600000, 3600000), auth.expiresAt === undefined ? Infinity : auth.expiresAt * 1000);
     if (expiresAt <= this.now()) throw new Error('Event authorization expired');
     if (old) {
-      if (!this.bindingMatches(old) || old.id !== id || old.generation !== generation || old.expiresAt <= this.now() || this.options.vault.open(old.secret).plaintext !== secret) throw new Error('Recipient changed; explicit teardown and rebind required');
+      if (!this.bindingMatches(old) || old.id !== id || old.generation !== generation || old.binding?.approvalId !== approval.id || old.expiresAt <= this.now() || this.options.vault.open(old.secret).plaintext !== secret) throw new Error('Recipient changed; explicit teardown and rebind required');
       if (old.binding!.phase === 'active') {
         await this.checkSubscription(old);
         return { id, refreshBefore: new Date(old.expiresAt).toISOString(), cursor: null, truncated: false };
       }
       if (old.binding!.phase !== 'pending') throw new Error('Incomplete challenge; explicit teardown and rebind required');
     } else {
-      // No provider read, challenge or application payload while approval is absent.
+      if ((loaded.state.usedBindingAttempts ?? []).includes(approval.id) || (loaded.state.usedBindingAttempts?.length ?? 0) >= 16) throw new Error('Delegation approval already consumed or capacity reached');
+      // Pending persistence consumes this approval; no provider read or callback yet.
       await this.options.validateRecipient!(url);
-      const pending: Subscription = { id, owner, generation, url, secret: this.options.vault.seal(secret), expiresAt, verifiedUntil: 0,
-        binding: { id: randomUUID(), phase: 'pending', fingerprint: mode.clientFingerprint, target: args } };
+      const pending: Subscription = { id, owner, generation, url, secret: this.options.vault.seal(secret), expiresAt: Math.min(expiresAt, approval.expiresAt), verifiedUntil: 0,
+        binding: { id: randomUUID(), approvalId: approval.id, attemptId: randomUUID(), phase: 'pending', fingerprint: mode.clientFingerprint, target: args } };
       await this.grant(owner, generation);
-      if (!await this.options.store.save(loaded.version, { subscription: pending, deliveries: [], usedBindingAttempts: loaded.state.usedBindingAttempts })) throw new Error('Pending binding changed');
-      throw new ProtocolError(-32000, 'Recipient binding awaits explicit activation approval', { reason: 'recipient_pending', bindingId: pending.binding!.id });
+      if (!await this.options.store.save(loaded.version, { subscription: pending, deliveries: [], usedBindingAttempts: [...(loaded.state.usedBindingAttempts ?? []), approval.id] })) throw new Error('Pending binding changed');
+      loaded = await this.options.store.load();
+      old = loaded.state.subscription;
+      if (!old || old.binding?.id !== pending.binding!.id || old.binding.phase !== 'pending') throw new Error('Pending binding changed');
     }
-    const approval = mode.activation;
-    if (!approval || approval.bindingId !== old.binding!.id || approval.url !== url || approval.generation !== generation || approval.expiresAt <= this.now()) throw new ProtocolError(-32000, 'Recipient binding awaits explicit activation approval', { reason: 'recipient_pending', bindingId: old.binding!.id });
-    if ((loaded.state.usedBindingAttempts ?? []).includes(approval.attemptId) || (loaded.state.usedBindingAttempts?.length ?? 0) >= 16) throw new Error('Activation attempt already used or capacity reached');
-    loaded.state.usedBindingAttempts = [...(loaded.state.usedBindingAttempts ?? []), approval.attemptId];
     // Persist a single-use challenge claim. Restart/failure never automatically replays it.
     old.expiresAt = Math.min(old.expiresAt, approval.expiresAt);
-    old.binding!.phase = 'challenging'; old.binding!.attemptId = approval.attemptId;
+    old.binding!.phase = 'challenging';
     await this.grant(owner, generation);
     if (!await this.options.store.save(loaded.version, loaded.state)) throw new Error('Challenge claim changed');
     const claim = JSON.stringify(loaded.state);
