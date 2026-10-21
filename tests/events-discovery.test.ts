@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { SignJWT, decodeJwt } from 'jose';
 import * as z from 'zod/v4';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -45,6 +45,17 @@ test('live configuration still initializes only with its full prerequisites', ()
     CONDUCTOR_GITHUB_APP_ID: '123', CONDUCTOR_GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
     CONDUCTOR_GITHUB_WEBHOOK_SECRET: 'test-only-webhook-secret'.repeat(3), CONDUCTOR_PROVIDER_CREDENTIAL_KEY: 'test-only-vault-key'.repeat(3) });
   assert.ok(live instanceof PrEvents);
+  const parsed = JSON.parse(config); delete parsed.callbackHostname;
+  parsed.delegatedRecipient = { clientFingerprint: createHash('sha256').update(parsed.owner.clientId).digest('hex') };
+  delete parsed.owner.clientId;
+  const delegated = createConfiguredPrEvents(runtime, { ...env, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify(parsed),
+    UPSTASH_REDIS_REST_URL: 'https://unused.example', UPSTASH_REDIS_REST_TOKEN: 'test-only',
+    CONDUCTOR_GITHUB_APP_ID: '123', CONDUCTOR_GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    CONDUCTOR_GITHUB_WEBHOOK_SECRET: 'test-only-webhook-secret'.repeat(3), CONDUCTOR_PROVIDER_CREDENTIAL_KEY: 'test-only-vault-key'.repeat(3) });
+  assert.ok(delegated instanceof PrEvents);
+  parsed.owner.clientId = 'body-identity-not-needed';
+  assert.throws(() => createConfiguredPrEvents(runtime, { ...env, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify(parsed) }));
+
 });
 
 test('actual configured HTTP discovery uses ordinary OAuth and no live event operations', async t => {
@@ -122,4 +133,15 @@ test('actual configured HTTP discovery uses ordinary OAuth and no live event ope
   assert.equal(decodeJwt(tokens.access_token).grant_generation, undefined);
   assert.equal(decodeJwt(tokens.refresh_token).grant_generation, undefined);
   assert.equal(forbiddenCalls, 0); assert.equal(externalRequests, 0);
+});
+
+test('delegated recipient config is explicit, exclusive, and Preview-only', () => {
+  const runtime = new ConductorToolRuntime();
+  const base = { target: { repository: 'owner/private', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }, owner: { issuer: 'https://issuer.example', subject: 'owner', clientId: 'private-client' }, installationId: 123 };
+  const delegatedRecipient = { clientFingerprint: '0'.repeat(64) };
+  for (const config of [{ ...base }, { ...base, delegatedRecipient: true }, { ...base, delegatedRecipient: { ...delegatedRecipient, activation: {} } }, { ...base, delegatedRecipient: { ...delegatedRecipient, enabled: true } }, { ...base, delegatedRecipient, callbackHostname: 'receiver.example' }]) {
+    assert.throws(() => createConfiguredPrEvents(runtime, { VERCEL_ENV: 'preview', CONDUCTOR_PR_EVENTS_JSON: JSON.stringify(config) }));
+  }
+  for (const env of ['production', 'development', undefined]) assert.throws(() => createConfiguredPrEvents(runtime, { VERCEL_ENV: env, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify({ ...base, delegatedRecipient }) }), /limited to Preview/);
+  assert.throws(() => createConfiguredPrEvents(runtime, { ...preview, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify({ ...base, delegatedRecipient }) }), /mutually exclusive/);
 });
