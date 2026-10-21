@@ -1,11 +1,10 @@
-import { clientFingerprint } from '../transport/work-scope.js';
 import { validateCallbackRecipient } from '../transport/event-callback.js';
 import { oauthGrantStore, requireOAuthGrant } from '../transport/oauth-grant-store.js';
 import { createHash } from 'node:crypto';
 import { Redis } from '@upstash/redis';
 import * as z from 'zod/v4';
 import type { ConductorToolRuntime } from '../runtime/runtime.js';
-import { PrEvents, RedisPrEventStore, eventOwnerEqual, prEventArguments, type PrEventService } from '../runtime/pr-events.js';
+import { PrEvents, RedisPrEventStore, eventOwnerAuthorized, prEventArguments, type PrEventService } from '../runtime/pr-events.js';
 import { GitHubAppCredentialProvider } from '../connections/github/app-installation.js';
 import { providerCredentialVaultFromEnvironment } from '../connections/universal/credential-vault.js';
 import { GitHubRuntimeProvider } from '../providers/github.js';
@@ -18,7 +17,7 @@ const commonConfiguration = {
 };
 const configuration = z.union([
   z.object({ ...commonConfiguration, callbackHostname: z.string().max(253).regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)+$/) }).strict(),
-  z.object({ ...commonConfiguration, delegatedRecipient: z.object({
+  z.object({ ...commonConfiguration, owner: commonConfiguration.owner.omit({ clientId: true }).strict(), delegatedRecipient: z.object({
     clientFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
     approval: z.object({ id: z.uuid(), expiresAt: z.number().int().positive() }).strict().optional(),
   }).strict() }).strict(),
@@ -37,7 +36,6 @@ export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environm
   if (environment.VERCEL_ENV !== 'preview') throw new Error('PR events are limited to Preview');
   const config = configuration.parse(JSON.parse(environment.CONDUCTOR_PR_EVENTS_JSON));
   const delegated = 'delegatedRecipient' in config ? config.delegatedRecipient : undefined;
-  if (delegated && delegated.clientFingerprint !== clientFingerprint(config.owner.clientId)) throw new Error('Configured client fingerprint does not match owner');
   const url = environment.UPSTASH_REDIS_REST_URL ?? environment.KV_REST_API_URL;
   const token = environment.UPSTASH_REDIS_REST_TOKEN ?? environment.KV_REST_API_TOKEN;
   const appId = environment.CONDUCTOR_GITHUB_APP_ID;
@@ -57,7 +55,7 @@ export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environm
     validateRecipient: delegated ? validateCallbackRecipient : undefined,
     post: 'callbackHostname' in config ? safeCallbackPost(config.callbackHostname) : (url, body, headers) => safeCallbackPost(new URL(url).hostname)(url, body, headers),
     source: { async read(owner, target, generation) {
-      if (!eventOwnerEqual(owner, config.owner)) throw new Error('Event principal revoked');
+      if (!eventOwnerAuthorized(owner, config.owner, delegated?.clientFingerprint)) throw new Error('Event principal revoked');
       await requireOAuthGrant(grants, owner, generation);
       // Native installation attestation is fresh, not a cached token/account or OAuth-client inference.
       await app.getRepositoryAttestation(target.repository, config.installationId);

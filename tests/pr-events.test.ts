@@ -364,7 +364,7 @@ function delegatedFixture() {
   const f = fixture();
   const { callbackHostname: _hostname, ...base } = f.options;
   const mode = { clientFingerprint: createHash('sha256').update(owner.clientId).digest('hex'), approval: undefined as undefined | { id: string; expiresAt: number } };
-  const options = { ...base, delegatedRecipient: mode, validateRecipient: async (_url: string) => {} };
+  const options = { ...base, owner: { issuer: owner.issuer, subject: owner.subject }, delegatedRecipient: mode, validateRecipient: async (_url: string) => {} };
   const bridge = new PrEvents(options);
   const approve = () => { mode.approval = { id: randomUUID(), expiresAt: options.now() + 300000 }; };
   const pending = async () => {
@@ -384,6 +384,8 @@ test('delegated approved client binds and challenges in one request; absent appr
   await assert.rejects(f.bridge.subscribe(auth, target, delivery), /not approved/);
   assert.equal(f.store.raw, null); assert.equal(f.reads(), 0); assert.equal(f.posts.length, 0);
   await f.activate();
+  assert.equal('clientId' in f.options.owner, false);
+  assert.deepEqual((await f.store.load()).state.subscription!.owner, owner);
   assert.equal(f.posts.length, 1); assert.equal(f.applicationPosts().length, 0);
   assert.equal((await f.store.load()).state.subscription!.binding!.phase, 'active');
   await new PrEvents(f.options).subscribe(auth, target, delivery); assert.equal(f.posts.length, 1);

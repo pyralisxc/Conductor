@@ -129,8 +129,14 @@ function canonical(value: unknown): unknown {
 }
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 export const eventOwnerEqual = (a: EventOwner, b: EventOwner) => a.issuer === b.issuer && a.subject === b.subject && a.clientId === b.clientId;
+/** Owner/tenant remain configured; delegated client identity comes only from verified authentication. */
+export function eventOwnerAuthorized(owner: EventOwner, expected: { issuer: string; subject: string; clientId?: string }, fingerprint?: string): boolean {
+  return owner.issuer === expected.issuer && owner.subject === expected.subject &&
+    (fingerprint !== undefined ? clientFingerprint(owner.clientId) === fingerprint && (expected.clientId === undefined || owner.clientId === expected.clientId)
+      : !!expected.clientId && owner.clientId === expected.clientId);
+}
 export interface PrEventsOptions {
-  target: PrEventArguments; owner: EventOwner; installationId: number;
+  target: PrEventArguments; owner: { issuer: string; subject: string; clientId?: string }; installationId: number;
   callbackHostname?: string;
   delegatedRecipient?: { clientFingerprint: string; approval?: { id: string; expiresAt: number } };
   validateRecipient?: (url: string) => Promise<void>;
@@ -142,6 +148,7 @@ export class PrEvents {
   private readonly now: () => number;
   constructor(private readonly options: PrEventsOptions) {
     this.now = options.now ?? Date.now;
+    if (!options.delegatedRecipient && !options.owner.clientId) throw new Error('Fixed-host client identity is required');
     if (options.delegatedRecipient && !options.validateRecipient) throw new Error('Delegated recipient preflight is required');
     if (Boolean(options.callbackHostname) === Boolean(options.delegatedRecipient)) throw new Error('Exactly one recipient mode is required');
   }
@@ -152,7 +159,7 @@ export class PrEvents {
     const mode = this.options.delegatedRecipient;
     if (!mode) return !sub.binding;
     return !!sub.binding && sub.binding.fingerprint === mode.clientFingerprint &&
-      clientFingerprint(sub.owner.clientId) === mode.clientFingerprint && eventOwnerEqual(sub.owner, this.options.owner) &&
+      clientFingerprint(sub.owner.clientId) === mode.clientFingerprint && eventOwnerAuthorized(sub.owner, this.options.owner, mode.clientFingerprint) &&
       hash(sub.binding.target) === hash(this.options.target) && sub.id === this.identity(sub.owner, sub.url);
   }
   private activationMatches(sub: Subscription) {
@@ -161,7 +168,7 @@ export class PrEvents {
   }
   private async authorize(auth: AuthInfo | undefined, args?: PrEventArguments) {
     const owner = eventOwner(auth);
-    if (!eventOwnerEqual(owner, this.options.owner) || (args && hash(args) !== hash(this.options.target))) throw new Error('Event resource is not authorized');
+    if (!eventOwnerAuthorized(owner, this.options.owner, this.options.delegatedRecipient?.clientFingerprint) || (args && hash(args) !== hash(this.options.target))) throw new Error('Event resource is not authorized');
     if (this.options.delegatedRecipient && clientFingerprint(owner.clientId) !== this.options.delegatedRecipient.clientFingerprint) throw new Error('Event client fingerprint is not authorized');
     await this.grant(owner, auth?.extra?.grantGeneration);
     return owner;

@@ -47,13 +47,14 @@ test('live configuration still initializes only with its full prerequisites', ()
   assert.ok(live instanceof PrEvents);
   const parsed = JSON.parse(config); delete parsed.callbackHostname;
   parsed.delegatedRecipient = { clientFingerprint: createHash('sha256').update(parsed.owner.clientId).digest('hex') };
+  delete parsed.owner.clientId;
   const delegated = createConfiguredPrEvents(runtime, { ...env, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify(parsed),
     UPSTASH_REDIS_REST_URL: 'https://unused.example', UPSTASH_REDIS_REST_TOKEN: 'test-only',
     CONDUCTOR_GITHUB_APP_ID: '123', CONDUCTOR_GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
     CONDUCTOR_GITHUB_WEBHOOK_SECRET: 'test-only-webhook-secret'.repeat(3), CONDUCTOR_PROVIDER_CREDENTIAL_KEY: 'test-only-vault-key'.repeat(3) });
   assert.ok(delegated instanceof PrEvents);
-  parsed.delegatedRecipient.clientFingerprint = '0'.repeat(64);
-  assert.throws(() => createConfiguredPrEvents(runtime, { ...env, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify(parsed) }), /fingerprint does not match/);
+  parsed.owner.clientId = 'body-identity-not-needed';
+  assert.throws(() => createConfiguredPrEvents(runtime, { ...env, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify(parsed) }));
 
 });
 

@@ -153,7 +153,7 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     const delivery = { url: 'https://unused.example/callback', secret: `whsec_${Buffer.alloc(32, 9).toString('base64')}` };
     const mode = { clientFingerprint: createHash('sha256').update(owner.clientId).digest('hex'), approval: { id: randomUUID(), expiresAt: expiry() } };
     const posts: string[][] = [[], []]; const reads = [0, 0];
-    const makeCallers = () => posts.map((sent, caller) => new PrEvents({ target, owner, installationId: 123, delegatedRecipient: mode,
+    const makeCallers = () => posts.map((sent, caller) => new PrEvents({ target, owner: { issuer: owner.issuer, subject: owner.subject }, installationId: 123, delegatedRecipient: mode,
       webhookSecret: 'isolated-only', grants, store: new RedisPrEventStore(redis.client, key), validateRecipient: async () => {},
       vault: new VersionedProviderCredentialVault({ legacyPurpose: 'isolated', currentKey: 'isolated-vault-key'.repeat(3) }),
       source: { async read() { reads[caller]++; return { ...target, head: { sha: target.headSha }, base: { sha: target.baseSha, ref: 'preview' },
