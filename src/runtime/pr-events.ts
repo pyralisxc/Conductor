@@ -315,7 +315,8 @@ export class PrEvents {
         subscriptionGrantMatches: false, approvalMatches: false, approvalValid };
     }
     const storedEventName = sub.eventName ?? PR_EVENT;
-    const eventName = storedEventName === PR_EVENT || storedEventName === CHECKPOINT_EVENT ? storedEventName : null;
+    const eventName: typeof PR_EVENT | typeof CHECKPOINT_EVENT | null =
+      storedEventName === PR_EVENT ? PR_EVENT : storedEventName === CHECKPOINT_EVENT ? CHECKPOINT_EVENT : null;
     const phase = sub.binding?.phase;
     const safePhase = phase === 'pending' || phase === 'challenging' || phase === 'active' ? phase : null;
     const shared = { ...baseResult, eventName, phase: safePhase, subscriptionExpiresAt: sub.expiresAt,
@@ -325,7 +326,7 @@ export class PrEvents {
     if (!bindingMatchesConfigured || !subscriptionGrantMatches || !approvalMatches || !approvalValid || !safePhase || !eventName) {
       return { ...shared, status: 'invalid_authority' };
     }
-    return { ...shared, status: safePhase };
+    return { ...shared, eventName: eventName!, phase: safePhase!, status: safePhase! };
   }
 
   async list(auth?: AuthInfo) {
