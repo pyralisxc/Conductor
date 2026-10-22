@@ -101,6 +101,46 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     assert.equal((await events.load()).state.subscription, undefined);
   });
 
+
+  await t.test('expired binding release atomically checks current grant/CAS and preserves consumed approval/history', async () => {
+    const owner = identity('expired-release');
+    const oldGrant = await grants.consent(owner, ['conductor.read'], expiry());
+    const events = new RedisPrEventStore(redis.client, 'test:expired-release');
+    const approvalId = randomUUID();
+    const pending = state(owner, oldGrant.generation);
+    pending.baseline = 'old-baseline';
+    pending.subscription!.id = randomUUID();
+    pending.subscription!.binding = { id: randomUUID(), approvalId, phase: 'pending',
+      fingerprint: createHash('sha256').update(owner.clientId).digest('hex'),
+      target: { repository: 'owner/repo', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) } };
+    pending.usedBindingAttempts = ['used-attempt'];
+    pending.deliveries = [{ id: 'delivery', source: 'source', fingerprint: 'b'.repeat(64), body: '{}',
+      createdAt: Date.now(), attempts: 1, status: 'uncertain' }];
+    assert.equal(await events.save(null, pending), true);
+    const marker = 'conductor:preview:pr-events:approval:' + approvalId;
+    const bindingId = pending.subscription!.binding!.id;
+    assert.equal(await redis.command(['PTTL', marker]), -1);
+    assert.equal(await redis.command(['GET', marker]), bindingId);
+    const active = await events.load();
+    active.state.subscription!.binding!.phase = 'active';
+    assert.equal(await events.save(active.version, active.state), true);
+    const observed = await events.load();
+    await grants.revoke(owner, oldGrant.generation);
+    const currentGrant = await grants.consent(owner, ['conductor.read'], expiry());
+    const next = structuredClone(observed.state);
+    delete next.subscription; delete next.baseline;
+    assert.equal(await events.releaseExpiredBinding(observed.version, next, owner, currentGrant.generation,
+      observed.state.subscription!.id, Date.now(), Date.now() - 1), true);
+    const released = await events.load();
+    assert.equal(released.state.subscription, undefined);
+    assert.equal(released.state.baseline, undefined);
+    assert.deepEqual(released.state.deliveries, observed.state.deliveries);
+    assert.deepEqual(released.state.usedBindingAttempts, ['used-attempt']);
+    assert.equal(await redis.command(['GET', marker]), bindingId);
+    assert.equal(await events.releaseExpiredBinding(observed.version, next, owner, currentGrant.generation,
+      observed.state.subscription!.id, Date.now(), Date.now() - 1), false);
+  });
+
   await t.test('stale event-state CAS cannot overwrite a newer active state', async () => {
     const owner = identity('event-cas'); const grant = await grants.consent(owner, ['conductor.read'], expiry());
     const events = new RedisPrEventStore(redis.client, 'test:event-cas'); const active = state(owner, grant.generation);
