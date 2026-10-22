@@ -150,7 +150,7 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     const approvalId = randomUUID();
     const initial = state(owner, oldGrant.generation);
     initial.subscription!.id = randomUUID();
-    initial.subscription!.binding = { id: randomUUID(), approvalId, phase: 'active',
+    initial.subscription!.binding = { id: randomUUID(), approvalId, phase: 'pending',
       fingerprint: createHash('sha256').update(owner.clientId).digest('hex'),
       target: { repository: 'owner/repo', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) } };
     assert.equal(await events.save(null, initial), true);
