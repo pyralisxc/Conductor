@@ -314,14 +314,15 @@ export class PrEvents {
         ownerMatchesConfigured, clientMatchesConfigured, resourceMatchesConfigured, bindingMatchesConfigured: false,
         subscriptionGrantMatches: false, approvalMatches: false, approvalValid };
     }
-    const eventName = sub.eventName ?? PR_EVENT;
+    const storedEventName = sub.eventName ?? PR_EVENT;
+    const eventName = storedEventName === PR_EVENT || storedEventName === CHECKPOINT_EVENT ? storedEventName : null;
     const phase = sub.binding?.phase;
     const safePhase = phase === 'pending' || phase === 'challenging' || phase === 'active' ? phase : null;
     const shared = { ...baseResult, eventName, phase: safePhase, subscriptionExpiresAt: sub.expiresAt,
       ownerMatchesConfigured, clientMatchesConfigured, resourceMatchesConfigured, bindingMatchesConfigured,
       subscriptionGrantMatches, approvalMatches, approvalValid };
     if (sub.expiresAt <= this.now()) return { ...shared, status: 'expired' };
-    if (!bindingMatchesConfigured || !subscriptionGrantMatches || !approvalMatches || !approvalValid || !safePhase) {
+    if (!bindingMatchesConfigured || !subscriptionGrantMatches || !approvalMatches || !approvalValid || !safePhase || !eventName) {
       return { ...shared, status: 'invalid_authority' };
     }
     return { ...shared, status: safePhase };
