@@ -15,7 +15,7 @@ export const PR_EVENT = 'pull_request.verification_changed';
 
 
 export const prEventArguments = z.object({
-  repository: z.string().max(200).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  repository: z.string().max(200).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).refine(value => !containsCredentialLike(value), 'Sensitive material is not allowed'),
   pullRequestNumber: z.number().int().positive(),
   headSha: z.string().regex(/^[a-f0-9]{40}$/),
   baseSha: z.string().regex(/^[a-f0-9]{40}$/),
