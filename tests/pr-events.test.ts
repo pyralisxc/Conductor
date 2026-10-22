@@ -787,7 +787,8 @@ test('checkpoint callback timeout becomes terminal uncertain and is never replay
   const originalPost = f.options.post;
   f.options.post = async (url, body, headers) => {
     if (JSON.parse(body).type === 'verification') return originalPost(url, body, headers);
-    throw new Error('simulated callback timeout');
+    await originalPost(url, body, headers); // Receiver accepts the callback, but the sender loses the response.
+    throw new Error('simulated callback timeout after receiver acceptance');
   };
   const payload = {
     resource: target,
