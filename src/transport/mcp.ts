@@ -1,4 +1,4 @@
-import { type PrEventService, PR_EVENT, prEventArguments, prEventCatalog, eventOwner } from '../runtime/pr-events.js';
+import { type PrEventService, PR_EVENT, CHECKPOINT_EVENT, prEventArguments, checkpointPublicationArguments, prEventCatalog, eventOwner } from '../runtime/pr-events.js';
 import { McpServer, ProtocolError } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { releaseIdentityFitsTransport, RELEASE_IDENTITY_MAX_BYTES } from '../runtime/release-identities.js';
@@ -259,15 +259,25 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       }
     } else {
       const delivery = z.object({ mode: z.literal('webhook'), url: z.string().max(2048) }).strict();
-      const identity = z.object({ name: z.literal(PR_EVENT), arguments: prEventArguments, delivery }).strict();
+      const identity = z.object({ name: z.enum([PR_EVENT, CHECKPOINT_EVENT]), arguments: prEventArguments, delivery }).strict();
       server.server.setRequestHandler('events/list', { params: z.object({ cursor: z.null().optional() }).strict().optional() },
         async (_params, ctx) => events.list(ctx.http?.authInfo));
       server.server.setRequestHandler('events/subscribe', { params: identity.extend({
         delivery: delivery.extend({ secret: z.string().max(100) }),
         cursor: z.null().optional(), ttlMs: z.number().int().min(1000).nullable().optional(),
-      }) }, async (params, ctx) => events.subscribe(ctx.http?.authInfo, params.arguments, params.delivery, params.ttlMs));
+      }) }, async (params, ctx) => events.subscribe(ctx.http?.authInfo, params.arguments, params.delivery, params.ttlMs, params.name));
       server.server.setRequestHandler('events/unsubscribe', { params: identity },
-        async (params, ctx) => events.unsubscribe(ctx.http?.authInfo, params.arguments, params.delivery.url));
+        async (params, ctx) => events.unsubscribe(ctx.http?.authInfo, params.arguments, params.delivery.url, params.name));
+      server.registerTool('checkpoint.publish', {
+        title: 'Publish a bounded agent work-result checkpoint',
+        description: 'Publishes one redacted checkpoint through an active exact-resource agent.checkpoint_published subscription. The subscription selects the recipient; the caller cannot select a destination. Accepted means callback acceptance, not receiver wake or completed continuation. The returned receipt is separate from the event payload.',
+        inputSchema: checkpointPublicationArguments,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        _meta: { securitySchemes: oauthSecurity },
+      }, async (input, extra) => {
+        const receipt = await events.publishCheckpoint(extra.http?.authInfo, input);
+        return { structuredContent: receipt, content: [{ type: 'text', text: JSON.stringify(receipt) }] };
+      });
     }
   }
 

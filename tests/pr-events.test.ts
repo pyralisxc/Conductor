@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import * as z from 'zod/v4';
-import { PrEvents, PR_EVENT, type PrEventState, type PrEventStore } from '../src/runtime/pr-events.js';
+import { PrEvents, PR_EVENT, CHECKPOINT_EVENT, prEventCatalog, type PrEventState, type PrEventStore } from '../src/runtime/pr-events.js';
 import { VersionedProviderCredentialVault } from '../src/connections/universal/credential-vault.js';
 import { createConductorHttpHandler } from '../src/transport/http.js';
 import { ConductorToolRuntime } from '../src/runtime/runtime.js';
@@ -78,7 +78,19 @@ test('real HTTP protocol 2026-07-28 discovers and invokes authenticated event me
     assert.equal(f.posts.length, 1);
     await client.request({ method: 'events/unsubscribe', params: { ...params, delivery: { mode: 'webhook', url: delivery.url } } }, result);
     assert.equal((await f.store.load()).state.subscription, undefined);
-    const tools = await client.listTools(); assert.ok(tools.tools.some(tool => tool.name === 'capabilities'));
+    const tools = await client.listTools(); assert.ok(tools.tools.some(tool => tool.name === 'capabilities')); assert.ok(tools.tools.some(tool => tool.name === 'checkpoint.publish'));
+    const checkpointParams = { name: CHECKPOINT_EVENT, arguments: target, delivery };
+    await client.request({ method: 'events/subscribe', params: checkpointParams }, result);
+    const toolResult = await client.request({ method: 'tools/call', params: { name: 'checkpoint.publish', arguments: {
+      resource: target,
+      source: { conversationUrl: 'https://chatgpt.com/local/http-test-conversation', conversationId: 'http-test-conversation', replyId: null, replyState: 'unavailable' },
+      checkpointId: 'http-checkpoint-0001', summary: 'Real MCP tool invocation test.',
+      evidence: [{ kind: 'github', reference: 'https://github.com/pyralisxc/Conductor/pull/317' }], pending: [],
+    } } }, result);
+    assert.match(JSON.stringify(toolResult), /accepted/);
+    assert.equal(f.posts.length, 3);
+    await client.request({ method: 'events/unsubscribe', params: { ...checkpointParams, delivery: { mode: 'webhook', url: delivery.url } } }, result);
+    assert.equal((await f.store.load()).state.subscription, undefined);
   } finally { await client.close(); await new Promise<void>(resolve => http.close(() => resolve())); }
 });
 
@@ -607,4 +619,263 @@ test('delegated stable slot cannot reinterpret branch; legacy absent means previ
   await assert.rejects(changed.subscribe(auth, target, delivery), /teardown/);
   assert.equal(await changed.reconcile('changed-branch'), 'blocked');
   assert.equal(f.posts.length, count); assert.equal(f.reads(), reads);
+});
+
+test('checkpoint publication uses the scoped callback, redacted envelope and stable dedupe identity', async () => {
+  const f = fixture();
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-123', conversationId: 'conversation-123', replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-20261022-0001',
+    summary: 'Exact-head Preview integration is verified.',
+    evidence: [{ kind: 'github' as const, reference: 'https://github.com/pyralisxc/Conductor/pull/316' }],
+    pending: ['Receiver wake remains unproven.'],
+  };
+  assert.deepEqual(prEventCatalog().events.map(event => event.name), [PR_EVENT, CHECKPOINT_EVENT]);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, payload), /No exact checkpoint subscription/);
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const result = await f.bridge.publishCheckpoint(auth, payload);
+  assert.equal(result.status, 'accepted');
+  assert.equal(f.posts.length, 2);
+  const message = JSON.parse(f.posts[1].body);
+  assert.equal(message.name, CHECKPOINT_EVENT);
+  assert.equal(message.data.origin, 'conductor-project-agent');
+  assert.equal(message.data.eventClass, 'agent.work_result');
+  assert.equal(message.data.project, target.repository);
+  assert.equal(message.data.source.conversationUrl, payload.source.conversationUrl);
+  assert.equal(message.data.checkpointId, payload.checkpointId);
+  for (const secret of [delivery.url, delivery.secret, auth.token, owner.clientId, auth.extra.grantGeneration]) assert.equal(f.posts[1].body.includes(secret), false);
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'duplicate');
+  assert.equal(f.posts.length, 2);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, { ...payload, summary: 'Changed content for same identity.' }), /identity reused with different content/);
+  await assert.rejects(f.bridge.publishCheckpoint({ ...auth, clientId: 'foreign-client' }, payload), /not authorized/);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, { ...payload, resource: { ...target, pullRequestNumber: 8 } }), /not authorized/);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, { ...payload, source: { ...payload.source, conversationUrl: 'https://evil.example/c/1' } }), /Canonical HTTPS ChatGPT/);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, { ...payload, summary: 'Bearer abcdefghijklmnop' }), /Sensitive material/);
+  assert.equal(f.posts.length, 2);
+});
+
+test('checkpoint subscriptions ignore provider hints and fail closed on revoked grants', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  assert.equal(await f.bridge.reconcile('provider-webhook-id'), 'inactive');
+  await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, {
+    resource: target, source: { conversationUrl: 'https://chatgpt.com/local/conversation-123', conversationId: null, replyId: null, replyState: 'unavailable' },
+    checkpointId: 'checkpoint-revoked-0001', summary: 'Must not publish.', evidence: [], pending: [],
+  }));
+  assert.equal(f.posts.length, 1);
+});
+
+test('delegated checkpoint subscription uses event identity for activation and unsubscribe', async () => {
+  const f = delegatedFixture(); f.approve();
+  const subscribed = await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const active = (await f.store.load()).state.subscription!;
+  assert.equal(active.eventName, CHECKPOINT_EVENT);
+  assert.equal(active.binding?.phase, 'active');
+  assert.equal(active.id, subscribed.id);
+  const count = f.posts.length;
+  await f.bridge.unsubscribe(auth, target, delivery.url, CHECKPOINT_EVENT);
+  assert.equal((await f.store.load()).state.subscription, undefined);
+  assert.equal(f.posts.length, count);
+});
+
+test('checkpoint ambiguous delivery becomes terminal uncertain and is never replayed after lease expiry', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const payload = { resource: target, source: { conversationUrl: 'https://chatgpt.com/local/conversation-123', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-crash-0001', summary: 'A bounded result.', evidence: [], pending: [] };
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'accepted');
+  const loaded = await f.store.load();
+  const record = loaded.state.deliveries.find(d => d.source.endsWith(':checkpoint-crash-0001'))!;
+  record.status = 'pending'; record.attempts = 1; record.leaseUntil = 0;
+  assert.equal(await f.store.save(loaded.version, loaded.state), true);
+  const count = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'uncertain');
+  assert.equal(f.posts.length, count);
+  assert.equal((await f.store.load()).state.deliveries.find(d => d.id === record.id)?.status, 'uncertain');
+});
+
+test('checkpoint pre-dispatch CAS contention safely resumes an unclaimed publication', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const payload = { resource: target, source: { conversationUrl: 'https://chatgpt.com/local/conversation-123', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-cas-0001', summary: 'A bounded result.', evidence: [], pending: [] };
+  const save = f.store.save.bind(f.store); let rejectClaim = true;
+  f.store.save = async (version, state) => {
+    if (rejectClaim && state.deliveries.some(d => d.source.endsWith(':checkpoint-cas-0001') && d.attempts === 1)) { rejectClaim = false; return false; }
+    return save(version, state);
+  };
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'pending');
+  const count = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'accepted');
+  assert.equal(f.posts.length, count + 1);
+});
+
+test('checkpoint superseded before dispatch is terminal and sends no callback', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const payload = { resource: target, source: { conversationUrl: 'https://chatgpt.com/local/conversation-123', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-superseded-0001', summary: 'A bounded result.', evidence: [], pending: [] };
+  const save = f.store.save.bind(f.store); let change = true;
+  f.store.save = async (version, state) => {
+    const saved = await save(version, state);
+    if (saved && change && state.deliveries.some(d => d.source.endsWith(':checkpoint-superseded-0001'))) { change = false; f.pull.checks.pending = 0; f.pull.checks.successful = 1; }
+    return saved;
+  };
+  const count = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'superseded');
+  assert.equal(f.posts.length, count);
+});
+
+test('checkpoint redaction screens all caller-controlled identifiers and URL paths', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const payload = { resource: target, source: { conversationUrl: 'https://chatgpt.com/local/conversation-123', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-safe-0001', summary: 'A bounded result.', evidence: [], pending: [] };
+  const invalid = [
+    { ...payload, source: { ...payload.source, conversationId: 'ghp_abcdefghijklmnopqrstuvwxyz' } },
+    { ...payload, source: { ...payload.source, replyId: 'Bearer abcdefghijklmnop' } },
+    { ...payload, checkpointId: 'sk-abcdefghijklmnopqrstuvwxyz' },
+    { ...payload, source: { ...payload.source, conversationUrl: 'https://chatgpt.com/local/ghp_abcdefghijklmnopqrstuvwxyz' } },
+    { ...payload, evidence: [{ kind: 'github' as const, reference: 'https://github.com/owner/repo/ghp_abcdefghijklmnopqrstuvwxyz' }] },
+    { ...payload, pending: ['api_key=supersecret'] },
+  ];
+  for (const bad of invalid) await assert.rejects(f.bridge.publishCheckpoint(auth, bad));
+  assert.equal(f.posts.length, 1);
+});
+
+test('checkpoint HTTP 410 stops the delivery and removes the active subscription', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  f.status(410);
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-410', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-http-410-0001', summary: 'Receiver rejected the subscription.',
+    evidence: [], pending: [],
+  };
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'stopped');
+  const state = (await f.store.load()).state;
+  assert.equal(state.subscription, undefined);
+  assert.equal(state.deliveries.find(d => d.source.endsWith(':checkpoint-http-410-0001'))?.status, 'stopped');
+  const callbackCount = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload).catch(() => ({ status: 'no-subscription' }))).status, 'no-subscription');
+  assert.equal(f.posts.length, callbackCount);
+});
+
+test('checkpoint HTTP 503 becomes terminal uncertain and is never replayed', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  f.status(503);
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-503', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-http-503-0001', summary: 'Transient receiver failure.',
+    evidence: [], pending: [],
+  };
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'uncertain');
+  const count = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'uncertain');
+  assert.equal(f.posts.length, count);
+  assert.equal((await f.store.load()).state.deliveries.find(d => d.source.endsWith(':checkpoint-http-503-0001'))?.status, 'uncertain');
+});
+
+test('checkpoint callback timeout becomes terminal uncertain and is never replayed', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const originalPost = f.options.post;
+  f.options.post = async (url, body, headers) => {
+    if (JSON.parse(body).type === 'verification') return originalPost(url, body, headers);
+    await originalPost(url, body, headers); // Receiver accepts the callback, but the sender loses the response.
+    throw new Error('simulated callback timeout after receiver acceptance');
+  };
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-timeout', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-timeout-0001', summary: 'Callback timed out.',
+    evidence: [], pending: [],
+  };
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'uncertain');
+  const count = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'uncertain');
+  assert.equal(f.posts.length, count);
+  assert.equal((await f.store.load()).state.deliveries.find(d => d.source.endsWith(':checkpoint-timeout-0001'))?.status, 'uncertain');
+});
+
+test('simultaneous duplicate checkpoint publications claim at most one callback', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-concurrent', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-concurrent-0001', summary: 'One logical work result.',
+    evidence: [], pending: [],
+  };
+  const before = f.posts.length;
+  const results = await Promise.all([
+    f.bridge.publishCheckpoint(auth, payload),
+    f.bridge.publishCheckpoint(auth, payload),
+  ]);
+  assert.ok(results.every(result => ['accepted', 'pending', 'duplicate'].includes(result.status)));
+  assert.equal(f.posts.length - before, 1);
+  const state = (await f.store.load()).state;
+  const rows = state.deliveries.filter(d => d.source.endsWith(':checkpoint-concurrent-0001'));
+  assert.equal(rows.length, 1);
+  assert.ok(rows[0].attempts <= 1);
+});
+
+test('grant revoked during initial checkpoint provider read prevents enqueue', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const originalRead = f.options.source.read;
+  let revokedDuringRead = false;
+  f.options.source.read = async (...args) => {
+    const snapshot = await originalRead(...args);
+    if (!revokedDuringRead) {
+      revokedDuringRead = true;
+      await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+    }
+    return snapshot;
+  };
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-revoke', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-revoked-final-read-0001', summary: 'Must not reach callback.',
+    evidence: [], pending: [],
+  };
+  const before = f.posts.length;
+  await assert.rejects(f.bridge.publishCheckpoint(auth, payload), /revoked|grant|Grant|active/i);
+  assert.equal(f.posts.length, before);
+  assert.equal((await f.store.load()).state.deliveries.some(d => d.source.endsWith(':checkpoint-revoked-final-read-0001')), false);
+});
+
+test('grant revoked during final claimed checkpoint provider read marks blocked and suppresses callback', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const originalRead = f.options.source.read;
+  let revokedAfterClaim = false;
+  f.options.source.read = async (...args) => {
+    const snapshot = await originalRead(...args);
+    const loaded = await f.store.load();
+    const claimed = loaded.state.deliveries.find(d => d.source.endsWith(':checkpoint-revoked-final-claim-0001'));
+    if (claimed?.attempts === 1 && !revokedAfterClaim) {
+      revokedAfterClaim = true;
+      await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+    }
+    return snapshot;
+  };
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-final-revoke', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-revoked-final-claim-0001',
+    summary: 'Must be blocked after the final provider read.',
+    evidence: [], pending: [],
+  };
+  const callbacksBefore = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'blocked');
+  assert.equal(revokedAfterClaim, true);
+  assert.equal(f.posts.length, callbacksBefore);
+  const state = (await f.store.load()).state;
+  assert.equal(state.deliveries.find(d => d.source.endsWith(':checkpoint-revoked-final-claim-0001'))?.status, 'blocked');
 });

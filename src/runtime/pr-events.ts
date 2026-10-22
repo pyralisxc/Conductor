@@ -12,13 +12,37 @@ import { callbackUrl, signingKey, signedCallback, verifyCallback, type CallbackP
 export const prEventIntegrationBranch = z.enum(['preview', 'vercel-preview']);
 export type PrEventIntegrationBranch = z.infer<typeof prEventIntegrationBranch>;
 export const PR_EVENT = 'pull_request.verification_changed';
+
+
 export const prEventArguments = z.object({
-  repository: z.string().max(200).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  repository: z.string().max(200).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).refine(value => !containsCredentialLike(value), 'Sensitive material is not allowed'),
   pullRequestNumber: z.number().int().positive(),
   headSha: z.string().regex(/^[a-f0-9]{40}$/),
   baseSha: z.string().regex(/^[a-f0-9]{40}$/),
 }).strict();
 export type PrEventArguments = z.infer<typeof prEventArguments>;
+export const CHECKPOINT_EVENT = 'agent.checkpoint_published';
+
+const credentialLike = /(?:\bBearer\s+|whsec_[A-Za-z0-9+/=]{16,}|github_pat_[A-Za-z0-9_]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,}|sk-[A-Za-z0-9_-]{16,}|(?:access[_-]?token|api[_-]?key|client[_-]?secret|password)=|-----BEGIN [A-Z ]+-----)/i;
+function containsCredentialLike(value: string): boolean {
+  if (credentialLike.test(value)) return true;
+  try { const u=new URL(value); return credentialLike.test(decodeURIComponent(u.pathname))||credentialLike.test(decodeURIComponent(u.hostname))||credentialLike.test(decodeURIComponent(u.search))||credentialLike.test(decodeURIComponent(u.hash)); } catch { return false; }
+}
+const safeCallerString=(max:number,url=false)=>{const value=z.string().max(max);return (url?value.url():value).refine(text=>!containsCredentialLike(text),'Sensitive material is not allowed');};
+
+export const checkpointPublicationArguments = z.object({
+ resource: prEventArguments,
+ source: z.object({conversationUrl:safeCallerString(500,true),conversationId:safeCallerString(200).nullable(),replyId:safeCallerString(200).nullable(),replyState:z.enum(['known','unavailable','not-yet-confirmed'])}).strict(),
+ checkpointId:safeCallerString(160).min(8).regex(/^[A-Za-z0-9._:-]+$/),
+ summary:safeCallerString(1200).min(1),
+ evidence:z.array(z.object({kind:z.enum(['github','ci','deployment','slack']),reference:safeCallerString(500,true)}).strict()).max(12),
+ pending:z.array(safeCallerString(300).min(1)).max(8),
+}).strict().superRefine((v,ctx)=>{
+ const u=new URL(v.source.conversationUrl);
+ if(u.protocol!=='https:'||u.hostname!=='chatgpt.com'||u.username||u.password||u.search||u.hash)ctx.addIssue({code:'custom',path:['source','conversationUrl'],message:'Canonical HTTPS ChatGPT conversation URL required'});
+ for(const e of v.evidence){const x=new URL(e.reference);const ok=e.kind==='github'||e.kind==='ci'?['github.com','api.github.com'].includes(x.hostname):e.kind==='deployment'?x.hostname==='vercel.com'||x.hostname.endsWith('.vercel.app'):x.hostname==='slack.com'||x.hostname.endsWith('.slack.com');if(x.protocol!=='https:'||!ok||x.username||x.password||x.search||x.hash)ctx.addIssue({code:'custom',path:['evidence'],message:'Evidence URL host does not match kind'});}
+});
+export type CheckpointPublicationArguments = z.infer<typeof checkpointPublicationArguments>;
 export interface EventOwner { issuer: string; subject: string; clientId: string }
 // Allowlisted metadata only; unknown provider fields (including bodies) are stripped.
 const reviewActor = z.object({ id: z.number().int().positive(), login: z.string().max(100).regex(/^[A-Za-z0-9_\[\]-]+$/).nullable() }).nullable();
@@ -49,7 +73,14 @@ export function prEventCatalog() {
       repository: { type: 'string' }, pullRequestNumber: { type: 'integer' }, headSha: { type: 'string' }, baseSha: { type: 'string' },
       state: { type: 'string' }, merged: { type: 'boolean' }, draft: { type: 'boolean' }, checks: { type: 'object' }, url: { type: 'string' }, reviews: z.toJSONSchema(prReviewEvidence),
     }, required: ['repository', 'pullRequestNumber', 'headSha', 'baseSha', 'state', 'merged', 'draft', 'checks', 'url'], additionalProperties: false },
-  }] };
+
+    },
+    { name: CHECKPOINT_EVENT, description: 'Explicit agent work-result checkpoint for this exact authorized Preview PR resource. The subscription selects the recipient; publication cannot select a chat or destination.',
+      delivery: ['webhook'], inputSchema: z.toJSONSchema(prEventArguments),
+      payloadSchema: { type: 'object', properties: { origin: { type: 'string' }, eventClass: { type: 'string' }, project: { type: 'string' }, resource: z.toJSONSchema(prEventArguments), source: { type: 'object' }, checkpointId: { type: 'string' }, publishedAt: { type: 'string' }, summary: { type: 'string' }, evidence: { type: 'array' }, pending: { type: 'array' } },
+      required: ['origin','eventClass','project','resource','source','checkpointId','publishedAt','summary','evidence','pending'], additionalProperties: false },
+    }
+  ] };
 }
 export type PrEventService = PrEvents | 'discovery-only';
 export interface PrEventSource {
@@ -57,13 +88,13 @@ export interface PrEventSource {
   read(owner: EventOwner, target: PrEventArguments, generation: string): Promise<PrEventSnapshot>;
 }
 interface Subscription {
-  id: string; owner: EventOwner; generation: string; url: string; secret: string; expiresAt: number;
+  id: string; owner: EventOwner; generation: string; url: string; secret: string; expiresAt: number; eventName?: string;
   previousSecret?: string; rotationUntil?: number; verifiedUntil: number;
   binding?: { id: string; approvalId: string; phase: 'pending' | 'challenging' | 'active'; fingerprint: string; target: PrEventArguments; integrationBranch?: PrEventIntegrationBranch; attemptId?: string };
 }
 interface Delivery {
-  id: string; source: string; fingerprint: string; body: string; createdAt: number;
-  attempts: number; leaseUntil?: number; status: 'pending' | 'accepted' | 'failed' | 'stopped';
+  id: string; source: string; fingerprint: string; body: string; createdAt: number; resourceFingerprint?: string;
+  attempts: number; leaseUntil?: number; status: 'pending' | 'accepted' | 'failed' | 'stopped' | 'uncertain' | 'superseded' | 'blocked';
 }
 export interface PrEventState {
   subscription?: Subscription; baseline?: string;
@@ -164,7 +195,7 @@ export class PrEvents {
     if (!mode) return !sub.binding;
     return !!sub.binding && sub.binding.fingerprint === mode.clientFingerprint &&
       clientFingerprint(sub.owner.clientId) === mode.clientFingerprint && eventOwnerAuthorized(sub.owner, this.options.owner, mode.clientFingerprint) &&
-      (sub.binding.integrationBranch ?? 'preview') === (this.options.integrationBranch ?? 'preview') && hash(sub.binding.target) === hash(this.options.target) && sub.id === this.identity(sub.owner, sub.url);
+      (sub.binding.integrationBranch ?? 'preview') === (this.options.integrationBranch ?? 'preview') && hash(sub.binding.target) === hash(this.options.target) && sub.id === this.identity(sub.owner, sub.url, sub.eventName ?? PR_EVENT);
   }
   private activationMatches(sub: Subscription) {
     const approval = this.options.delegatedRecipient?.approval;
@@ -215,7 +246,7 @@ export class PrEvents {
     return prEventCatalog();
   }
 
-  private identity(owner: EventOwner, url: string) { return `sub_${hash([owner.issuer, owner.subject, owner.clientId, url, PR_EVENT, this.options.target])}`; }
+  private identity(owner: EventOwner, url: string, eventName: string = PR_EVENT) { return 'sub_' + hash([owner.issuer, owner.subject, owner.clientId, url, eventName, this.options.target]); }
   private evidence(pull: PrEventSnapshot) {
     const target = this.options.target;
     if (pull.repository !== target.repository || pull.pullRequestNumber !== target.pullRequestNumber || pull.head.sha !== target.headSha || pull.base.sha !== target.baseSha || pull.base.ref !== (this.options.integrationBranch ?? 'preview')) throw new Error('Exact Preview wait no longer matches');
@@ -224,12 +255,12 @@ export class PrEvents {
       checks: { total: pull.checks.total, pending: pull.checks.pending, successful: pull.checks.successful, failed: pull.checks.failed, neutral: pull.checks.neutral, skipped: pull.checks.skipped },
       url: `https://github.com/${target.repository}/pull/${target.pullRequestNumber}` };
   }
-  async subscribe(auth: AuthInfo | undefined, args: PrEventArguments, delivery: { url: string; secret: string }, ttlMs?: number | null) {
+  async subscribe(auth: AuthInfo | undefined, args: PrEventArguments, delivery: { url: string; secret: string }, ttlMs?: number | null, eventName: string = PR_EVENT) {
     const owner = await this.authorize(auth, args);
     const generation = auth!.extra!.grantGeneration as string;
     const url = this.recipientUrl(delivery.url); signingKey(delivery.secret);
-    if (this.options.delegatedRecipient) return this.subscribeDelegated(auth!, args, owner, generation, url, delivery.secret, ttlMs);
-    const id = this.identity(owner, url);
+    if (this.options.delegatedRecipient) return this.subscribeDelegated(auth!, args, owner, generation, url, delivery.secret, ttlMs, eventName);
+    const id = this.identity(owner, url, eventName);
     const initial = this.evidence(await this.read(owner, generation, args));
     const loaded = await this.options.store.load();
     const old = loaded.state.subscription;
@@ -243,7 +274,7 @@ export class PrEvents {
     const grant = await this.grant(owner, generation);
     const expiresAt = Math.min(grant.expiresAt, this.now() + Math.min(ttlMs ?? 3600000, 3600000), auth?.expiresAt === undefined ? Infinity : auth.expiresAt * 1000);
     if (expiresAt <= this.now()) throw new Error('Event authorization expired');
-    const subscription: Subscription = { id, owner, generation, url, secret: this.options.vault.seal(delivery.secret), expiresAt, verifiedUntil: this.now() + 300000 };
+    const subscription: Subscription = { id, owner, generation, url, secret: this.options.vault.seal(delivery.secret), expiresAt, verifiedUntil: this.now() + 300000, eventName };
     if (oldSecret && oldSecret !== delivery.secret) { subscription.previousSecret = old!.secret; subscription.rotationUntil = this.now() + 60000; }
     else if (same && old?.previousSecret && (old.rotationUntil ?? 0) > this.now()) { subscription.previousSecret = old.previousSecret; subscription.rotationUntil = old.rotationUntil; }
     const state: PrEventState = { subscription, baseline: same && old.expiresAt > this.now() ? loaded.state.baseline : hash(initial), deliveries: loaded.state.deliveries.filter(d => d.createdAt > this.now() - 86400000), sources: loaded.state.sources?.filter(s => s.observedAt > this.now() - 86400000) };
@@ -253,13 +284,13 @@ export class PrEvents {
     await this.checkSubscription(subscription).catch(async error => { await this.stop(subscription); throw error; });
     return { id, refreshBefore: new Date(expiresAt).toISOString(), cursor: null, truncated: false };
   }
-  private async subscribeDelegated(auth: AuthInfo, args: PrEventArguments, owner: EventOwner, generation: string, url: string, secret: string, ttlMs?: number | null) {
+  private async subscribeDelegated(auth: AuthInfo, args: PrEventArguments, owner: EventOwner, generation: string, url: string, secret: string, ttlMs?: number | null, eventName: string = PR_EVENT) {
     const mode = this.options.delegatedRecipient!;
     const approval = mode.approval;
     if (!approval || approval.expiresAt <= this.now() || approval.expiresAt > this.now() + 3600000) throw new ProtocolError(-32000, 'Recipient delegation is not approved', { reason: 'delegation_not_approved' });
     let loaded = await this.options.store.load();
     let old = loaded.state.subscription;
-    const id = this.identity(owner, url);
+    const id = this.identity(owner, url, eventName);
     const grant = await this.grant(owner, generation);
     const expiresAt = Math.min(grant.expiresAt, this.now() + Math.min(ttlMs ?? 3600000, 3600000), auth.expiresAt === undefined ? Infinity : auth.expiresAt * 1000);
     if (expiresAt <= this.now()) throw new Error('Event authorization expired');
@@ -274,7 +305,7 @@ export class PrEvents {
       if ((loaded.state.usedBindingAttempts ?? []).includes(approval.id) || (loaded.state.usedBindingAttempts?.length ?? 0) >= 16) throw new Error('Delegation approval already consumed or capacity reached');
       // Pending persistence consumes this approval; no provider read or callback yet.
       await this.options.validateRecipient!(url);
-      const pending: Subscription = { id, owner, generation, url, secret: this.options.vault.seal(secret), expiresAt: Math.min(expiresAt, approval.expiresAt), verifiedUntil: 0,
+      const pending: Subscription = { id, owner, generation, url, secret: this.options.vault.seal(secret), eventName, expiresAt: Math.min(expiresAt, approval.expiresAt), verifiedUntil: 0,
         binding: { id: randomUUID(), approvalId: approval.id, attemptId: randomUUID(), phase: 'pending', fingerprint: mode.clientFingerprint, target: args, integrationBranch: this.options.integrationBranch ?? 'preview' } };
       await this.grant(owner, generation);
       if (!await this.options.store.save(loaded.version, { subscription: pending, deliveries: [], usedBindingAttempts: [...(loaded.state.usedBindingAttempts ?? []), approval.id] })) throw new Error('Pending binding changed');
@@ -306,9 +337,9 @@ export class PrEvents {
     await this.checkSubscription(old).catch(async error => { await this.stop(old); throw error; });
     return { id, refreshBefore: new Date(old.expiresAt).toISOString(), cursor: null, truncated: false };
   }
-  async unsubscribe(auth: AuthInfo | undefined, args: PrEventArguments, url: string) {
+  async unsubscribe(auth: AuthInfo | undefined, args: PrEventArguments, url: string, eventName: string = PR_EVENT) {
     const owner = await this.authorize(auth, args);
-    const id = this.identity(owner, this.recipientUrl(url));
+    const id = this.identity(owner, this.recipientUrl(url), eventName);
     for (let attempt = 0; attempt < 3; attempt++) {
       const loaded = await this.options.store.load();
       if (loaded.state.subscription?.id !== id) return {};
@@ -323,6 +354,60 @@ export class PrEvents {
     }
     throw new Error('Subscription changed; retry unsubscribe');
   }
+
+  private async setCheckpointTerminal(eventId: string, subscriptionId: string, status: 'uncertain' | 'superseded' | 'blocked' | 'stopped'): Promise<boolean> {
+    for (let i=0;i<3;i++) { const l=await this.options.store.load(); const d=l.state.deliveries.find(x=>x.id===eventId);
+      if(!d)return false; if(d.status!=='pending'&&d.status!=='failed')return d.status===status;
+      if(l.state.subscription?.id!==subscriptionId)return false; d.status=status; d.leaseUntil=0;
+      if(await this.options.store.save(l.version,l.state))return true;
+    } return false;
+  }
+  async publishCheckpoint(auth: AuthInfo | undefined, input: CheckpointPublicationArguments) {
+    const v=checkpointPublicationArguments.parse(input), owner=await this.authorize(auth,v.resource), generation=auth!.extra!.grantGeneration as string;
+    const loaded=await this.options.store.load(), sub=loaded.state.subscription;
+    if(!sub||(sub.eventName??PR_EVENT)!==CHECKPOINT_EVENT||!eventOwnerEqual(sub.owner,owner)||sub.generation!==generation||sub.id!==this.identity(owner,sub.url,CHECKPOINT_EVENT))
+      throw new ProtocolError(-32000,'No exact checkpoint subscription is active',{reason:'checkpoint_subscription_missing'});
+    await this.checkSubscription(sub);
+    const fingerprint=hash(v),source='checkpoint:'+sub.id+':'+v.checkpointId,existing=loaded.state.deliveries.find(d=>d.source===source);
+    if(existing){
+      if(existing.fingerprint!==fingerprint)throw new ProtocolError(-32000,'Checkpoint identity reused with different content',{reason:'checkpoint_identity_conflict'});
+      if(existing.status==='accepted')return {checkpointId:v.checkpointId,status:'duplicate' as const};
+      if(['uncertain','superseded','blocked','stopped'].includes(existing.status))return {checkpointId:v.checkpointId,status:existing.status};
+      if(existing.attempts>0){if((existing.leaseUntil??0)>this.now())return {checkpointId:v.checkpointId,status:'pending' as const};await this.setCheckpointTerminal(existing.id,sub.id,'uncertain');return {checkpointId:v.checkpointId,status:'uncertain' as const};}
+      return {checkpointId:v.checkpointId,status:await this.deliverCheckpoint(sub,existing.id)};
+    }
+    const current=this.evidence(await this.read(owner,generation,v.resource));await this.checkSubscription(sub);
+    const state=loaded.state;state.deliveries=state.deliveries.filter(d=>d.createdAt>this.now()-86400000);
+    if(state.deliveries.length>=128)throw new ProtocolError(-32000,'Checkpoint delivery capacity reached',{reason:'delivery_capacity'});
+    const id='evt_'+hash([sub.id,source,fingerprint]),data={origin:'conductor-project-agent',eventClass:'agent.work_result',project:v.resource.repository,resource:v.resource,source:v.source,checkpointId:v.checkpointId,publishedAt:new Date(this.now()).toISOString(),summary:v.summary,evidence:v.evidence,pending:v.pending};
+    state.deliveries.push({id,source,fingerprint,resourceFingerprint:hash(current),createdAt:this.now(),attempts:0,status:'pending',body:JSON.stringify({eventId:id,name:CHECKPOINT_EVENT,timestamp:new Date(this.now()).toISOString(),data,cursor:null})});
+    if(!await this.save(loaded.version,state))return {checkpointId:v.checkpointId,status:'pending' as const};
+    return {checkpointId:v.checkpointId,status:await this.deliverCheckpoint(sub,id)};
+  }
+  private async deliverCheckpoint(sub: Subscription,eventId: string): Promise<string> {
+    const loaded=await this.options.store.load(),active=loaded.state.subscription,record=loaded.state.deliveries.find(d=>d.id===eventId);
+    if(!active||active.id!==sub.id||active.generation!==sub.generation||(active.eventName??PR_EVENT)!==CHECKPOINT_EVENT||!record)return 'inactive';
+    if(['accepted','stopped','uncertain','superseded','blocked'].includes(record.status)||record.attempts>0)return record.status;
+    try{await this.checkSubscription(active);if(hash(this.evidence(await this.read(active.owner,active.generation)))!==record.resourceFingerprint){await this.setCheckpointTerminal(eventId,active.id,'superseded');return 'superseded';}}
+    catch{await this.setCheckpointTerminal(eventId,active.id,'blocked');return 'blocked';}
+    record.attempts=1;record.leaseUntil=this.now()+30000;
+    if(!await this.options.store.save(loaded.version,loaded.state))return 'pending';
+    const claimed=await this.options.store.load();if(claimed.version!==JSON.stringify(loaded.state))return 'pending';
+    const cr=claimed.state.deliveries.find(d=>d.id===eventId),cs=claimed.state.subscription;
+    if(!cr||!cs||cs.id!==active.id||cs.generation!==active.generation||cs.expiresAt<=this.now())return 'pending';
+    try{await this.checkSubscription(cs);const finalEvidence=this.evidence(await this.read(cs.owner,cs.generation));await this.checkSubscription(cs);if(hash(finalEvidence)!==cr.resourceFingerprint){await this.setCheckpointTerminal(eventId,active.id,'superseded');return 'superseded';}}
+    catch{await this.setCheckpointTerminal(eventId,active.id,'blocked');return 'blocked';}
+    let status:number|undefined;
+    try{status=(await signedCallback(this.options.post,{id:cs.id,url:cs.url,secret:this.options.vault.open(cs.secret).plaintext,...(cs.previousSecret&&(cs.rotationUntil??0)>this.now()?{previousSecret:this.options.vault.open(cs.previousSecret).plaintext}:{})},cr.id,cr.body)).status;}
+    catch{/* Ambiguous callback outcome is never replayed automatically. */}
+    const terminal=status!==undefined&&status>=200&&status<300?'accepted':status===410?'stopped':'uncertain';
+    for(let i=0;i<3;i++){const after=await this.options.store.load(),d=after.state.deliveries.find(x=>x.id===eventId);
+      if(!d||after.state.subscription?.id!==active.id)return 'uncertain';if(d.status!=='pending')return d.status;
+      d.status=terminal;d.leaseUntil=0;if(status===410)delete after.state.subscription;
+      if(await this.options.store.save(after.version,after.state))return terminal;
+    }return 'uncertain';
+  }
+
   async ingest(body: Buffer, event: string, deliveryId: string, signature: string): Promise<string> {
     return ingestGitHubPrEvent({ ...this.options, reconcile: source => this.reconcile(source) }, body, event, deliveryId, signature);
   }
@@ -330,7 +415,7 @@ export class PrEvents {
   async reconcile(source: string): Promise<string> {
     let loaded = await this.options.store.load();
     const sub = loaded.state.subscription;
-    if (!sub || (sub.binding && sub.binding.phase !== 'active')) return 'inactive';
+    if (!sub || (sub.eventName ?? PR_EVENT) !== PR_EVENT || (sub.binding && sub.binding.phase !== 'active')) return 'inactive';
     if (sub.expiresAt <= this.now()) { await this.stop(sub); return 'inactive'; }
     try { await this.checkSubscription(sub); } catch { await this.stop(sub); return 'blocked'; }
     const existing = loaded.state.deliveries.find(d => d.source === source);
