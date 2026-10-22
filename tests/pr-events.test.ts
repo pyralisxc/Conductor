@@ -504,6 +504,7 @@ test('expired binding release refuses a still-valid binding and stale observed s
     expectedSubscriptionExpiresAt: sub.expiresAt, expectedDelegationExpiresAt: f.mode.approval!.expiresAt,
     expectedBindingGuard: status.bindingGuard!, approvalReference: 'owner-approved:expired-binding-review-20261022', confirm: true as const };
   await assert.rejects(f.bridge.releaseExpiredBinding(auth, args), /conductor.write/);
+  await assert.rejects(f.bridge.releaseExpiredBinding({ ...auth, clientId: 'foreign-client', scopes: ['conductor.read','conductor.write'] }, args), /not authorized|Event resource is not authorized/);
   const currentGrant = await f.options.grants.consent(owner, ['conductor.read','conductor.write'], f.options.now()+3600000);
   const freshAuth = { ...auth, scopes: ['conductor.read','conductor.write'], extra: { ...auth.extra, grantGeneration: currentGrant.generation } };
   await assert.rejects(f.bridge.releaseExpiredBinding(freshAuth, args), /still valid/);

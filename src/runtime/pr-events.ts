@@ -391,7 +391,6 @@ export class PrEvents {
         hash(sub) !== args.expectedBindingGuard) {
       throw new Error('Observed binding changed; reread status before release');
     }
-    const approvalValid = mode.approval.expiresAt > this.now() && mode.approval.expiresAt <= this.now() + 3600000;
     const approvalExpired = mode.approval.expiresAt <= this.now();
     if (!(sub.expiresAt <= this.now() || approvalExpired)) throw new Error('Binding is still valid; release refused');
     const next = structuredClone(loaded.state);
