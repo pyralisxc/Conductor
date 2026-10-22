@@ -498,7 +498,7 @@ test('expired delegated binding release requires exact stale state and preserves
 test('expired binding release refuses a still-valid binding and stale observed state', async () => {
   const f = delegatedFixture(); await f.activate();
   const current = await f.store.load(); const sub = current.state.subscription!;
-  const args = { resource: target, eventName: PR_EVENT, expectedPhase: 'active' as const,
+  const args = { resource: target, eventName: PR_EVENT as typeof PR_EVENT, expectedPhase: 'active' as const,
     expectedSubscriptionExpiresAt: sub.expiresAt, expectedDelegationExpiresAt: f.mode.approval!.expiresAt, confirm: true as const };
   await assert.rejects(f.bridge.releaseExpiredBinding(auth, args), /still valid/);
   const raced = await f.store.load(); raced.state.baseline = 'raced-state';
