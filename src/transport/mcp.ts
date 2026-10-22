@@ -294,8 +294,9 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         description: 'Explicit owner action. Requires confirm=true and the exact resource, event, phase and expiry observed by events.binding.status. Releases only when the stored binding is expired, its grant generation is obsolete, or its delegation approval is expired. Requires the current authenticated owner/client and a valid current grant. CAS rejects stale state. Preserves delivery and consumed-approval history; never releases a still-valid binding.',
         inputSchema: prEventExpiredBindingReleaseArguments,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-        _meta: { securitySchemes: oauthSecurity },
+        _meta: { securitySchemes: oauthWriteSecurity },
       }, async (input, extra) => {
+        requireWriteScope(extra.http?.authInfo?.scopes);
         const result = await events.releaseExpiredBinding(extra.http?.authInfo, input);
         return { structuredContent: result, content: [{ type: 'text', text: JSON.stringify(result) }] };
       });
