@@ -20,6 +20,13 @@ class SnapshotStore implements PrEventStore {
   raw: string | null = null;
   async load() { return { version: this.raw, state: this.raw ? JSON.parse(this.raw) as PrEventState : { deliveries: [] } }; }
   async save(version: string | null, state: PrEventState) { if (this.raw !== version) return false; this.raw = JSON.stringify(state); return true; }
+  async releaseExpiredBinding(version: string | null, state: PrEventState, _owner: typeof owner, currentGeneration: string, expectedSubscriptionId: string, now: number, approvalExpiresAt: number) {
+    if (this.raw !== version || !this.raw) return false;
+    const current = JSON.parse(this.raw) as PrEventState; const sub = current.subscription;
+    if (!sub || sub.id !== expectedSubscriptionId || !sub.binding || !['pending','challenging','active'].includes(sub.binding.phase)) return false;
+    if (sub.generation === currentGeneration && sub.expiresAt > now && approvalExpiresAt > now) return false;
+    this.raw = JSON.stringify(state); return true;
+  }
 }
 const target = { repository: 'owner/repo', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) };
 const owner = { issuer: 'https://issuer.example', subject: 'service-principal', clientId: 'oauth-client' };
@@ -451,12 +458,64 @@ test('delegated binding status rejects foreign principal/client and reports unav
   await assert.rejects(f.bridge.bindingStatus({ ...auth, clientId: 'foreign-client' }), /not authorized/);
   await assert.rejects(f.bridge.bindingStatus({ ...auth, extra: { ...auth.extra, subject: 'foreign-subject' } }), /not authorized/);
   const raw = f.store.raw;
-  const unavailable = new PrEvents({ ...f.options, store: { async load() { throw new Error('private redis failure'); }, async save() { throw new Error('must not save'); } } });
+  const unavailable = new PrEvents({ ...f.options, store: { async load() { throw new Error('private redis failure'); }, async save() { throw new Error('must not save'); }, async releaseExpiredBinding() { throw new Error('must not release'); } } });
   const result = await unavailable.bindingStatus(auth);
   assert.equal(result.status, 'unavailable');
   assert.equal(result.configuredResource.repository, target.repository);
   assert.doesNotMatch(JSON.stringify(result), /private redis failure|receiver\.example|whsec_|grantGeneration|oauth-client/);
   assert.equal(f.store.raw, raw);
+});
+
+
+test('expired delegated binding release requires exact stale state and preserves delivery/attempt history', async () => {
+  const f = delegatedFixture(); await f.activate();
+  const old = (await f.store.load()).state.subscription!;
+  const before = await f.store.load();
+  before.state.deliveries.push({ id: 'delivery-history-1', source: 'source-history-1', fingerprint: 'a'.repeat(64),
+    body: '{"retained":true}', createdAt: f.options.now(), attempts: 1, status: 'uncertain' });
+  const originalSourceObservedAt = f.options.now();
+  before.state.sources = [{ id: 'source-history-1', observedAt: originalSourceObservedAt }];
+  before.state.usedBindingAttempts = ['consumed-attempt-1'];
+  assert.equal(await f.store.save(before.version, before.state), true);
+  f.advance(300001);
+  await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+  const current = await f.options.grants.consent(owner, ['conductor.read','conductor.write'], f.options.now() + 3600000);
+  const freshAuth = { ...auth, scopes: ['conductor.read','conductor.write'], extra: { ...auth.extra, grantGeneration: current.generation } };
+  const status = await f.bridge.bindingStatus(freshAuth);
+  assert.equal(status.status, 'expired');
+  assert.equal(status.subscriptionGrantMatches, false);
+  assert.equal(status.approvalValid, false);
+  const args = { resource: target, eventName: PR_EVENT as typeof PR_EVENT, expectedPhase: 'active' as const,
+    expectedSubscriptionExpiresAt: old.expiresAt, expectedDelegationExpiresAt: f.mode.approval!.expiresAt, confirm: true as const };
+  const released = await f.bridge.releaseExpiredBinding(freshAuth, { ...args, expectedBindingGuard: status.bindingGuard!, approvalReference: 'owner-approved:expired-binding-review-20261022' });
+  assert.equal(released.released, true);
+  const after = await f.store.load();
+  assert.equal(after.state.subscription, undefined); assert.equal(after.state.baseline, undefined);
+  assert.deepEqual(after.state.deliveries.map(x => x.id), ['delivery-history-1']);
+  assert.deepEqual(after.state.sources, [{ id: 'source-history-1', observedAt: originalSourceObservedAt }]);
+  assert.deepEqual(after.state.usedBindingAttempts, ['consumed-attempt-1']);
+});
+
+test('expired binding release refuses a still-valid binding and stale observed state', async () => {
+  const f = delegatedFixture(); await f.activate();
+  const current = await f.store.load(); const sub = current.state.subscription!;
+  const status = await f.bridge.bindingStatus(auth);
+  const args = { resource: target, eventName: PR_EVENT as typeof PR_EVENT, expectedPhase: 'active' as const,
+    expectedSubscriptionExpiresAt: sub.expiresAt, expectedDelegationExpiresAt: f.mode.approval!.expiresAt,
+    expectedBindingGuard: status.bindingGuard!, approvalReference: 'owner-approved:expired-binding-review-20261022', confirm: true as const };
+  await assert.rejects(f.bridge.releaseExpiredBinding(auth, args), /conductor.write/);
+  await assert.rejects(f.bridge.releaseExpiredBinding({ ...auth, clientId: 'foreign-client', scopes: ['conductor.read','conductor.write'] }, args), /not authorized|Event resource is not authorized/);
+  const currentGrant = await f.options.grants.consent(owner, ['conductor.read','conductor.write'], f.options.now()+3600000);
+  const freshAuth = { ...auth, scopes: ['conductor.read','conductor.write'], extra: { ...auth.extra, grantGeneration: currentGrant.generation } };
+  await assert.rejects(f.bridge.releaseExpiredBinding(freshAuth, args), /still valid/);
+  f.advance(300001);
+  const raced = await f.store.load();
+  const replacement = structuredClone(raced.state.subscription!);
+  replacement.id = randomUUID();
+  raced.state.subscription = replacement;
+  assert.equal(await f.store.save(raced.version, raced.state), true);
+  await assert.rejects(f.bridge.releaseExpiredBinding(freshAuth, args), /Observed binding changed/);
+  assert.equal((await f.store.load()).state.subscription?.id, replacement.id);
 });
 
 test('delegated approved client binds and challenges in one request; absent approval does nothing', async () => {
@@ -599,6 +658,15 @@ test('delegated mode over real HTTP authenticates signed identity, rejects body 
       const result = await statusClient.callTool({ name: 'events.binding.status', arguments: {} });
       assert.match(JSON.stringify(result), /"status":"active"/);
       assert.doesNotMatch(JSON.stringify(result), /receiver\.example|whsec_|grant_generation|oauth-client|service-principal/);
+      assert.ok(tools.tools.some(tool => tool.name === 'events.binding.release_expired'));
+      const release = await statusClient.callTool({ name: 'events.binding.release_expired', arguments: {
+        resource: target, eventName: PR_EVENT, expectedPhase: 'active',
+        expectedSubscriptionExpiresAt: f.options.now() + 300000,
+        expectedDelegationExpiresAt: f.mode.approval!.expiresAt, expectedBindingGuard: (await f.bridge.bindingStatus(auth)).bindingGuard!,
+        approvalReference: 'owner-approved:test-reference', confirm: true,
+      } });
+      assert.match(JSON.stringify(release), /conductor\.write|scope|permission/i);
+      assert.equal((await f.store.load()).state.subscription?.binding?.phase, 'active');
     } finally { await statusClient.close(); }
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });

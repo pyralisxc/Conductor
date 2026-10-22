@@ -231,6 +231,13 @@ The configured event service has one subscription slot; switching between PR ver
 
 
 
+
+## Explicit expired delegated binding release
+
+The destructive MCP operation `events.binding.release_expired` is separate from `events.binding.status`; a status read never releases anything. It requires `oauthWriteSecurity`, `requireWriteScope`, a current durable grant containing both `conductor.read` and `conductor.write`, a trimmed non-empty `owner-approved:` reference, `confirm: true`, the opaque binding guard returned by the caller's status read, and the exact observed resource, event, phase, subscription expiry and delegation expiry. It refuses if any observed field drifted or if the stored binding is still valid under the current grant, subscription lease and approval. Redis performs the release as one Lua CAS that verifies the live current grant, exact state version and exact stored subscription ID, and independently refuses a binding whose subscription lease and delegation approval are both still valid. A grant-generation mismatch alone is not sufficient to release an unexpired binding.
+
+Release removes only the subscription and its subscription-specific baseline. It preserves delivery/source history and `usedBindingAttempts`; the consumed approval marker is a separate no-TTL Redis key and is not deleted. No recipient URL, secret, raw grant ID or other tenant's resource is returned. The operation is an explicit destructive owner action, not a status side effect. Its response means the exact slot record was released; it does not disable/delete the separate native host automation, revoke OAuth, or authorize a new subscription. After release, reread status before any separately approved config/subscribe action.
+
 ## Authenticated delegated binding status
 
 The read-only MCP tool `events.binding.status` inspects the stable delegated installation slot for the authenticated owner/client and current configured resource. It reports one of `empty`, `pending`, `challenging`, `active`, `expired`, `invalid_authority`, or `unavailable`, with configured resource, event/phase/expiry only when the stored binding matches that owner/client/resource, plus boolean authority facts. If a stable slot contains a different principal/client/resource, the result reports invalid authority and hides the stored event, resource and expiry. The tool never returns callback URL, signing secret, raw grant identifier, or raw generation. It does not write, unsubscribe, repair or clean up state. A returned status is an observation, not a reservation or activation guarantee; re-read immediately before any separately approved action.

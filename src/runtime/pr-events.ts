@@ -51,6 +51,7 @@ export const prEventBindingStatusSchema = z.object({
   phase: z.enum(['pending', 'challenging', 'active']).nullable(),
   subscriptionExpiresAt: z.number().int().nullable(),
   delegationExpiresAt: z.number().int().nullable(),
+  bindingGuard: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   ownerMatchesConfigured: z.boolean(),
   clientMatchesConfigured: z.boolean(),
   resourceMatchesConfigured: z.boolean(),
@@ -62,6 +63,17 @@ export const prEventBindingStatusSchema = z.object({
   observedAt: z.iso.datetime(),
 }).strict();
 export type PrEventBindingStatus = z.infer<typeof prEventBindingStatusSchema>;
+export const prEventExpiredBindingReleaseArguments = z.object({
+  resource: prEventArguments, eventName: z.enum([PR_EVENT, CHECKPOINT_EVENT]),
+  expectedPhase: z.enum(['pending', 'challenging', 'active']),
+  expectedSubscriptionExpiresAt: z.number().int().positive(),
+  expectedDelegationExpiresAt: z.number().int().positive(),
+  expectedBindingGuard: z.string().regex(/^[a-f0-9]{64}$/),
+  approvalReference: z.string().trim().min(16).max(500).refine(v => v.startsWith('owner-approved:') && v.slice('owner-approved:'.length).trim().length > 0, 'Owner approval reference required'),
+  confirm: z.literal(true),
+}).strict();
+export type PrEventExpiredBindingReleaseArguments = z.infer<typeof prEventExpiredBindingReleaseArguments>;
+
 
 export interface EventOwner { issuer: string; subject: string; clientId: string }
 // Allowlisted metadata only; unknown provider fields (including bodies) are stripped.
@@ -125,6 +137,8 @@ export interface PrEventState {
 export interface PrEventStore {
   load(): Promise<{ version: string | null; state: PrEventState }>;
   save(version: string | null, state: PrEventState): Promise<boolean>;
+  releaseExpiredBinding(version: string | null, state: PrEventState, owner: EventOwner, currentGeneration: string,
+    expectedSubscriptionId: string, now: number, approvalExpiresAt: number): Promise<boolean>;
 }
 /** One bounded exact-wait record. CAS fences concurrent processes; no process-local subscription fallback. */
 export class RedisPrEventStore implements PrEventStore {
@@ -133,6 +147,29 @@ export class RedisPrEventStore implements PrEventStore {
     const raw = await this.redis.get<string>(this.key);
     const version = raw === null ? null : typeof raw === 'string' ? raw : JSON.stringify(raw);
     return { version, state: version ? JSON.parse(version) as PrEventState : { deliveries: [] } };
+  }
+
+  async releaseExpiredBinding(version: string | null, state: PrEventState, owner: EventOwner, currentGeneration: string,
+    expectedSubscriptionId: string, now: number, approvalExpiresAt: number) {
+    const serialized = JSON.stringify(state);
+    if (Buffer.byteLength(serialized) > 262144 || !grantGenerationSchema.safeParse(currentGeneration).success) return false;
+    const script = [
+      "local clock = redis.call('TIME')",
+      "local serverNow = math.max(tonumber(ARGV[3]), tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000))",
+      "local grantRaw = redis.call('GET', KEYS[2]); if not grantRaw then return 0 end",
+      "local okGrant, grant = pcall(cjson.decode, grantRaw)",
+      "if not okGrant or grant.status ~= 'active' or grant.generation ~= ARGV[4] or type(grant.expiresAt) ~= 'number' or grant.expiresAt <= serverNow then return 0 end",
+      "local hasRead = false; local hasWrite = false; if type(grant.scopes) == 'table' then for _, scope in ipairs(grant.scopes) do if scope == 'conductor.read' then hasRead = true elseif scope == 'conductor.write' then hasWrite = true end end end",
+      "if not hasRead or not hasWrite then return 0 end",
+      "local current = redis.call('GET', KEYS[1]); if (current or '') ~= ARGV[1] or not current then return 0 end",
+      "local okState, prior = pcall(cjson.decode, current); if not okState or type(prior.subscription) ~= 'table' then return 0 end",
+      "local sub = prior.subscription; if sub.id ~= ARGV[5] or type(sub.expiresAt) ~= 'number' then return 0 end",
+      "local phase = sub.binding and sub.binding.phase or ''; if phase ~= 'pending' and phase ~= 'challenging' and phase ~= 'active' then return 0 end",
+      "if sub.expiresAt > serverNow and tonumber(ARGV[6]) > serverNow then return 0 end",
+      "redis.call('SET', KEYS[1], ARGV[2], 'EX', 172800); return 1"
+    ].join('\n');
+    return Number(await this.redis.eval(script, [this.key, oauthGrantKey(owner)],
+      [version ?? '', serialized, now, currentGeneration, expectedSubscriptionId, approvalExpiresAt])) === 1;
   }
   async save(version: string | null, state: PrEventState) {
     const serialized = JSON.stringify(state);
@@ -278,6 +315,7 @@ export class PrEvents {
     const baseResult = {
       configuredResource: this.options.target,
       delegationExpiresAt: mode.approval?.expiresAt ?? null,
+      bindingGuard: null,
       ownerMatchesConfigured: true,
       clientMatchesConfigured: true,
       currentGrantValid,
@@ -319,7 +357,8 @@ export class PrEvents {
       storedEventName === PR_EVENT ? PR_EVENT : storedEventName === CHECKPOINT_EVENT ? CHECKPOINT_EVENT : null;
     const phase = sub.binding?.phase;
     const safePhase = phase === 'pending' || phase === 'challenging' || phase === 'active' ? phase : null;
-    const shared = { ...baseResult, eventName, phase: safePhase, subscriptionExpiresAt: sub.expiresAt,
+    const bindingGuard = hash(sub);
+    const shared = { ...baseResult, eventName, phase: safePhase, subscriptionExpiresAt: sub.expiresAt, bindingGuard,
       ownerMatchesConfigured, clientMatchesConfigured, resourceMatchesConfigured, bindingMatchesConfigured,
       subscriptionGrantMatches, approvalMatches, approvalValid };
     if (sub.expiresAt <= this.now()) return { ...shared, status: 'expired' };
@@ -327,6 +366,41 @@ export class PrEvents {
       return { ...shared, status: 'invalid_authority' };
     }
     return { ...shared, eventName: eventName!, phase: safePhase!, status: safePhase! };
+  }
+
+
+  async releaseExpiredBinding(auth: AuthInfo | undefined, input: PrEventExpiredBindingReleaseArguments) {
+    const args = prEventExpiredBindingReleaseArguments.parse(input);
+    const owner = await this.authorize(auth, args.resource);
+    const mode = this.options.delegatedRecipient;
+    if (!mode || !eventOwnerAuthorized(owner, this.options.owner, mode.clientFingerprint) ||
+        clientFingerprint(owner.clientId) !== mode.clientFingerprint) throw new Error('Expired binding release is not authorized');
+    const generation = auth?.extra?.grantGeneration;
+    if (typeof generation !== 'string') throw new Error('Current authority is required');
+    if (!auth?.scopes.includes('conductor.write')) throw new Error('conductor.write scope is required for binding release');
+    await requireOAuthGrant(this.options.grants, owner, generation, ['conductor.read', 'conductor.write'], this.now);
+    if (!mode.approval || mode.approval.expiresAt !== args.expectedDelegationExpiresAt) throw new Error('Delegation approval changed; reread binding status');
+    const loaded = await this.options.store.load();
+    const sub = loaded.state.subscription;
+    if (!sub || !sub.binding || !this.bindingMatches(sub) || !eventOwnerEqual(sub.owner, owner) ||
+        clientFingerprint(sub.owner.clientId) !== mode.clientFingerprint ||
+        hash(sub.binding.target) !== hash(args.resource) ||
+        (sub.binding.integrationBranch ?? 'preview') !== (this.options.integrationBranch ?? 'preview') ||
+        (sub.eventName ?? PR_EVENT) !== args.eventName || sub.binding.phase !== args.expectedPhase ||
+        sub.expiresAt !== args.expectedSubscriptionExpiresAt || sub.binding.approvalId !== mode.approval.id ||
+        hash(sub) !== args.expectedBindingGuard) {
+      throw new Error('Observed binding changed; reread status before release');
+    }
+    const approvalExpired = mode.approval.expiresAt <= this.now();
+    if (!(sub.expiresAt <= this.now() || approvalExpired)) throw new Error('Binding is still valid; release refused');
+    const next = structuredClone(loaded.state);
+    delete next.subscription;
+    delete next.baseline;
+    const released = await this.options.store.releaseExpiredBinding(loaded.version, next, owner, generation, sub.id, this.now(), mode.approval.expiresAt);
+    if (!released) throw new Error('Binding changed or current authority no longer permits release');
+    return { released: true, resource: args.resource, eventName: args.eventName, previousPhase: args.expectedPhase,
+      previousSubscriptionExpiresAt: args.expectedSubscriptionExpiresAt, approvalReference: args.approvalReference.trim(), observedAt: new Date(this.now()).toISOString(),
+      deliveryHistoryPreserved: true, approvalHistoryPreserved: true };
   }
 
   async list(auth?: AuthInfo) {

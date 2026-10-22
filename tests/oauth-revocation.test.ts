@@ -75,6 +75,12 @@ test('real OAuth consent and authenticated revoke enforce current grants through
         }
         raw = JSON.stringify(state); return true;
       },
+      async releaseExpiredBinding(version, state, _owner, currentGeneration, expectedSubscriptionId, now, approvalExpiresAt) {
+        if (version !== raw || !raw) return false;
+        const current = JSON.parse(raw) as PrEventState; const sub = current.subscription;
+        if (!sub || sub.id !== expectedSubscriptionId || (sub.generation === currentGeneration && sub.expiresAt > now && approvalExpiresAt > now)) return false;
+        raw = JSON.stringify(state); return true;
+      },
     };
     const pull = { ...target, head: { ref: 'work/test', sha: target.headSha }, base: { ref: 'preview', sha: target.baseSha }, state: 'open', merged: false, draft: false,
       checks: { total: 1, pending: 1, successful: 0, failed: 0, neutral: 0, skipped: 0, items: [] }, workflowRuns: [],
