@@ -12,6 +12,15 @@ import { callbackUrl, signingKey, signedCallback, verifyCallback, type CallbackP
 export const prEventIntegrationBranch = z.enum(['preview', 'vercel-preview']);
 export type PrEventIntegrationBranch = z.infer<typeof prEventIntegrationBranch>;
 export const PR_EVENT = 'pull_request.verification_changed';
+
+
+export const prEventArguments = z.object({
+  repository: z.string().max(200).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  pullRequestNumber: z.number().int().positive(),
+  headSha: z.string().regex(/^[a-f0-9]{40}$/),
+  baseSha: z.string().regex(/^[a-f0-9]{40}$/),
+}).strict();
+export type PrEventArguments = z.infer<typeof prEventArguments>;
 export const CHECKPOINT_EVENT = 'agent.checkpoint_published';
 export const checkpointPublicationArguments = z.object({
  resource: prEventArguments,
@@ -26,14 +35,6 @@ export const checkpointPublicationArguments = z.object({
  for(const e of v.evidence){const x=new URL(e.reference);const ok=e.kind==='github'||e.kind==='ci'?['github.com','api.github.com'].includes(x.hostname):e.kind==='deployment'?x.hostname==='vercel.com'||x.hostname.endsWith('.vercel.app'):x.hostname==='slack.com'||x.hostname.endsWith('.slack.com');if(x.protocol!=='https:'||!ok||x.username||x.password)ctx.addIssue({code:'custom',path:['evidence'],message:'Evidence URL host does not match kind'});}
 });
 export type CheckpointPublicationArguments = z.infer<typeof checkpointPublicationArguments>;
-
-export const prEventArguments = z.object({
-  repository: z.string().max(200).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
-  pullRequestNumber: z.number().int().positive(),
-  headSha: z.string().regex(/^[a-f0-9]{40}$/),
-  baseSha: z.string().regex(/^[a-f0-9]{40}$/),
-}).strict();
-export type PrEventArguments = z.infer<typeof prEventArguments>;
 export interface EventOwner { issuer: string; subject: string; clientId: string }
 // Allowlisted metadata only; unknown provider fields (including bodies) are stripped.
 const reviewActor = z.object({ id: z.number().int().positive(), login: z.string().max(100).regex(/^[A-Za-z0-9_\[\]-]+$/).nullable() }).nullable();
@@ -65,7 +66,7 @@ export function prEventCatalog() {
       state: { type: 'string' }, merged: { type: 'boolean' }, draft: { type: 'boolean' }, checks: { type: 'object' }, url: { type: 'string' }, reviews: z.toJSONSchema(prReviewEvidence),
     }, required: ['repository', 'pullRequestNumber', 'headSha', 'baseSha', 'state', 'merged', 'draft', 'checks', 'url'], additionalProperties: false },
 
-    ,{ name: CHECKPOINT_EVENT, description: 'Explicit agent work-result checkpoint for this exact authorized Preview PR resource. The subscription selects the recipient; publication cannot select a chat or destination.',
+    { name: CHECKPOINT_EVENT, description: 'Explicit agent work-result checkpoint for this exact authorized Preview PR resource. The subscription selects the recipient; publication cannot select a chat or destination.',
       delivery: ['webhook'], inputSchema: z.toJSONSchema(prEventArguments),
       payloadSchema: { type: 'object', properties: { origin: { type: 'string' }, eventClass: { type: 'string' }, project: { type: 'string' }, resource: z.toJSONSchema(prEventArguments), source: { type: 'object' }, checkpointId: { type: 'string' }, publishedAt: { type: 'string' }, summary: { type: 'string' }, evidence: { type: 'array' }, pending: { type: 'array' } },
       required: ['origin','eventClass','project','resource','source','checkpointId','publishedAt','summary','evidence','pending'], additionalProperties: false },
@@ -367,6 +368,8 @@ export class PrEvents {
     if(!await this.save(claimed.version,claimed.state))return {checkpointId:v.checkpointId,status:'pending'};
     const attempt=await this.options.store.load();
     if(attempt.version!==JSON.stringify(claimed.state)||attempt.state.subscription?.id!==sub.id)return {checkpointId:v.checkpointId,status:'pending'};
+    const finalRecord=attempt.state.deliveries.find(d=>d.id===id);
+    if(!finalRecord)return {checkpointId:v.checkpointId,status:'pending'};
     let status=503;
     try{
       await this.checkSubscription(sub);
@@ -374,10 +377,10 @@ export class PrEvents {
       status=(await signedCallback(this.options.post,{id:sub.id,url:sub.url,secret:this.options.vault.open(sub.secret).plaintext,...(sub.previousSecret&&(sub.rotationUntil??0)>this.now()?{previousSecret:this.options.vault.open(sub.previousSecret).plaintext}:{})},record.id,record.body)).status;
     }catch{/* callback data and secrets are never logged */}
     try{await this.checkSubscription(sub);}catch{await this.stop(sub);return {checkpointId:v.checkpointId,status:'blocked'};}
-    record.leaseUntil=0;record.status=status>=200&&status<300?'accepted':status===410||status===413||(status>=400&&status<500&&status!==429)?'stopped':'failed';
+    finalRecord.leaseUntil=0;finalRecord.status=status>=200&&status<300?'accepted':status===410||status===413||(status>=400&&status<500&&status!==429)?'stopped':'failed';
     if(status===410)delete attempt.state.subscription;
     if(!await this.save(attempt.version,attempt.state))return {checkpointId:v.checkpointId,status:'pending'};
-    return {checkpointId:v.checkpointId,status:record.status};
+    return {checkpointId:v.checkpointId,status:finalRecord.status};
   }
 
   async ingest(body: Buffer, event: string, deliveryId: string, signature: string): Promise<string> {
