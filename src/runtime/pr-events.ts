@@ -395,7 +395,7 @@ export class PrEvents {
     const claimed=await this.options.store.load();if(claimed.version!==JSON.stringify(loaded.state))return 'pending';
     const cr=claimed.state.deliveries.find(d=>d.id===eventId),cs=claimed.state.subscription;
     if(!cr||!cs||cs.id!==active.id||cs.generation!==active.generation||cs.expiresAt<=this.now())return 'pending';
-    try{await this.checkSubscription(cs);if(hash(this.evidence(await this.read(cs.owner,cs.generation)))!==cr.resourceFingerprint){await this.setCheckpointTerminal(eventId,active.id,'superseded');return 'superseded';}}
+    try{await this.checkSubscription(cs);const finalEvidence=this.evidence(await this.read(cs.owner,cs.generation));await this.checkSubscription(cs);if(hash(finalEvidence)!==cr.resourceFingerprint){await this.setCheckpointTerminal(eventId,active.id,'superseded');return 'superseded';}}
     catch{await this.setCheckpointTerminal(eventId,active.id,'blocked');return 'blocked';}
     let status:number|undefined;
     try{status=(await signedCallback(this.options.post,{id:cs.id,url:cs.url,secret:this.options.vault.open(cs.secret).plaintext,...(cs.previousSecret&&(cs.rotationUntil??0)>this.now()?{previousSecret:this.options.vault.open(cs.previousSecret).plaintext}:{})},cr.id,cr.body)).status;}

@@ -825,7 +825,7 @@ test('simultaneous duplicate checkpoint publications claim at most one callback'
   assert.ok(rows[0].attempts <= 1);
 });
 
-test('grant revoked during final checkpoint provider read prevents callback dispatch', async () => {
+test('grant revoked during initial checkpoint provider read prevents enqueue', async () => {
   const f = fixture();
   await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
   const originalRead = f.options.source.read;
@@ -848,4 +848,34 @@ test('grant revoked during final checkpoint provider read prevents callback disp
   await assert.rejects(f.bridge.publishCheckpoint(auth, payload), /revoked|grant|Grant|active/i);
   assert.equal(f.posts.length, before);
   assert.equal((await f.store.load()).state.deliveries.some(d => d.source.endsWith(':checkpoint-revoked-final-read-0001')), false);
+});
+
+test('grant revoked during final claimed checkpoint provider read marks blocked and suppresses callback', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const originalRead = f.options.source.read;
+  let revokedAfterClaim = false;
+  f.options.source.read = async (...args) => {
+    const snapshot = await originalRead(...args);
+    const loaded = await f.store.load();
+    const claimed = loaded.state.deliveries.find(d => d.source.endsWith(':checkpoint-revoked-final-claim-0001'));
+    if (claimed?.attempts === 1 && !revokedAfterClaim) {
+      revokedAfterClaim = true;
+      await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+    }
+    return snapshot;
+  };
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-final-revoke', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-revoked-final-claim-0001',
+    summary: 'Must be blocked after the final provider read.',
+    evidence: [], pending: [],
+  };
+  const callbacksBefore = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'blocked');
+  assert.equal(revokedAfterClaim, true);
+  assert.equal(f.posts.length, callbacksBefore);
+  const state = (await f.store.load()).state;
+  assert.equal(state.deliveries.find(d => d.source.endsWith(':checkpoint-revoked-final-claim-0001'))?.status, 'blocked');
 });
