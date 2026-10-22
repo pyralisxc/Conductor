@@ -78,7 +78,7 @@ test('real HTTP protocol 2026-07-28 discovers and invokes authenticated event me
     assert.equal(f.posts.length, 1);
     await client.request({ method: 'events/unsubscribe', params: { ...params, delivery: { mode: 'webhook', url: delivery.url } } }, result);
     assert.equal((await f.store.load()).state.subscription, undefined);
-    const tools = await client.listTools(); assert.ok(tools.tools.some(tool => tool.name === 'capabilities'));
+    const tools = await client.listTools(); assert.ok(tools.tools.some(tool => tool.name === 'capabilities')); assert.ok(tools.tools.some(tool => tool.name === 'checkpoint.publish'));
   } finally { await client.close(); await new Promise<void>(resolve => http.close(() => resolve())); }
 });
 

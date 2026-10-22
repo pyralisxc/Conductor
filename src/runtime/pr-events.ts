@@ -66,6 +66,7 @@ export function prEventCatalog() {
       state: { type: 'string' }, merged: { type: 'boolean' }, draft: { type: 'boolean' }, checks: { type: 'object' }, url: { type: 'string' }, reviews: z.toJSONSchema(prReviewEvidence),
     }, required: ['repository', 'pullRequestNumber', 'headSha', 'baseSha', 'state', 'merged', 'draft', 'checks', 'url'], additionalProperties: false },
 
+    },
     { name: CHECKPOINT_EVENT, description: 'Explicit agent work-result checkpoint for this exact authorized Preview PR resource. The subscription selects the recipient; publication cannot select a chat or destination.',
       delivery: ['webhook'], inputSchema: z.toJSONSchema(prEventArguments),
       payloadSchema: { type: 'object', properties: { origin: { type: 'string' }, eventClass: { type: 'string' }, project: { type: 'string' }, resource: z.toJSONSchema(prEventArguments), source: { type: 'object' }, checkpointId: { type: 'string' }, publishedAt: { type: 'string' }, summary: { type: 'string' }, evidence: { type: 'array' }, pending: { type: 'array' } },
