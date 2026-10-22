@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import * as z from 'zod/v4';
-import { PrEvents, PR_EVENT, type PrEventState, type PrEventStore } from '../src/runtime/pr-events.js';
+import { PrEvents, PR_EVENT, CHECKPOINT_EVENT, prEventCatalog, type PrEventState, type PrEventStore } from '../src/runtime/pr-events.js';
 import { VersionedProviderCredentialVault } from '../src/connections/universal/credential-vault.js';
 import { createConductorHttpHandler } from '../src/transport/http.js';
 import { ConductorToolRuntime } from '../src/runtime/runtime.js';
@@ -607,4 +607,50 @@ test('delegated stable slot cannot reinterpret branch; legacy absent means previ
   await assert.rejects(changed.subscribe(auth, target, delivery), /teardown/);
   assert.equal(await changed.reconcile('changed-branch'), 'blocked');
   assert.equal(f.posts.length, count); assert.equal(f.reads(), reads);
+});
+
+test('checkpoint publication uses the scoped callback, redacted envelope and stable dedupe identity', async () => {
+  const f = fixture();
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-123', conversationId: 'conversation-123', replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-20261022-0001',
+    summary: 'Exact-head Preview integration is verified.',
+    evidence: [{ kind: 'github' as const, reference: 'https://github.com/pyralisxc/Conductor/pull/316' }],
+    pending: ['Receiver wake remains unproven.'],
+  };
+  assert.deepEqual(prEventCatalog().events.map(event => event.name), [PR_EVENT, CHECKPOINT_EVENT]);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, payload), /No exact checkpoint subscription/);
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const result = await f.bridge.publishCheckpoint(auth, payload);
+  assert.equal(result.status, 'accepted');
+  assert.equal(f.posts.length, 2);
+  const message = JSON.parse(f.posts[1].body);
+  assert.equal(message.name, CHECKPOINT_EVENT);
+  assert.equal(message.data.origin, 'conductor-project-agent');
+  assert.equal(message.data.eventClass, 'agent.work_result');
+  assert.equal(message.data.project, target.repository);
+  assert.equal(message.data.source.conversationUrl, payload.source.conversationUrl);
+  assert.equal(message.data.checkpointId, payload.checkpointId);
+  for (const secret of [delivery.url, delivery.secret, auth.token, owner.clientId, auth.extra.grantGeneration]) assert.equal(f.posts[1].body.includes(secret), false);
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'duplicate');
+  assert.equal(f.posts.length, 2);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, { ...payload, summary: 'Changed content for same identity.' }), /identity reused with different content/);
+  await assert.rejects(f.bridge.publishCheckpoint({ ...auth, clientId: 'foreign-client' }, payload), /not authorized/);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, { ...payload, resource: { ...target, pullRequestNumber: 8 } }), /not authorized/);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, { ...payload, source: { ...payload.source, conversationUrl: 'https://evil.example/c/1' } }), /Canonical HTTPS ChatGPT/);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, { ...payload, summary: 'Bearer abcdefghijklmnop' }), /Sensitive material/);
+  assert.equal(f.posts.length, 2);
+});
+
+test('checkpoint subscriptions ignore provider hints and fail closed on revoked grants', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  assert.equal(await f.bridge.reconcile('provider-webhook-id'), 'inactive');
+  await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+  await assert.rejects(f.bridge.publishCheckpoint(auth, {
+    resource: target, source: { conversationUrl: 'https://chatgpt.com/local/conversation-123', conversationId: null, replyId: null, replyState: 'unavailable' },
+    checkpointId: 'checkpoint-revoked-0001', summary: 'Must not publish.', evidence: [], pending: [],
+  }));
+  assert.equal(f.posts.length, 1);
 });
