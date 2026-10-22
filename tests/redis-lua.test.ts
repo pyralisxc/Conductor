@@ -159,8 +159,8 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     const currentGrant = await grants.consent(owner, ['conductor.read', 'conductor.write'], expiry());
     const next = structuredClone(observed.state); delete next.subscription; delete next.baseline;
     let revokedAtCommit = false;
-    redis.before(async args => {
-      if (revokedAtCommit || String(args[0]).toLowerCase() !== 'eval') return;
+    redis.before(async _args => {
+      if (revokedAtCommit) return;
       revokedAtCommit = true;
       redis.before();
       await grants.revoke(owner, currentGrant.generation);
