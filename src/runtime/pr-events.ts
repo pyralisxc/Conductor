@@ -28,14 +28,14 @@ function containsCredentialLike(value: string): boolean {
   if (credentialLike.test(value)) return true;
   try { const u=new URL(value); return credentialLike.test(decodeURIComponent(u.pathname))||credentialLike.test(decodeURIComponent(u.hostname))||credentialLike.test(decodeURIComponent(u.search))||credentialLike.test(decodeURIComponent(u.hash)); } catch { return false; }
 }
-const safeCallerString=(max:number)=>z.string().max(max).refine(value=>!containsCredentialLike(value),'Sensitive material is not allowed');
+const safeCallerString=(max:number,url=false)=>{const value=z.string().max(max);return (url?value.url():value).refine(text=>!containsCredentialLike(text),'Sensitive material is not allowed');};
 
 export const checkpointPublicationArguments = z.object({
  resource: prEventArguments,
- source: z.object({conversationUrl:safeCallerString(500).url(),conversationId:safeCallerString(200).nullable(),replyId:safeCallerString(200).nullable(),replyState:z.enum(['known','unavailable','not-yet-confirmed'])}).strict(),
+ source: z.object({conversationUrl:safeCallerString(500,true),conversationId:safeCallerString(200).nullable(),replyId:safeCallerString(200).nullable(),replyState:z.enum(['known','unavailable','not-yet-confirmed'])}).strict(),
  checkpointId:safeCallerString(160).min(8).regex(/^[A-Za-z0-9._:-]+$/),
  summary:safeCallerString(1200).min(1),
- evidence:z.array(z.object({kind:z.enum(['github','ci','deployment','slack']),reference:safeCallerString(500).url()}).strict()).max(12),
+ evidence:z.array(z.object({kind:z.enum(['github','ci','deployment','slack']),reference:safeCallerString(500,true)}).strict()).max(12),
  pending:z.array(safeCallerString(300).min(1)).max(8),
 }).strict().superRefine((v,ctx)=>{
  const u=new URL(v.source.conversationUrl);
