@@ -159,16 +159,19 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     const currentGrant = await grants.consent(owner, ['conductor.read', 'conductor.write'], expiry());
     const next = structuredClone(observed.state); delete next.subscription; delete next.baseline;
     let revokedAtCommit = false;
-    redis.before(async _args => {
-      if (revokedAtCommit) return;
-      revokedAtCommit = true;
-      redis.before();
-      await grants.revoke(owner, currentGrant.generation);
-    });
+    const client = redis.client as unknown as { eval: (...args: unknown[]) => Promise<unknown> };
+    const originalEval = client.eval.bind(client);
+    client.eval = async (...args: unknown[]) => {
+      if (!revokedAtCommit) {
+        revokedAtCommit = true;
+        await grants.revoke(owner, currentGrant.generation);
+      }
+      return originalEval(...args);
+    };
     try {
       assert.equal(await events.releaseExpiredBinding(observed.version, next, owner, currentGrant.generation,
         observed.state.subscription!.id, Date.now(), Date.now() - 1), false);
-    } finally { redis.before(); }
+    } finally { client.eval = originalEval; }
     assert.equal(revokedAtCommit, true);
     const after = await events.load();
     assert.equal(after.state.subscription?.id, observed.state.subscription!.id);
