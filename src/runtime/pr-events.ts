@@ -43,6 +43,26 @@ export const checkpointPublicationArguments = z.object({
  for(const e of v.evidence){const x=new URL(e.reference);const ok=e.kind==='github'||e.kind==='ci'?['github.com','api.github.com'].includes(x.hostname):e.kind==='deployment'?x.hostname==='vercel.com'||x.hostname.endsWith('.vercel.app'):x.hostname==='slack.com'||x.hostname.endsWith('.slack.com');if(x.protocol!=='https:'||!ok||x.username||x.password||x.search||x.hash)ctx.addIssue({code:'custom',path:['evidence'],message:'Evidence URL host does not match kind'});}
 });
 export type CheckpointPublicationArguments = z.infer<typeof checkpointPublicationArguments>;
+
+export const prEventBindingStatusSchema = z.object({
+  status: z.enum(['empty', 'pending', 'challenging', 'active', 'expired', 'invalid_authority', 'unavailable']),
+  configuredResource: prEventArguments,
+  eventName: z.enum([PR_EVENT, CHECKPOINT_EVENT]).nullable(),
+  phase: z.enum(['pending', 'challenging', 'active']).nullable(),
+  subscriptionExpiresAt: z.number().int().nullable(),
+  delegationExpiresAt: z.number().int().nullable(),
+  ownerMatchesConfigured: z.boolean(),
+  clientMatchesConfigured: z.boolean(),
+  resourceMatchesConfigured: z.boolean(),
+  bindingMatchesConfigured: z.boolean(),
+  currentGrantValid: z.boolean(),
+  subscriptionGrantMatches: z.boolean(),
+  approvalMatches: z.boolean(),
+  approvalValid: z.boolean(),
+  observedAt: z.iso.datetime(),
+}).strict();
+export type PrEventBindingStatus = z.infer<typeof prEventBindingStatusSchema>;
+
 export interface EventOwner { issuer: string; subject: string; clientId: string }
 // Allowlisted metadata only; unknown provider fields (including bodies) are stripped.
 const reviewActor = z.object({ id: z.number().int().positive(), login: z.string().max(100).regex(/^[A-Za-z0-9_\[\]-]+$/).nullable() }).nullable();
@@ -240,6 +260,75 @@ export class PrEvents {
     }
     return saved;
   }
+
+  /** Read the stable delegated slot without mutating state or revealing recipient/grant secrets. */
+  get delegatedBindingStatusEnabled() { return !!this.options.delegatedRecipient; }
+
+  async bindingStatus(auth?: AuthInfo): Promise<PrEventBindingStatus> {
+    const caller = eventOwner(auth);
+    const mode = this.options.delegatedRecipient;
+    if (!mode || !eventOwnerAuthorized(caller, this.options.owner, mode.clientFingerprint) ||
+        clientFingerprint(caller.clientId) !== mode.clientFingerprint) {
+      throw new Error('Delegated binding status is not authorized');
+    }
+    const generation = auth?.extra?.grantGeneration;
+    let currentGrantValid = false;
+    try { await this.grant(caller, generation); currentGrantValid = true; } catch { /* Report validity without disclosing grant details. */ }
+    const observedAt = new Date(this.now()).toISOString();
+    const baseResult = {
+      configuredResource: this.options.target,
+      delegationExpiresAt: mode.approval?.expiresAt ?? null,
+      ownerMatchesConfigured: true,
+      clientMatchesConfigured: true,
+      currentGrantValid,
+      observedAt,
+    };
+    let loaded: { version: string | null; state: PrEventState };
+    try { loaded = await this.options.store.load(); }
+    catch {
+      const approvalValid = !!mode.approval && mode.approval.expiresAt > this.now() && mode.approval.expiresAt <= this.now() + 3600000;
+      return { ...baseResult, status: 'unavailable', eventName: null, phase: null, subscriptionExpiresAt: null,
+        resourceMatchesConfigured: false, bindingMatchesConfigured: false, subscriptionGrantMatches: false,
+        approvalMatches: false, approvalValid };
+    }
+    const sub = loaded.state.subscription;
+    const approvalValid = !!mode.approval && mode.approval.expiresAt > this.now() && mode.approval.expiresAt <= this.now() + 3600000;
+    if (!sub) {
+      return { ...baseResult, status: 'empty', eventName: null, phase: null, subscriptionExpiresAt: null,
+        resourceMatchesConfigured: true, bindingMatchesConfigured: false, subscriptionGrantMatches: false,
+        approvalMatches: false, approvalValid };
+    }
+    const ownerMatchesConfigured = eventOwnerEqual(sub.owner, caller) &&
+      eventOwnerAuthorized(sub.owner, this.options.owner, mode.clientFingerprint);
+    const clientMatchesConfigured = !!sub.binding && sub.binding.fingerprint === mode.clientFingerprint &&
+      clientFingerprint(sub.owner.clientId) === mode.clientFingerprint;
+    const resourceMatchesConfigured = !!sub.binding &&
+      hash(sub.binding.target) === hash(this.options.target) &&
+      (sub.binding.integrationBranch ?? 'preview') === (this.options.integrationBranch ?? 'preview');
+    const bindingMatchesConfigured = ownerMatchesConfigured && clientMatchesConfigured &&
+      resourceMatchesConfigured && this.bindingMatches(sub);
+    const subscriptionGrantMatches = typeof generation === 'string' && sub.generation === generation && currentGrantValid;
+    const approvalMatches = !!mode.approval && sub.binding?.approvalId === mode.approval.id;
+    if (!ownerMatchesConfigured || !clientMatchesConfigured || !resourceMatchesConfigured) {
+      return { ...baseResult, status: 'invalid_authority', eventName: null, phase: null, subscriptionExpiresAt: null,
+        ownerMatchesConfigured, clientMatchesConfigured, resourceMatchesConfigured, bindingMatchesConfigured: false,
+        subscriptionGrantMatches: false, approvalMatches: false, approvalValid };
+    }
+    const storedEventName = sub.eventName ?? PR_EVENT;
+    const eventName: typeof PR_EVENT | typeof CHECKPOINT_EVENT | null =
+      storedEventName === PR_EVENT ? PR_EVENT : storedEventName === CHECKPOINT_EVENT ? CHECKPOINT_EVENT : null;
+    const phase = sub.binding?.phase;
+    const safePhase = phase === 'pending' || phase === 'challenging' || phase === 'active' ? phase : null;
+    const shared = { ...baseResult, eventName, phase: safePhase, subscriptionExpiresAt: sub.expiresAt,
+      ownerMatchesConfigured, clientMatchesConfigured, resourceMatchesConfigured, bindingMatchesConfigured,
+      subscriptionGrantMatches, approvalMatches, approvalValid };
+    if (sub.expiresAt <= this.now()) return { ...shared, status: 'expired' };
+    if (!bindingMatchesConfigured || !subscriptionGrantMatches || !approvalMatches || !approvalValid || !safePhase || !eventName) {
+      return { ...shared, status: 'invalid_authority' };
+    }
+    return { ...shared, eventName: eventName!, phase: safePhase!, status: safePhase! };
+  }
+
   async list(auth?: AuthInfo) {
     const owner = await this.authorize(auth);
     await this.read(owner, auth!.extra!.grantGeneration as string);

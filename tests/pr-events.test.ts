@@ -391,6 +391,74 @@ function delegatedFixture() {
   return { ...f, bridge, options, mode, approve, pending, activate, applicationPosts: () => f.posts.filter(p => JSON.parse(p.body).type !== 'verification') };
 }
 
+
+test('delegated binding status is redacted, owner/client scoped, and does not mutate the stable slot', async () => {
+  const f = delegatedFixture(); f.approve();
+  const emptyBefore = f.store.raw;
+  const empty = await f.bridge.bindingStatus(auth);
+  assert.equal(empty.status, 'empty');
+  assert.equal(empty.configuredResource.repository, target.repository);
+  assert.equal(empty.eventName, null);
+  assert.equal(f.store.raw, emptyBefore);
+  assert.equal(f.reads(), 0); assert.equal(f.posts.length, 0);
+  await f.pending();
+  const pendingRaw = f.store.raw;
+  const pending = await f.bridge.bindingStatus(auth);
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.phase, 'pending');
+  assert.equal(pending.resourceMatchesConfigured, true);
+  assert.equal(f.store.raw, pendingRaw);
+  assert.doesNotMatch(JSON.stringify(pending), /receiver\.example|whsec_|grantGeneration|oauth-client|service-principal/);
+  const challenger = await f.store.load();
+  challenger.state.subscription!.binding!.phase = 'challenging';
+  assert.equal(await f.store.save(challenger.version, challenger.state), true);
+  assert.equal((await f.bridge.bindingStatus(auth)).status, 'challenging');
+});
+
+test('delegated binding status distinguishes active, expired and invalid grant without revealing mismatched slots', async () => {
+  const f = delegatedFixture(); await f.activate();
+  const activeRaw = f.store.raw;
+  const active = await f.bridge.bindingStatus(auth);
+  assert.equal(active.status, 'active');
+  assert.equal(active.eventName, PR_EVENT);
+  assert.equal(active.bindingMatchesConfigured, true);
+  assert.equal(active.currentGrantValid, true);
+  assert.equal(active.subscriptionGrantMatches, true);
+  assert.equal(f.store.raw, activeRaw);
+  const expired = delegatedFixture(); await expired.activate(); expired.advance(300001);
+  const expiredStatus = await expired.bridge.bindingStatus(auth);
+  assert.equal(expiredStatus.status, 'expired');
+  assert.notEqual(expired.store.raw, null);
+  await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+  const invalid = await f.bridge.bindingStatus(auth);
+  assert.equal(invalid.status, 'invalid_authority');
+  assert.equal(invalid.currentGrantValid, false);
+  assert.equal(invalid.subscriptionGrantMatches, false);
+  assert.equal(f.store.raw, activeRaw);
+  const staleConfig = { ...f.options, target: { ...target, repository: 'owner/other-repo' } };
+  const stale = new PrEvents(staleConfig);
+  const mismatch = await stale.bindingStatus(auth);
+  assert.equal(mismatch.status, 'invalid_authority');
+  assert.equal(mismatch.resourceMatchesConfigured, false);
+  assert.equal(mismatch.eventName, null);
+  assert.equal(mismatch.subscriptionExpiresAt, null);
+  assert.doesNotMatch(JSON.stringify(mismatch), /owner\/repo|receiver\.example|whsec_|1:00000000/);
+  assert.equal(f.store.raw, activeRaw);
+});
+
+test('delegated binding status rejects foreign principal/client and reports unavailable store without mutation', async () => {
+  const f = delegatedFixture(); await f.activate();
+  await assert.rejects(f.bridge.bindingStatus({ ...auth, clientId: 'foreign-client' }), /not authorized/);
+  await assert.rejects(f.bridge.bindingStatus({ ...auth, extra: { ...auth.extra, subject: 'foreign-subject' } }), /not authorized/);
+  const raw = f.store.raw;
+  const unavailable = new PrEvents({ ...f.options, store: { async load() { throw new Error('private redis failure'); }, async save() { throw new Error('must not save'); } } });
+  const result = await unavailable.bindingStatus(auth);
+  assert.equal(result.status, 'unavailable');
+  assert.equal(result.configuredResource.repository, target.repository);
+  assert.doesNotMatch(JSON.stringify(result), /private redis failure|receiver\.example|whsec_|grantGeneration|oauth-client/);
+  assert.equal(f.store.raw, raw);
+});
+
 test('delegated approved client binds and challenges in one request; absent approval does nothing', async () => {
   const f = delegatedFixture();
   await assert.rejects(f.bridge.subscribe(auth, target, delivery), /not approved/);
@@ -523,6 +591,15 @@ test('delegated mode over real HTTP authenticates signed identity, rejects body 
     assert.match(await invoke(jwt), /not approved/);
     assert.equal(f.reads(), 0); assert.equal(f.posts.length, 0);
     f.approve(); assert.equal(await invoke(jwt), 'subscribed'); assert.equal(f.posts.length, 1);
+    const statusClient = new Client({ name: 'binding-status-proof', version: '1' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
+    try {
+      await statusClient.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:' + address.port + '/mcp'), { requestInit: { headers: { Authorization: 'Bearer ' + jwt } } }));
+      const tools = await statusClient.listTools();
+      assert.ok(tools.tools.some(tool => tool.name === 'events.binding.status'));
+      const result = await statusClient.callTool({ name: 'events.binding.status', arguments: {} });
+      assert.match(JSON.stringify(result), /"status":"active"/);
+      assert.doesNotMatch(JSON.stringify(result), /receiver\.example|whsec_|grant_generation|oauth-client|service-principal/);
+    } finally { await statusClient.close(); }
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
