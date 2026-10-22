@@ -32,7 +32,7 @@ export const checkpointPublicationArguments = z.object({
 }).strict().superRefine((v,ctx)=>{
  const u=new URL(v.source.conversationUrl);
  if(u.protocol!=='https:'||u.hostname!=='chatgpt.com'||u.username||u.password||u.search||u.hash)ctx.addIssue({code:'custom',path:['source','conversationUrl'],message:'Canonical HTTPS ChatGPT conversation URL required'});
- for(const e of v.evidence){const x=new URL(e.reference);const ok=e.kind==='github'||e.kind==='ci'?['github.com','api.github.com'].includes(x.hostname):e.kind==='deployment'?x.hostname==='vercel.com'||x.hostname.endsWith('.vercel.app'):x.hostname==='slack.com'||x.hostname.endsWith('.slack.com');if(x.protocol!=='https:'||!ok||x.username||x.password)ctx.addIssue({code:'custom',path:['evidence'],message:'Evidence URL host does not match kind'});}
+ for(const e of v.evidence){const x=new URL(e.reference);const ok=e.kind==='github'||e.kind==='ci'?['github.com','api.github.com'].includes(x.hostname):e.kind==='deployment'?x.hostname==='vercel.com'||x.hostname.endsWith('.vercel.app'):x.hostname==='slack.com'||x.hostname.endsWith('.slack.com');if(x.protocol!=='https:'||!ok||x.username||x.password||x.search||x.hash)ctx.addIssue({code:'custom',path:['evidence'],message:'Evidence URL host does not match kind'});}
 });
 export type CheckpointPublicationArguments = z.infer<typeof checkpointPublicationArguments>;
 export interface EventOwner { issuer: string; subject: string; clientId: string }
@@ -355,7 +355,7 @@ export class PrEvents {
     await this.checkSubscription(sub);
     const current=this.evidence(await this.read(owner,generation,v.resource));
     await this.checkSubscription(sub);
-    const fingerprint=hash(v),source='checkpoint:'+v.checkpointId;
+    const fingerprint=hash(v),source='checkpoint:'+sub.id+':'+v.checkpointId;
     const existing=loaded.state.deliveries.find(d=>d.source===source);
     if(existing){if(existing.fingerprint!==fingerprint)throw new ProtocolError(-32000,'Checkpoint identity reused with different content',{reason:'checkpoint_identity_conflict'});return {checkpointId:v.checkpointId,status:existing.status==='accepted'?'duplicate':existing.status};}
     const state=loaded.state;state.deliveries=state.deliveries.filter(d=>d.createdAt>this.now()-86400000);
