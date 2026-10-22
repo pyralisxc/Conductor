@@ -22,13 +22,21 @@ export const prEventArguments = z.object({
 }).strict();
 export type PrEventArguments = z.infer<typeof prEventArguments>;
 export const CHECKPOINT_EVENT = 'agent.checkpoint_published';
+
+const credentialLike = /(?:\bBearer\s+|whsec_[A-Za-z0-9+/=]{16,}|github_pat_[A-Za-z0-9_]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,}|sk-[A-Za-z0-9_-]{16,}|(?:access[_-]?token|api[_-]?key|client[_-]?secret|password)=|-----BEGIN [A-Z ]+-----)/i;
+function containsCredentialLike(value: string): boolean {
+  if (credentialLike.test(value)) return true;
+  try { const u=new URL(value); return credentialLike.test(decodeURIComponent(u.pathname))||credentialLike.test(decodeURIComponent(u.hostname))||credentialLike.test(decodeURIComponent(u.search))||credentialLike.test(decodeURIComponent(u.hash)); } catch { return false; }
+}
+const safeCallerString=(max:number)=>z.string().max(max).refine(value=>!containsCredentialLike(value),'Sensitive material is not allowed');
+
 export const checkpointPublicationArguments = z.object({
  resource: prEventArguments,
- source: z.object({conversationUrl:z.string().url().max(500),conversationId:z.string().max(200).nullable(),replyId:z.string().max(200).nullable(),replyState:z.enum(['known','unavailable','not-yet-confirmed'])}).strict(),
- checkpointId:z.string().min(8).max(160).regex(/^[A-Za-z0-9._:-]+$/),
- summary:z.string().min(1).max(1200).refine(v=>!/(?:Bearer\s+|whsec_|github_pat_|gh[pousr]_[A-Za-z0-9_]{12,}|-----BEGIN [A-Z ]+-----)/i.test(v),'Sensitive material is not allowed'),
- evidence:z.array(z.object({kind:z.enum(['github','ci','deployment','slack']),reference:z.string().url().max(500)}).strict()).max(12),
- pending:z.array(z.string().min(1).max(300).refine(v=>!/(?:Bearer\s+|whsec_|github_pat_|gh[pousr]_[A-Za-z0-9_]{12,}|-----BEGIN [A-Z ]+-----)/i.test(v),'Sensitive material is not allowed')).max(8),
+ source: z.object({conversationUrl:safeCallerString(500).url(),conversationId:safeCallerString(200).nullable(),replyId:safeCallerString(200).nullable(),replyState:z.enum(['known','unavailable','not-yet-confirmed'])}).strict(),
+ checkpointId:safeCallerString(160).min(8).regex(/^[A-Za-z0-9._:-]+$/),
+ summary:safeCallerString(1200).min(1),
+ evidence:z.array(z.object({kind:z.enum(['github','ci','deployment','slack']),reference:safeCallerString(500).url()}).strict()).max(12),
+ pending:z.array(safeCallerString(300).min(1)).max(8),
 }).strict().superRefine((v,ctx)=>{
  const u=new URL(v.source.conversationUrl);
  if(u.protocol!=='https:'||u.hostname!=='chatgpt.com'||u.username||u.password||u.search||u.hash)ctx.addIssue({code:'custom',path:['source','conversationUrl'],message:'Canonical HTTPS ChatGPT conversation URL required'});
@@ -86,7 +94,7 @@ interface Subscription {
 }
 interface Delivery {
   id: string; source: string; fingerprint: string; body: string; createdAt: number; resourceFingerprint?: string;
-  attempts: number; leaseUntil?: number; status: 'pending' | 'accepted' | 'failed' | 'stopped';
+  attempts: number; leaseUntil?: number; status: 'pending' | 'accepted' | 'failed' | 'stopped' | 'uncertain' | 'superseded' | 'blocked';
 }
 export interface PrEventState {
   subscription?: Subscription; baseline?: string;
@@ -282,7 +290,7 @@ export class PrEvents {
     if (!approval || approval.expiresAt <= this.now() || approval.expiresAt > this.now() + 3600000) throw new ProtocolError(-32000, 'Recipient delegation is not approved', { reason: 'delegation_not_approved' });
     let loaded = await this.options.store.load();
     let old = loaded.state.subscription;
-    const id = this.identity(owner, url);
+    const id = this.identity(owner, url, eventName);
     const grant = await this.grant(owner, generation);
     const expiresAt = Math.min(grant.expiresAt, this.now() + Math.min(ttlMs ?? 3600000, 3600000), auth.expiresAt === undefined ? Infinity : auth.expiresAt * 1000);
     if (expiresAt <= this.now()) throw new Error('Event authorization expired');
@@ -347,41 +355,57 @@ export class PrEvents {
     throw new Error('Subscription changed; retry unsubscribe');
   }
 
+  private async setCheckpointTerminal(eventId: string, subscriptionId: string, status: 'uncertain' | 'superseded' | 'blocked' | 'stopped'): Promise<boolean> {
+    for (let i=0;i<3;i++) { const l=await this.options.store.load(); const d=l.state.deliveries.find(x=>x.id===eventId);
+      if(!d)return false; if(d.status!=='pending'&&d.status!=='failed')return d.status===status;
+      if(l.state.subscription?.id!==subscriptionId)return false; d.status=status; d.leaseUntil=0;
+      if(await this.options.store.save(l.version,l.state))return true;
+    } return false;
+  }
   async publishCheckpoint(auth: AuthInfo | undefined, input: CheckpointPublicationArguments) {
     const v=checkpointPublicationArguments.parse(input), owner=await this.authorize(auth,v.resource), generation=auth!.extra!.grantGeneration as string;
     const loaded=await this.options.store.load(), sub=loaded.state.subscription;
     if(!sub||(sub.eventName??PR_EVENT)!==CHECKPOINT_EVENT||!eventOwnerEqual(sub.owner,owner)||sub.generation!==generation||sub.id!==this.identity(owner,sub.url,CHECKPOINT_EVENT))
       throw new ProtocolError(-32000,'No exact checkpoint subscription is active',{reason:'checkpoint_subscription_missing'});
     await this.checkSubscription(sub);
-    const current=this.evidence(await this.read(owner,generation,v.resource));
-    await this.checkSubscription(sub);
-    const fingerprint=hash(v),source='checkpoint:'+sub.id+':'+v.checkpointId;
-    const existing=loaded.state.deliveries.find(d=>d.source===source);
-    if(existing){if(existing.fingerprint!==fingerprint)throw new ProtocolError(-32000,'Checkpoint identity reused with different content',{reason:'checkpoint_identity_conflict'});return {checkpointId:v.checkpointId,status:existing.status==='accepted'?'duplicate':existing.status};}
+    const fingerprint=hash(v),source='checkpoint:'+sub.id+':'+v.checkpointId,existing=loaded.state.deliveries.find(d=>d.source===source);
+    if(existing){
+      if(existing.fingerprint!==fingerprint)throw new ProtocolError(-32000,'Checkpoint identity reused with different content',{reason:'checkpoint_identity_conflict'});
+      if(existing.status==='accepted')return {checkpointId:v.checkpointId,status:'duplicate' as const};
+      if(['uncertain','superseded','blocked','stopped'].includes(existing.status))return {checkpointId:v.checkpointId,status:existing.status};
+      if(existing.attempts>0){if((existing.leaseUntil??0)>this.now())return {checkpointId:v.checkpointId,status:'pending' as const};await this.setCheckpointTerminal(existing.id,sub.id,'uncertain');return {checkpointId:v.checkpointId,status:'uncertain' as const};}
+      return {checkpointId:v.checkpointId,status:await this.deliverCheckpoint(sub,existing.id)};
+    }
+    const current=this.evidence(await this.read(owner,generation,v.resource));await this.checkSubscription(sub);
     const state=loaded.state;state.deliveries=state.deliveries.filter(d=>d.createdAt>this.now()-86400000);
     if(state.deliveries.length>=128)throw new ProtocolError(-32000,'Checkpoint delivery capacity reached',{reason:'delivery_capacity'});
     const id='evt_'+hash([sub.id,source,fingerprint]),data={origin:'conductor-project-agent',eventClass:'agent.work_result',project:v.resource.repository,resource:v.resource,source:v.source,checkpointId:v.checkpointId,publishedAt:new Date(this.now()).toISOString(),summary:v.summary,evidence:v.evidence,pending:v.pending};
     state.deliveries.push({id,source,fingerprint,resourceFingerprint:hash(current),createdAt:this.now(),attempts:0,status:'pending',body:JSON.stringify({eventId:id,name:CHECKPOINT_EVENT,timestamp:new Date(this.now()).toISOString(),data,cursor:null})});
-    if(!await this.save(loaded.version,state))return {checkpointId:v.checkpointId,status:'pending'};
-    const claimed=await this.options.store.load(),record=claimed.state.deliveries.find(d=>d.id===id),active=claimed.state.subscription;
-    if(!record||!active||active.id!==sub.id||active.generation!==generation||active.expiresAt<=this.now())return {checkpointId:v.checkpointId,status:'inactive'};
+    if(!await this.save(loaded.version,state))return {checkpointId:v.checkpointId,status:'pending' as const};
+    return {checkpointId:v.checkpointId,status:await this.deliverCheckpoint(sub,id)};
+  }
+  private async deliverCheckpoint(sub: Subscription,eventId: string): Promise<string> {
+    const loaded=await this.options.store.load(),active=loaded.state.subscription,record=loaded.state.deliveries.find(d=>d.id===eventId);
+    if(!active||active.id!==sub.id||active.generation!==sub.generation||(active.eventName??PR_EVENT)!==CHECKPOINT_EVENT||!record)return 'inactive';
+    if(['accepted','stopped','uncertain','superseded','blocked'].includes(record.status)||record.attempts>0)return record.status;
+    try{await this.checkSubscription(active);if(hash(this.evidence(await this.read(active.owner,active.generation)))!==record.resourceFingerprint){await this.setCheckpointTerminal(eventId,active.id,'superseded');return 'superseded';}}
+    catch{await this.setCheckpointTerminal(eventId,active.id,'blocked');return 'blocked';}
     record.attempts=1;record.leaseUntil=this.now()+30000;
-    if(!await this.save(claimed.version,claimed.state))return {checkpointId:v.checkpointId,status:'pending'};
-    const attempt=await this.options.store.load();
-    if(attempt.version!==JSON.stringify(claimed.state)||attempt.state.subscription?.id!==sub.id)return {checkpointId:v.checkpointId,status:'pending'};
-    const finalRecord=attempt.state.deliveries.find(d=>d.id===id);
-    if(!finalRecord)return {checkpointId:v.checkpointId,status:'pending'};
-    let status=503;
-    try{
-      await this.checkSubscription(sub);
-      if(hash(this.evidence(await this.read(owner,generation,v.resource)))!==record.resourceFingerprint)return {checkpointId:v.checkpointId,status:'superseded'};
-      status=(await signedCallback(this.options.post,{id:sub.id,url:sub.url,secret:this.options.vault.open(sub.secret).plaintext,...(sub.previousSecret&&(sub.rotationUntil??0)>this.now()?{previousSecret:this.options.vault.open(sub.previousSecret).plaintext}:{})},record.id,record.body)).status;
-    }catch{/* callback data and secrets are never logged */}
-    try{await this.checkSubscription(sub);}catch{await this.stop(sub);return {checkpointId:v.checkpointId,status:'blocked'};}
-    finalRecord.leaseUntil=0;finalRecord.status=status>=200&&status<300?'accepted':status===410||status===413||(status>=400&&status<500&&status!==429)?'stopped':'failed';
-    if(status===410)delete attempt.state.subscription;
-    if(!await this.save(attempt.version,attempt.state))return {checkpointId:v.checkpointId,status:'pending'};
-    return {checkpointId:v.checkpointId,status:finalRecord.status};
+    if(!await this.options.store.save(loaded.version,loaded.state))return 'pending';
+    const claimed=await this.options.store.load();if(claimed.version!==JSON.stringify(loaded.state))return 'pending';
+    const cr=claimed.state.deliveries.find(d=>d.id===eventId),cs=claimed.state.subscription;
+    if(!cr||!cs||cs.id!==active.id||cs.generation!==active.generation||cs.expiresAt<=this.now())return 'pending';
+    try{await this.checkSubscription(cs);if(hash(this.evidence(await this.read(cs.owner,cs.generation)))!==cr.resourceFingerprint){await this.setCheckpointTerminal(eventId,active.id,'superseded');return 'superseded';}}
+    catch{await this.setCheckpointTerminal(eventId,active.id,'blocked');return 'blocked';}
+    let status:number|undefined;
+    try{status=(await signedCallback(this.options.post,{id:cs.id,url:cs.url,secret:this.options.vault.open(cs.secret).plaintext,...(cs.previousSecret&&(cs.rotationUntil??0)>this.now()?{previousSecret:this.options.vault.open(cs.previousSecret).plaintext}:{})},cr.id,cr.body)).status;}
+    catch{/* Ambiguous callback outcome is never replayed automatically. */}
+    const terminal=status!==undefined&&status>=200&&status<300?'accepted':status===410?'stopped':'uncertain';
+    for(let i=0;i<3;i++){const after=await this.options.store.load(),d=after.state.deliveries.find(x=>x.id===eventId);
+      if(!d||after.state.subscription?.id!==active.id)return 'uncertain';if(d.status!=='pending')return d.status;
+      d.status=terminal;d.leaseUntil=0;if(status===410)delete after.state.subscription;
+      if(await this.options.store.save(after.version,after.state))return terminal;
+    }return 'uncertain';
   }
 
   async ingest(body: Buffer, event: string, deliveryId: string, signature: string): Promise<string> {
