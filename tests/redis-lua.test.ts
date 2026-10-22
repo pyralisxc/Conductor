@@ -160,7 +160,7 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     const next = structuredClone(observed.state); delete next.subscription; delete next.baseline;
     let revokedAtCommit = false;
     redis.before(async args => {
-      if (revokedAtCommit || String(args[0]).toLowerCase() !== 'eval' || !String(args[1]).includes('local hasRead = false; local hasWrite = false')) return;
+      if (revokedAtCommit || String(args[0]).toLowerCase() !== 'eval' || String(args[3]) !== key) return;
       revokedAtCommit = true;
       redis.before();
       await grants.revoke(owner, currentGrant.generation);
