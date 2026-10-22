@@ -473,39 +473,48 @@ test('expired delegated binding release requires exact stale state and preserves
   const before = await f.store.load();
   before.state.deliveries.push({ id: 'delivery-history-1', source: 'source-history-1', fingerprint: 'a'.repeat(64),
     body: '{"retained":true}', createdAt: f.options.now(), attempts: 1, status: 'uncertain' });
-  before.state.sources = [{ id: 'source-history-1', observedAt: f.options.now() }];
+  const originalSourceObservedAt = f.options.now();
+  before.state.sources = [{ id: 'source-history-1', observedAt: originalSourceObservedAt }];
   before.state.usedBindingAttempts = ['consumed-attempt-1'];
   assert.equal(await f.store.save(before.version, before.state), true);
   f.advance(300001);
   await f.options.grants.revoke(owner, auth.extra.grantGeneration);
-  const current = await f.options.grants.consent(owner, ['conductor.read'], f.options.now() + 3600000);
-  const freshAuth = { ...auth, extra: { ...auth.extra, grantGeneration: current.generation } };
+  const current = await f.options.grants.consent(owner, ['conductor.read','conductor.write'], f.options.now() + 3600000);
+  const freshAuth = { ...auth, scopes: ['conductor.read','conductor.write'], extra: { ...auth.extra, grantGeneration: current.generation } };
   const status = await f.bridge.bindingStatus(freshAuth);
   assert.equal(status.status, 'expired');
   assert.equal(status.subscriptionGrantMatches, false);
   assert.equal(status.approvalValid, false);
   const args = { resource: target, eventName: PR_EVENT as typeof PR_EVENT, expectedPhase: 'active' as const,
     expectedSubscriptionExpiresAt: old.expiresAt, expectedDelegationExpiresAt: f.mode.approval!.expiresAt, confirm: true as const };
-  const released = await f.bridge.releaseExpiredBinding(freshAuth, args);
+  const released = await f.bridge.releaseExpiredBinding(freshAuth, { ...args, expectedBindingGuard: status.bindingGuard!, approvalReference: 'owner-approved:expired-binding-review-20261022' });
   assert.equal(released.released, true);
   const after = await f.store.load();
   assert.equal(after.state.subscription, undefined); assert.equal(after.state.baseline, undefined);
   assert.deepEqual(after.state.deliveries.map(x => x.id), ['delivery-history-1']);
-  assert.deepEqual(after.state.sources, [{ id: 'source-history-1', observedAt: f.options.now() }]);
+  assert.deepEqual(after.state.sources, [{ id: 'source-history-1', observedAt: originalSourceObservedAt }]);
   assert.deepEqual(after.state.usedBindingAttempts, ['consumed-attempt-1']);
 });
 
 test('expired binding release refuses a still-valid binding and stale observed state', async () => {
   const f = delegatedFixture(); await f.activate();
   const current = await f.store.load(); const sub = current.state.subscription!;
+  const status = await f.bridge.bindingStatus(auth);
   const args = { resource: target, eventName: PR_EVENT as typeof PR_EVENT, expectedPhase: 'active' as const,
-    expectedSubscriptionExpiresAt: sub.expiresAt, expectedDelegationExpiresAt: f.mode.approval!.expiresAt, confirm: true as const };
-  await assert.rejects(f.bridge.releaseExpiredBinding(auth, args), /still valid/);
-  const raced = await f.store.load(); raced.state.baseline = 'raced-state';
+    expectedSubscriptionExpiresAt: sub.expiresAt, expectedDelegationExpiresAt: f.mode.approval!.expiresAt,
+    expectedBindingGuard: status.bindingGuard!, approvalReference: 'owner-approved:expired-binding-review-20261022', confirm: true as const };
+  await assert.rejects(f.bridge.releaseExpiredBinding(auth, args), /conductor.write/);
+  const currentGrant = await f.options.grants.consent(owner, ['conductor.read','conductor.write'], f.options.now()+3600000);
+  const freshAuth = { ...auth, scopes: ['conductor.read','conductor.write'], extra: { ...auth.extra, grantGeneration: currentGrant.generation } };
+  await assert.rejects(f.bridge.releaseExpiredBinding(freshAuth, args), /still valid/);
+  f.advance(300001);
+  const raced = await f.store.load();
+  const replacement = structuredClone(raced.state.subscription!);
+  replacement.id = randomUUID();
+  raced.state.subscription = replacement;
   assert.equal(await f.store.save(raced.version, raced.state), true);
-  assert.equal(await f.store.releaseExpiredBinding(current.version, { ...current.state, subscription: undefined }, owner,
-    auth.extra.grantGeneration, sub.id, f.options.now(), f.mode.approval!.expiresAt), false);
-  assert.equal((await f.store.load()).state.subscription?.id, sub.id);
+  await assert.rejects(f.bridge.releaseExpiredBinding(freshAuth, args), /Observed binding changed/);
+  assert.equal((await f.store.load()).state.subscription?.id, replacement.id);
 });
 
 test('delegated approved client binds and challenges in one request; absent approval does nothing', async () => {
@@ -652,9 +661,10 @@ test('delegated mode over real HTTP authenticates signed identity, rejects body 
       const release = await statusClient.callTool({ name: 'events.binding.release_expired', arguments: {
         resource: target, eventName: PR_EVENT, expectedPhase: 'active',
         expectedSubscriptionExpiresAt: f.options.now() + 300000,
-        expectedDelegationExpiresAt: f.mode.approval!.expiresAt, confirm: true,
+        expectedDelegationExpiresAt: f.mode.approval!.expiresAt, expectedBindingGuard: (await f.bridge.bindingStatus(auth)).bindingGuard!,
+        approvalReference: 'owner-approved:test-reference', confirm: true,
       } });
-      assert.match(JSON.stringify(release), /Binding is still valid|still valid/);
+      assert.match(JSON.stringify(release), /conductor\.write|scope|permission/i);
       assert.equal((await f.store.load()).state.subscription?.binding?.phase, 'active');
     } finally { await statusClient.close(); }
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
