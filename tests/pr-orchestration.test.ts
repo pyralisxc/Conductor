@@ -376,10 +376,11 @@ test('integration readiness requires a supported source branch and supported Pre
     { name: 'work to vercel-preview when vercel-preview is default', headRef: 'work/fix', baseRef: 'vercel-preview', defaultBranch: 'vercel-preview', expected: 'external-gate-pending' },
     { name: 'uppercase WORK prefix is rejected', headRef: 'WORK/fix', baseRef: 'preview', defaultBranch: 'main', expected: 'external-gate-pending' },
     { name: 'unsafe plus in work branch is rejected', headRef: 'work/fix+test', baseRef: 'preview', defaultBranch: 'main', expected: 'external-gate-pending' },
-    { name: 'Dependabot to Main', headRef: 'dependabot/npm_and_yarn/pkg-1', baseRef: 'main', expected: 'external-gate-pending' },
-    { name: 'work to Main', headRef: 'work/fix', baseRef: 'main', expected: 'external-gate-pending' },
-    { name: 'Dependabot to Preview', headRef: 'dependabot/npm_and_yarn/pkg-1', baseRef: 'preview', expected: 'external-gate-pending' },
-    { name: 'work to arbitrary branch', headRef: 'work/fix', baseRef: 'staging', expected: 'external-gate-pending' },
+    { name: 'Dependabot to Main', headRef: 'dependabot/npm_and_yarn/pkg-1', baseRef: 'main', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'work to Main', headRef: 'work/fix', baseRef: 'main', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'Dependabot to Preview', headRef: 'dependabot/npm_and_yarn/pkg-1', baseRef: 'preview', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'work to arbitrary branch', headRef: 'work/fix', baseRef: 'staging', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'work to Preview without authoritative default metadata', headRef: 'work/fix', baseRef: 'preview', defaultBranch: null, expected: 'external-gate-pending' },
   ] as const;
   for (const candidate of cases) {
     const provider = providerFor({
