@@ -72,7 +72,7 @@ export function prEventCatalog() {
       payloadSchema: { type: 'object', properties: { origin: { type: 'string' }, eventClass: { type: 'string' }, project: { type: 'string' }, resource: z.toJSONSchema(prEventArguments), source: { type: 'object' }, checkpointId: { type: 'string' }, publishedAt: { type: 'string' }, summary: { type: 'string' }, evidence: { type: 'array' }, pending: { type: 'array' } },
       required: ['origin','eventClass','project','resource','source','checkpointId','publishedAt','summary','evidence','pending'], additionalProperties: false },
     }
-  }] };
+  ] };
 }
 export type PrEventService = PrEvents | 'discovery-only';
 export interface PrEventSource {
