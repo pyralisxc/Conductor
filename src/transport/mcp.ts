@@ -1,4 +1,4 @@
-import { type PrEventService, PR_EVENT, CHECKPOINT_EVENT, prEventArguments, checkpointPublicationArguments, prEventCatalog, eventOwner } from '../runtime/pr-events.js';
+import { type PrEventService, PR_EVENT, CHECKPOINT_EVENT, prEventArguments, checkpointPublicationArguments, prEventBindingStatusSchema, prEventCatalog, eventOwner } from '../runtime/pr-events.js';
 import { McpServer, ProtocolError } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { releaseIdentityFitsTransport, RELEASE_IDENTITY_MAX_BYTES } from '../runtime/release-identities.js';
@@ -277,6 +277,17 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       }, async (input, extra) => {
         const receipt = await events.publishCheckpoint(extra.http?.authInfo, input);
         return { structuredContent: receipt, content: [{ type: 'text', text: JSON.stringify(receipt) }] };
+      });
+      if (events.delegatedBindingStatusEnabled) server.registerTool('events.binding.status', {
+        title: 'Read the current delegated event binding status',
+        description: 'Read-only status for this authenticated owner/client and the configured delegated installation slot. Returns only status, configured resource, event type, phase, expiry and authority-validity booleans. It never returns callback URLs, signing secrets, raw grant identifiers, or a mismatched binding resource. It does not clean up or mutate the slot.',
+        inputSchema: z.object({}),
+        outputSchema: prEventBindingStatusSchema,
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        _meta: { securitySchemes: oauthSecurity },
+      }, async (_input, extra) => {
+        const status = await events.bindingStatus(extra.http?.authInfo);
+        return { structuredContent: status, content: [{ type: 'text', text: JSON.stringify(status) }] };
       });
     }
   }

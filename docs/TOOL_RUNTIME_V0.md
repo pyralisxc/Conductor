@@ -230,6 +230,11 @@ The payload is a bounded `agent.work_result` envelope with a stable checkpoint I
 The configured event service has one subscription slot; switching between PR verification and checkpoint events requires the normal exact unsubscribe and a separately approved new subscription. This code change does not create or activate any live subscription or grant.
 
 
+
+## Authenticated delegated binding status
+
+The read-only MCP tool `events.binding.status` inspects the stable delegated installation slot for the authenticated owner/client and current configured resource. It reports one of `empty`, `pending`, `challenging`, `active`, `expired`, `invalid_authority`, or `unavailable`, with configured resource, event/phase/expiry only when the stored binding matches that owner/client/resource, plus boolean authority facts. If a stable slot contains a different principal/client/resource, the result reports invalid authority and hides the stored event, resource and expiry. The tool never returns callback URL, signing secret, raw grant identifier, or raw generation. It does not write, unsubscribe, repair or clean up state. A returned status is an observation, not a reservation or activation guarantee; re-read immediately before any separately approved action.
+
 ## Checkpoint terminal-state persistence qualification
 
 A returned checkpoint result describes the operation's observed outcome; it is not by itself proof that the same terminal status was durably stored. In particular, after revocation the Redis store rejects a snapshot that retains the revoked subscription. If `setCheckpointTerminal(..., 'blocked')` cannot save that snapshot, the API can return `blocked` while the previously persisted delivery row remains `pending` with its already-claimed `attempts = 1` and lease metadata. Do not describe this as a durably persisted `blocked` row unless a subsequent store read confirms it.
