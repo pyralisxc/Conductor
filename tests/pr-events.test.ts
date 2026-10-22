@@ -744,3 +744,107 @@ test('checkpoint redaction screens all caller-controlled identifiers and URL pat
   for (const bad of invalid) await assert.rejects(f.bridge.publishCheckpoint(auth, bad));
   assert.equal(f.posts.length, 1);
 });
+
+test('checkpoint HTTP 410 stops the delivery and removes the active subscription', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  f.status(410);
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-410', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-http-410-0001', summary: 'Receiver rejected the subscription.',
+    evidence: [], pending: [],
+  };
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'stopped');
+  const state = (await f.store.load()).state;
+  assert.equal(state.subscription, undefined);
+  assert.equal(state.deliveries.find(d => d.source.endsWith(':checkpoint-http-410-0001'))?.status, 'stopped');
+  const callbackCount = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload).catch(() => ({ status: 'no-subscription' }))).status, 'no-subscription');
+  assert.equal(f.posts.length, callbackCount);
+});
+
+test('checkpoint HTTP 503 becomes terminal uncertain and is never replayed', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  f.status(503);
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-503', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-http-503-0001', summary: 'Transient receiver failure.',
+    evidence: [], pending: [],
+  };
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'uncertain');
+  const count = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'uncertain');
+  assert.equal(f.posts.length, count);
+  assert.equal((await f.store.load()).state.deliveries.find(d => d.source.endsWith(':checkpoint-http-503-0001'))?.status, 'uncertain');
+});
+
+test('checkpoint callback timeout becomes terminal uncertain and is never replayed', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const originalPost = f.options.post;
+  f.options.post = async (url, body, headers) => {
+    if (JSON.parse(body).type === 'verification') return originalPost(url, body, headers);
+    throw new Error('simulated callback timeout');
+  };
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-timeout', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-timeout-0001', summary: 'Callback timed out.',
+    evidence: [], pending: [],
+  };
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'uncertain');
+  const count = f.posts.length;
+  assert.equal((await f.bridge.publishCheckpoint(auth, payload)).status, 'uncertain');
+  assert.equal(f.posts.length, count);
+  assert.equal((await f.store.load()).state.deliveries.find(d => d.source.endsWith(':checkpoint-timeout-0001'))?.status, 'uncertain');
+});
+
+test('simultaneous duplicate checkpoint publications claim at most one callback', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-concurrent', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-concurrent-0001', summary: 'One logical work result.',
+    evidence: [], pending: [],
+  };
+  const before = f.posts.length;
+  const results = await Promise.all([
+    f.bridge.publishCheckpoint(auth, payload),
+    f.bridge.publishCheckpoint(auth, payload),
+  ]);
+  assert.ok(results.every(result => ['accepted', 'pending', 'duplicate'].includes(result.status)));
+  assert.equal(f.posts.length - before, 1);
+  const state = (await f.store.load()).state;
+  const rows = state.deliveries.filter(d => d.source.endsWith(':checkpoint-concurrent-0001'));
+  assert.equal(rows.length, 1);
+  assert.ok(rows[0].attempts <= 1);
+});
+
+test('grant revoked during final checkpoint provider read prevents callback dispatch', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const originalRead = f.options.source.read;
+  let revokedDuringRead = false;
+  f.options.source.read = async (...args) => {
+    const snapshot = await originalRead(...args);
+    if (!revokedDuringRead) {
+      revokedDuringRead = true;
+      await f.options.grants.revoke(owner, auth.extra.grantGeneration);
+    }
+    return snapshot;
+  };
+  const payload = {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-revoke', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-revoked-final-read-0001', summary: 'Must not reach callback.',
+    evidence: [], pending: [],
+  };
+  const before = f.posts.length;
+  await assert.rejects(f.bridge.publishCheckpoint(auth, payload), /revoked|grant|Grant|active/i);
+  assert.equal(f.posts.length, before);
+  assert.equal((await f.store.load()).state.deliveries.some(d => d.source.endsWith(':checkpoint-revoked-final-read-0001')), false);
+});
