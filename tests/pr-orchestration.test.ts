@@ -26,6 +26,7 @@ function providerFor(input: {
   mergeable?: boolean | null;
   headRef?: string;
   baseRef?: string;
+  defaultBranch?: string | null;
   state?: 'open' | 'closed';
   draft?: boolean;
 }) {
@@ -60,7 +61,7 @@ function providerFor(input: {
           mergeable: input.mergeable ?? true,
           mergeable_state: 'clean',
           head: { ref: input.headRef ?? 'work/di-orchestration', sha: headSha },
-          base: { ref: input.baseRef ?? 'preview', sha: baseSha },
+          base: { ref: input.baseRef ?? 'preview', sha: baseSha, repo: input.defaultBranch === null ? { full_name: 'pyralisxc/Development-Intelligence' } : { full_name: 'pyralisxc/Development-Intelligence', default_branch: input.defaultBranch ?? 'main' } },
           labels: (input.labels ?? []).map((name) => ({ name })),
         });
       }
@@ -363,4 +364,57 @@ test('verified Preview head is promotion-ready while preserving the owner gate',
   assert.equal(result.orchestration.action, 'promotion-gate');
   assert.equal(result.orchestration.shouldAct, true);
   assert.match(result.orchestration.summary, /Main promotion\/authorization gate/);
+});
+
+
+test('integration readiness requires a supported source branch and supported Preview base', async () => {
+  const cases = [
+    { name: 'work to preview', headRef: 'work/fix', baseRef: 'preview', defaultBranch: 'main', expected: 'integration-ready' },
+    { name: 'repair to vercel-preview', headRef: 'repair/fix', baseRef: 'vercel-preview', defaultBranch: 'main', expected: 'integration-ready' },
+    { name: 'audit to preview', headRef: 'audit/fix', baseRef: 'preview', defaultBranch: 'main', expected: 'integration-ready' },
+    { name: 'work to preview when preview is default', headRef: 'work/fix', baseRef: 'preview', defaultBranch: 'preview', expected: 'external-gate-pending' },
+    { name: 'work to vercel-preview when vercel-preview is default', headRef: 'work/fix', baseRef: 'vercel-preview', defaultBranch: 'vercel-preview', expected: 'external-gate-pending' },
+    { name: 'uppercase WORK prefix is rejected', headRef: 'WORK/fix', baseRef: 'preview', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'unsafe plus in work branch is rejected', headRef: 'work/fix+test', baseRef: 'preview', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'Dependabot to Main', headRef: 'dependabot/npm_and_yarn/pkg-1', baseRef: 'main', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'work to Main', headRef: 'work/fix', baseRef: 'main', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'Dependabot to Preview', headRef: 'dependabot/npm_and_yarn/pkg-1', baseRef: 'preview', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'work to arbitrary branch', headRef: 'work/fix', baseRef: 'staging', defaultBranch: 'main', expected: 'external-gate-pending' },
+    { name: 'work to Preview without authoritative default metadata', headRef: 'work/fix', baseRef: 'preview', defaultBranch: null, expected: 'external-gate-pending' },
+  ] as const;
+  for (const candidate of cases) {
+    const provider = providerFor({
+      headRef: candidate.headRef,
+      baseRef: candidate.baseRef,
+      defaultBranch: candidate.defaultBranch,
+      checks: [{ id: 1, name: 'verify', status: 'completed', conclusion: 'success' }],
+      workflowRuns: [{ id: 9, name: 'verify', status: 'completed', conclusion: 'success' }],
+    });
+    const result = await status(provider);
+    assert.equal(result.orchestration.state, candidate.expected, candidate.name);
+    if (candidate.expected === 'integration-ready') {
+      assert.equal(result.orchestration.action, 'integration-merge', candidate.name);
+      assert.equal(result.orchestration.shouldAct, true, candidate.name);
+    } else {
+      assert.equal(result.orchestration.action, 'wait', candidate.name);
+      assert.equal(result.orchestration.shouldAct, false, candidate.name);
+      assert.match(result.orchestration.summary, /outside supported automatic integration or promotion paths/, candidate.name);
+    }
+  }
+});
+
+test('Preview-to-default is promotion-ready only with authoritative default-branch metadata', async () => {
+  const checks = [{ id: 1, name: 'verify', status: 'completed', conclusion: 'success' }];
+  const workflowRuns = [{ id: 9, name: 'verify', status: 'completed', conclusion: 'success' }];
+  const eligible = await status(providerFor({ headRef: 'preview', baseRef: 'main', defaultBranch: 'main', checks, workflowRuns }));
+  assert.equal(eligible.orchestration.state, 'promotion-ready');
+  assert.equal(eligible.orchestration.action, 'promotion-gate');
+  assert.equal(eligible.orchestration.shouldAct, true);
+  const missing = await status(providerFor({ headRef: 'preview', baseRef: 'main', defaultBranch: null, checks, workflowRuns }));
+  assert.equal(missing.orchestration.state, 'external-gate-pending');
+  assert.equal(missing.orchestration.action, 'wait');
+  assert.equal(missing.orchestration.shouldAct, false);
+  const wrong = await status(providerFor({ headRef: 'preview', baseRef: 'release', defaultBranch: 'main', checks, workflowRuns }));
+  assert.equal(wrong.orchestration.state, 'external-gate-pending');
+  assert.equal(wrong.orchestration.shouldAct, false);
 });
