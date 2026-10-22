@@ -1,4 +1,4 @@
-import { type PrEventService, PR_EVENT, CHECKPOINT_EVENT, prEventArguments, checkpointPublicationArguments, prEventBindingStatusSchema, prEventCatalog, eventOwner } from '../runtime/pr-events.js';
+import { type PrEventService, PR_EVENT, CHECKPOINT_EVENT, prEventArguments, checkpointPublicationArguments, prEventBindingStatusSchema, prEventExpiredBindingReleaseArguments, prEventCatalog, eventOwner } from '../runtime/pr-events.js';
 import { McpServer, ProtocolError } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { releaseIdentityFitsTransport, RELEASE_IDENTITY_MAX_BYTES } from '../runtime/release-identities.js';
@@ -288,6 +288,16 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       }, async (_input, extra) => {
         const status = await events.bindingStatus(extra.http?.authInfo);
         return { structuredContent: status, content: [{ type: 'text', text: JSON.stringify(status) }] };
+      });
+      if (events.delegatedBindingStatusEnabled) server.registerTool('events.binding.release_expired', {
+        title: 'Release an exact expired delegated event binding',
+        description: 'Explicit owner action. Requires confirm=true and the exact resource, event, phase and expiry observed by events.binding.status. Releases only when the stored binding is expired, its grant generation is obsolete, or its delegation approval is expired. Requires the current authenticated owner/client and a valid current grant. CAS rejects stale state. Preserves delivery and consumed-approval history; never releases a still-valid binding.',
+        inputSchema: prEventExpiredBindingReleaseArguments,
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+        _meta: { securitySchemes: oauthSecurity },
+      }, async (input, extra) => {
+        const result = await events.releaseExpiredBinding(extra.http?.authInfo, input);
+        return { structuredContent: result, content: [{ type: 'text', text: JSON.stringify(result) }] };
       });
     }
   }
