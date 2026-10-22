@@ -458,7 +458,7 @@ test('delegated binding status rejects foreign principal/client and reports unav
   await assert.rejects(f.bridge.bindingStatus({ ...auth, clientId: 'foreign-client' }), /not authorized/);
   await assert.rejects(f.bridge.bindingStatus({ ...auth, extra: { ...auth.extra, subject: 'foreign-subject' } }), /not authorized/);
   const raw = f.store.raw;
-  const unavailable = new PrEvents({ ...f.options, store: { async load() { throw new Error('private redis failure'); }, async save() { throw new Error('must not save'); } } });
+  const unavailable = new PrEvents({ ...f.options, store: { async load() { throw new Error('private redis failure'); }, async save() { throw new Error('must not save'); }, async releaseExpiredBinding() { throw new Error('must not release'); } } });
   const result = await unavailable.bindingStatus(auth);
   assert.equal(result.status, 'unavailable');
   assert.equal(result.configuredResource.repository, target.repository);
@@ -484,7 +484,7 @@ test('expired delegated binding release requires exact stale state and preserves
   assert.equal(status.status, 'expired');
   assert.equal(status.subscriptionGrantMatches, false);
   assert.equal(status.approvalValid, false);
-  const args = { resource: target, eventName: PR_EVENT, expectedPhase: 'active' as const,
+  const args = { resource: target, eventName: PR_EVENT as typeof PR_EVENT, expectedPhase: 'active' as const,
     expectedSubscriptionExpiresAt: old.expiresAt, expectedDelegationExpiresAt: f.mode.approval!.expiresAt, confirm: true as const };
   const released = await f.bridge.releaseExpiredBinding(freshAuth, args);
   assert.equal(released.released, true);
