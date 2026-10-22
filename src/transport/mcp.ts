@@ -291,7 +291,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
       });
       if (events.delegatedBindingStatusEnabled) server.registerTool('events.binding.release_expired', {
         title: 'Release an exact expired delegated event binding',
-        description: 'Explicit owner action. Requires confirm=true and the exact resource, event, phase and expiry observed by events.binding.status. Releases only when the stored binding is expired, its grant generation is obsolete, or its delegation approval is expired. Requires the current authenticated owner/client and a valid current grant. CAS rejects stale state. Preserves delivery and consumed-approval history; never releases a still-valid binding.',
+        description: 'Explicit destructive owner action. Requires confirm=true, a non-empty owner-approved: reference, the current authenticated owner/client with conductor.read and conductor.write under a valid current grant, and the exact resource, event, phase, subscription/delegation expiries and opaque guard from events.binding.status. Releases only when the subscription lease or delegation approval has actually expired; a grant-generation mismatch alone never permits release. CAS rejects stale state and preserves delivery/source and consumed-approval history while removing only the subscription and its baseline.',
         inputSchema: prEventExpiredBindingReleaseArguments,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         _meta: { securitySchemes: oauthWriteSecurity },

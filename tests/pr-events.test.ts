@@ -511,11 +511,12 @@ test('expired binding release refuses a still-valid binding and stale observed s
   f.advance(300001);
   const raced = await f.store.load();
   const replacement = structuredClone(raced.state.subscription!);
-  replacement.id = randomUUID();
+  replacement.binding!.id = randomUUID();
   raced.state.subscription = replacement;
   assert.equal(await f.store.save(raced.version, raced.state), true);
   await assert.rejects(f.bridge.releaseExpiredBinding(freshAuth, args), /Observed binding changed/);
-  assert.equal((await f.store.load()).state.subscription?.id, replacement.id);
+  assert.equal((await f.store.load()).state.subscription?.id, raced.state.subscription?.id);
+  assert.equal((await f.store.load()).state.subscription?.binding?.id, replacement.binding!.id);
 });
 
 test('delegated approved client binds and challenges in one request; absent approval does nothing', async () => {
