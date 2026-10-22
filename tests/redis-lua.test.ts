@@ -126,7 +126,7 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     assert.equal(await events.save(active.version, active.state), true);
     const observed = await events.load();
     await grants.revoke(owner, oldGrant.generation);
-    const currentGrant = await grants.consent(owner, ['conductor.read'], expiry());
+    const currentGrant = await grants.consent(owner, ['conductor.read', 'conductor.write'], expiry());
     const next = structuredClone(observed.state);
     delete next.subscription; delete next.baseline;
     assert.equal(await events.releaseExpiredBinding(observed.version, next, owner, currentGrant.generation,
@@ -139,6 +139,39 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     assert.equal(await redis.command(['GET', marker]), bindingId);
     assert.equal(await events.releaseExpiredBinding(observed.version, next, owner, currentGrant.generation,
       observed.state.subscription!.id, Date.now(), Date.now() - 1), false);
+  });
+
+
+  await t.test('expired binding release refuses a current-grant revocation between read and Lua commit', async () => {
+    const owner = identity('expired-release-race');
+    const oldGrant = await grants.consent(owner, ['conductor.read'], expiry());
+    const key = 'test:expired-release-race';
+    const events = new RedisPrEventStore(redis.client, key);
+    const approvalId = randomUUID();
+    const initial = state(owner, oldGrant.generation);
+    initial.subscription!.id = randomUUID();
+    initial.subscription!.binding = { id: randomUUID(), approvalId, phase: 'active',
+      fingerprint: createHash('sha256').update(owner.clientId).digest('hex'),
+      target: { repository: 'owner/repo', pullRequestNumber: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) } };
+    assert.equal(await events.save(null, initial), true);
+    const observed = await events.load();
+    await grants.revoke(owner, oldGrant.generation);
+    const currentGrant = await grants.consent(owner, ['conductor.read', 'conductor.write'], expiry());
+    const next = structuredClone(observed.state); delete next.subscription; delete next.baseline;
+    let revokedAtCommit = false;
+    redis.before(async args => {
+      if (revokedAtCommit || String(args[0]).toLowerCase() !== 'eval' || !String(args[1]).includes('local hasRead = false; local hasWrite = false')) return;
+      revokedAtCommit = true;
+      redis.before();
+      await grants.revoke(owner, currentGrant.generation);
+    });
+    try {
+      assert.equal(await events.releaseExpiredBinding(observed.version, next, owner, currentGrant.generation,
+        observed.state.subscription!.id, Date.now(), Date.now() - 1), false);
+    } finally { redis.before(); }
+    assert.equal(revokedAtCommit, true);
+    const after = await events.load();
+    assert.equal(after.state.subscription?.id, observed.state.subscription!.id);
   });
 
   await t.test('stale event-state CAS cannot overwrite a newer active state', async () => {
