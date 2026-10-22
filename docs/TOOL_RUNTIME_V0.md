@@ -230,6 +230,14 @@ The payload is a bounded `agent.work_result` envelope with a stable checkpoint I
 The configured event service has one subscription slot; switching between PR verification and checkpoint events requires the normal exact unsubscribe and a separately approved new subscription. This code change does not create or activate any live subscription or grant.
 
 
+## Checkpoint terminal-state persistence qualification
+
+A returned checkpoint result describes the operation's observed outcome; it is not by itself proof that the same terminal status was durably stored. In particular, after revocation the Redis store rejects a snapshot that retains the revoked subscription. If `setCheckpointTerminal(..., 'blocked')` cannot save that snapshot, the API can return `blocked` while the previously persisted delivery row remains `pending` with its already-claimed `attempts = 1` and lease metadata. Do not describe this as a durably persisted `blocked` row unless a subsequent store read confirms it.
+
+That mismatch does not authorize retry. The claimed attempt remains a no-replay fence: while its lease is live, duplicate publication returns `pending`; after lease expiry, the existing-attempt path tries to mark the record `uncertain` and does not dispatch the callback again. If that terminal-state write is also rejected, the row may remain stale/pending, but the old revoked grant is never restored and the claimed delivery is never automatically replayed. A fresh grant must not inherit or reactivate the old subscription or delivery authority. The response/status and durable row are separate evidence and should be reported separately.
+
+The final-read regression uses the permissive SnapshotStore, which accepts the terminal save. It proves revocation is detected after the attempt claim and no callback is dispatched; it does **not** prove Redis durably persists `blocked` under revoked authority. A production Redis test would need to assert the refusal and subsequent stored row/status separately. This remains a persistence-observability limitation, not evidence of post-reauthorization execution. The network-start race remains unavoidable: an already-started request cannot be recalled.
+ 
 ## Checkpoint review corrections (PR #317)
 
 - Delegated subscriptions now derive their ID using the selected event name throughout creation, activation checks and unsubscribe; the event name is persisted with the subscription.
