@@ -518,10 +518,13 @@ export class PrEvents {
     throw new Error('Subscription changed; retry unsubscribe');
   }
 
-  private async setCheckpointTerminal(eventId: string, subscriptionId: string, status: 'uncertain' | 'superseded' | 'blocked' | 'stopped'): Promise<boolean> {
+  private async setCheckpointTerminal(eventId: string, expected: Subscription, status: 'uncertain' | 'superseded' | 'blocked' | 'stopped'): Promise<boolean> {
     for (let i=0;i<3;i++) { const l=await this.options.store.load(); const d=l.state.deliveries.find(x=>x.id===eventId);
       if(!d)return false; if(d.status!=='pending'&&d.status!=='failed')return d.status===status;
-      if(l.state.subscription?.id!==subscriptionId)return false; d.status=status; d.leaseUntil=0;
+      const current=l.state.subscription;
+      if(!current||current.id!==expected.id||current.generation!==expected.generation||
+        current.binding?.id!==expected.binding?.id||current.binding?.approvalId!==expected.binding?.approvalId)return false;
+      d.status=status; d.leaseUntil=0;
       // A blocked claimed attempt must remain durable even when its revoked grant
       // forbids saving the old subscription. Never restore delivery authority.
       if(status==='blocked'){delete l.state.subscription;delete l.state.baseline;}
@@ -539,7 +542,7 @@ export class PrEvents {
       if(existing.fingerprint!==fingerprint)throw new ProtocolError(-32000,'Checkpoint identity reused with different content',{reason:'checkpoint_identity_conflict'});
       if(existing.status==='accepted')return {checkpointId:v.checkpointId,status:'duplicate' as const};
       if(['uncertain','superseded','blocked','stopped'].includes(existing.status))return {checkpointId:v.checkpointId,status:existing.status};
-      if(existing.attempts>0){if((existing.leaseUntil??0)>this.now())return {checkpointId:v.checkpointId,status:'pending' as const};await this.setCheckpointTerminal(existing.id,sub.id,'uncertain');return {checkpointId:v.checkpointId,status:'uncertain' as const};}
+      if(existing.attempts>0){if((existing.leaseUntil??0)>this.now())return {checkpointId:v.checkpointId,status:'pending' as const};await this.setCheckpointTerminal(existing.id,sub,'uncertain');return {checkpointId:v.checkpointId,status:'uncertain' as const};}
       return {checkpointId:v.checkpointId,status:await this.deliverCheckpoint(sub,existing.id)};
     }
     const current=this.evidence(await this.read(owner,generation,v.resource));await this.checkSubscription(sub);
@@ -554,15 +557,15 @@ export class PrEvents {
     const loaded=await this.options.store.load(),active=loaded.state.subscription,record=loaded.state.deliveries.find(d=>d.id===eventId);
     if(!active||active.id!==sub.id||active.generation!==sub.generation||(active.eventName??PR_EVENT)!==CHECKPOINT_EVENT||!record)return 'inactive';
     if(['accepted','stopped','uncertain','superseded','blocked'].includes(record.status)||record.attempts>0)return record.status;
-    try{await this.checkSubscription(active);if(hash(this.evidence(await this.read(active.owner,active.generation)))!==record.resourceFingerprint){await this.setCheckpointTerminal(eventId,active.id,'superseded');return 'superseded';}}
-    catch{await this.setCheckpointTerminal(eventId,active.id,'blocked');return 'blocked';}
+    try{await this.checkSubscription(active);if(hash(this.evidence(await this.read(active.owner,active.generation)))!==record.resourceFingerprint){await this.setCheckpointTerminal(eventId,active,'superseded');return 'superseded';}}
+    catch{await this.setCheckpointTerminal(eventId,active,'blocked');return 'blocked';}
     record.attempts=1;record.leaseUntil=this.now()+30000;
     if(!await this.options.store.save(loaded.version,loaded.state))return 'pending';
     const claimed=await this.options.store.load();if(claimed.version!==JSON.stringify(loaded.state))return 'pending';
     const cr=claimed.state.deliveries.find(d=>d.id===eventId),cs=claimed.state.subscription;
     if(!cr||!cs||cs.id!==active.id||cs.generation!==active.generation||cs.expiresAt<=this.now())return 'pending';
-    try{await this.checkSubscription(cs);const finalEvidence=this.evidence(await this.read(cs.owner,cs.generation));await this.checkSubscription(cs);if(hash(finalEvidence)!==cr.resourceFingerprint){await this.setCheckpointTerminal(eventId,active.id,'superseded');return 'superseded';}}
-    catch{await this.setCheckpointTerminal(eventId,active.id,'blocked');return 'blocked';}
+    try{await this.checkSubscription(cs);const finalEvidence=this.evidence(await this.read(cs.owner,cs.generation));await this.checkSubscription(cs);if(hash(finalEvidence)!==cr.resourceFingerprint){await this.setCheckpointTerminal(eventId,active,'superseded');return 'superseded';}}
+    catch{await this.setCheckpointTerminal(eventId,active,'blocked');return 'blocked';}
     let status:number|undefined;
     try{status=(await signedCallback(this.options.post,{id:cs.id,url:cs.url,secret:this.options.vault.open(cs.secret).plaintext,...(cs.previousSecret&&(cs.rotationUntil??0)>this.now()?{previousSecret:this.options.vault.open(cs.previousSecret).plaintext}:{})},cr.id,cr.body)).status;}
     catch{/* Ambiguous callback outcome is never replayed automatically. */}

@@ -996,6 +996,47 @@ test('grant revoked during initial checkpoint provider read prevents enqueue', a
   assert.equal((await f.store.load()).state.deliveries.some(d => d.source.endsWith(':checkpoint-revoked-final-read-0001')), false);
 });
 
+test('fresh-generation replacement during old claimed checkpoint read preserves the replacement subscription', async () => {
+  const f = fixture();
+  await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
+  const first = (await f.store.load()).state.subscription!;
+  const initialBaseline = (await f.store.load()).state.baseline;
+  const newGeneration = '2:00000000-0000-4000-8000-000000000002';
+  const originalRead = f.options.source.read;
+  let replaced = false;
+  f.options.source.read = async (...args) => {
+    const snapshot = await originalRead(...args);
+    const observed = await f.store.load();
+    const claimed = observed.state.deliveries.find(d => d.source.endsWith(':checkpoint-generation-replacement-0001'));
+    if (claimed?.attempts === 1 && !replaced) {
+      replaced = true;
+      f.grantRedis.seed(owner, newGeneration, 1800003600000);
+      const next = structuredClone(observed.state);
+      next.subscription!.generation = newGeneration;
+      assert.equal(next.subscription!.id, first.id);
+      assert.equal(await f.store.save(observed.version, next), true);
+    }
+    return snapshot;
+  };
+  const callbacksBefore = f.posts.length;
+  const result = await f.bridge.publishCheckpoint(auth, {
+    resource: target,
+    source: { conversationUrl: 'https://chatgpt.com/local/conversation-generation-replacement', conversationId: null, replyId: null, replyState: 'unavailable' as const },
+    checkpointId: 'checkpoint-generation-replacement-0001',
+    summary: 'Old claimed attempt must not delete a new valid generation.', evidence: [], pending: [],
+  });
+  assert.equal(result.status, 'blocked');
+  assert.equal(replaced, true);
+  assert.equal(f.posts.length, callbacksBefore);
+  const persisted = (await f.store.load()).state;
+  assert.equal(persisted.subscription?.id, first.id);
+  assert.equal(persisted.subscription?.generation, newGeneration);
+  assert.equal(persisted.baseline, initialBaseline);
+  const claimed = persisted.deliveries.find(d => d.source.endsWith(':checkpoint-generation-replacement-0001'));
+  assert.equal(claimed?.attempts, 1);
+  assert.equal(claimed?.status, 'pending');
+});
+
 test('grant revoked during final claimed checkpoint provider read marks blocked and suppresses callback', async () => {
   const f = fixture();
   await f.bridge.subscribe(auth, target, delivery, undefined, CHECKPOINT_EVENT);
