@@ -5,7 +5,7 @@ import * as z from 'zod/v4';
 import { clientFingerprint } from '../transport/work-scope.js';
 import { requireOAuthGrant, type OAuthGrantStore } from '../transport/oauth-grant-store.js';
 import { callbackUrl, signingKey, verifyCallback, signedCallback, type CallbackPost } from '../transport/event-callback.js';
-import { RedisPrEventStore, prEventArguments, prEventIntegrationBranch, eventOwner, type EventOwner, type PrEventState, type PrEventSnapshot } from './pr-events.js';
+import { RedisPrEventStore, prEventArguments, prEventIntegrationBranch, prReviewEvidence, eventOwner, type EventOwner, type PrEventState, type PrEventSnapshot } from './pr-events.js';
 import type { VersionedProviderCredentialVault } from '../connections/universal/credential-vault.js';
 
 export const PROJECT_EVENT = 'project.pull_request_changed';
@@ -30,6 +30,7 @@ export function projectEventCatalog() {
       repository:{type:'string'}, integrationBranch:{type:'string'}, pullRequestNumber:{type:'integer'},
       headSha:{type:'string'}, baseSha:{type:'string'}, state:{type:'string'}, draft:{type:'boolean'},
       merged:{type:'boolean'}, checks:{type:'object'}, url:{type:'string'},
+      reviews:z.toJSONSchema(prReviewEvidence),
     }, required:['repository','integrationBranch','pullRequestNumber','headSha','baseSha','state','draft','merged','checks','url'],
       additionalProperties:false },
   }] };
@@ -247,6 +248,7 @@ export class ProjectEvents {
       if(!row||(latest.state as State).projectPhase!=='active'||latest.state.subscription?.id!==sub.id||latest.state.subscription.generation!==sub.generation)return 'uncertain';
       if(row.status!=='pending')return row.status;
       row.status=terminal;row.leaseUntil=0;
+      if(status===410){delete latest.state.subscription;delete (latest.state as State).projectPhase;}
       if(await store.save(latest.version,latest.state))return terminal;
     }
     return 'uncertain';

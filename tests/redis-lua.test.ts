@@ -6,7 +6,9 @@ import { RedisOAuthGrantStore, GRANT_TRANSITION_SCRIPT, oauthGrantKey, requireOA
 import { VersionedProviderCredentialVault } from '../src/connections/universal/credential-vault.js';
 import type { PullRequestStatus } from '../src/runtime/types.js';
 import { PrEvents, RedisPrEventStore, type PrEventState } from '../src/runtime/pr-events.js';
-import { ProjectEvents, PROJECT_EVENT } from '../src/runtime/project-events.js';
+import { ProjectEvents, PROJECT_EVENT, projectEventCatalog } from '../src/runtime/project-events.js';
+import { prReviewEvidence } from '../src/runtime/pr-events.js';
+import * as z from 'zod/v4';
 
 function deferred() {
   let resolve!: () => void;
@@ -35,21 +37,22 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     ];
     const fingerprint=createHash('sha256').update(me.clientId).digest('hex');
     const postBodies:string[]=[];
-    let localNow=Date.now();
+    let localNow=Date.now(), callbackGone=false, currentSuccessful=1;
     const events=new ProjectEvents({relationships,owner:{issuer:me.issuer,subject:me.subject},
       clientFingerprint:fingerprint,redis:redis.client,grants,
       vault:new VersionedProviderCredentialVault({legacyPurpose:'project-test',currentKey:'local-only-vault-key'.repeat(3)}),
       webhookSecret:'test-project-secret'.repeat(3),now:()=>localNow,
       validateRecipient:async()=>{},
       post:async(_url,body)=>{postBodies.push(body);
-        const v=JSON.parse(body);return {status:v.type==='verification'?200:204,
+        const v=JSON.parse(body);return {status:v.type==='verification'?200:callbackGone?410:204,
           body:v.type==='verification'?JSON.stringify({challenge:v.challenge}):''};},
       source:{async read(_owner,rel,number){
         return {repository:rel.repository,pullRequestNumber:number,
           head:{ref:'work/feature',sha:'a'.repeat(40)},
           base:{ref:rel.integrationBranch,sha:'b'.repeat(40)},
           state:'open',merged:false,draft:false,
-          checks:{total:1,pending:0,successful:1,failed:0,neutral:0,skipped:0,items:[]},
+          checks:{total:1,pending:0,successful:currentSuccessful,failed:0,neutral:0,skipped:0,items:[]},
+          reviews:{complete:true,reason:'complete',revision:'f'.repeat(64),effectiveDecisions:[],currentHeadApprovals:0,latestActivity:[],comments:[]},
           workflowRuns:[]} as unknown as PullRequestStatus;
       }}
     });
@@ -82,13 +85,24 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     assert.equal(await send(0,'first'),'accepted');
     assert.equal(await send(0,'first'),'duplicate');
     assert.equal(await send(1,'first'),'accepted');
+    const schema=projectEventCatalog().events[0].payloadSchema;
+    assert.deepEqual(schema.properties.reviews,z.toJSONSchema(prReviewEvidence));
+    const application=postBodies.filter(body=>JSON.parse(body).type!=='verification').map(body=>JSON.parse(body));
+    assert.equal(application.length,2);
+    assert.equal(application[0].data.reviews.complete,true);
+    // HTTP 410 cancels only the matching repository subscription, never its sibling relationship.
+    callbackGone=true;currentSuccessful=2;
+    assert.equal(await send(1,'receiver-gone'),'stopped');
+    assert.equal(await send(1,'after-gone'),'inactive');
+    callbackGone=false;
+    assert.equal(await send(0,'other-still-live'),'accepted');
     await events.revoke(auth,args[0],relationships[0].id,'owner-approved:revoke-one-relationship');
     assert.equal(await send(0,'after-revoke'),'blocked');
-    assert.equal(await send(1,'after-revoke'),'unchanged');
+    assert.equal(await send(1,'after-revoke'),'inactive');
     await redis.command(['DEL','conductor:preview:project-events:authority:'+relationships[1].id]);
     assert.equal(await send(1,'after-key-loss'),'blocked');
     await assert.rejects(events.subscribe(auth,args[1],delivery),/Relationship not active/);
-    assert.equal(postBodies.filter(s=>JSON.parse(s).type!=='verification').length,2);
+    assert.equal(postBodies.filter(s=>JSON.parse(s).type!=='verification').length,4);
   });
 
   await t.test('concurrent consent and revoke fence both commit orderings', async () => {
