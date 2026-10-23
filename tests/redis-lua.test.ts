@@ -126,6 +126,9 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     await events.revoke(auth,args[0],relationships[0].id,'owner-approved:revoke-one-relationship');
     assert.equal(await send(0,'after-revoke'),'blocked');
     assert.equal(await send(1,'after-revoke'),'inactive');
+    // HTTP 410 stopped only this lease; an explicit new subscribe is needed
+    // before loss of its relationship key can prove delivery is fenced.
+    await events.subscribe(auth,args[1],delivery,10000);
     await redis.command(['DEL','conductor:preview:project-events:authority:'+relationships[1].id]);
     assert.equal(await send(1,'after-key-loss'),'blocked');
     await assert.rejects(events.subscribe(auth,args[1],delivery),/Relationship not active/);
