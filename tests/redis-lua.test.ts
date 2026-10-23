@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { disposableRedis } from './helpers/disposable-redis.js';
 import { RedisOAuthGrantStore, GRANT_TRANSITION_SCRIPT, oauthGrantKey, requireOAuthGrant } from '../src/transport/oauth-grant-store.js';
 import { VersionedProviderCredentialVault } from '../src/connections/universal/credential-vault.js';
@@ -64,7 +64,6 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     const renewed=await events.subscribe(auth,args[0],delivery,2000);
     assert.equal(renewed.id,first.id);
     assert.ok(Date.parse(renewed.refreshBefore)>Date.parse(first.refreshBefore));
-    const sign=(body:Buffer)=>'sha256='+createHash('sha256').update('unused').digest('hex');
     const send=async(i:number,deliveryId:string)=>{
       const data=Buffer.from(JSON.stringify({action:'opened',repository:{full_name:relationships[i].repository},
         installation:{id:relationships[i].installationId},pull_request:{number:7,head:{sha:'a'.repeat(40)},
