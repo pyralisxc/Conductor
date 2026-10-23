@@ -58,12 +58,13 @@ export class ProjectEvents {
     return rel;
   }
   private key(rel:ProjectRelationship) {return 'conductor:preview:project-events:authority:'+rel.id;}
+  private marker(rel:ProjectRelationship) {return 'active:'+hash([rel.id,rel.repository,rel.integrationBranch,rel.installationId,rel.expiresAt,this.options.owner,this.options.clientFingerprint]);}
   private store(rel:ProjectRelationship) {
     return new RedisPrEventStore(this.options.redis,'conductor:preview:project-events:v1:'+
       hash([rel.id,rel.repository,rel.integrationBranch,this.options.clientFingerprint,PROJECT_EVENT]));
   }
   private async authorizedRelationship(rel:ProjectRelationship) {
-    if(rel.expiresAt<=this.now()||(await this.options.redis.get(this.key(rel)))!=='active')throw new Error('Relationship not active');
+    if(rel.expiresAt<=this.now()||(await this.options.redis.get(this.key(rel)))!==this.marker(rel))throw new Error('Relationship not active');
   }
   private async principal(auth:AuthInfo|undefined) {
     const owner=eventOwner(auth);
@@ -117,8 +118,8 @@ export class ProjectEvents {
       throw new Error('Exact relationship approval required');
     await requireOAuthGrant(this.options.grants,owner,generation,['conductor.read','conductor.write'],this.now);
     const created=await this.options.redis.eval(
-      "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end; redis.call('SET',KEYS[1],'active'); return 1",
-      [this.key(rel)],[]);
+      "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end; redis.call('SET',KEYS[1],ARGV[1]); return 1",
+      [this.key(rel)],[this.marker(rel)]);
     if(Number(created)!==1)throw new Error('Relationship already established or revoked');
     return {active:true,relationshipId:rel.id,repository:rel.repository,integrationBranch:rel.integrationBranch};
   }
@@ -128,8 +129,8 @@ export class ProjectEvents {
     if(id!==rel.id||!/^owner-approved:\S/.test(approvalReference))throw new Error('Exact relationship approval required');
     await requireOAuthGrant(this.options.grants,owner,generation,['conductor.read','conductor.write'],this.now);
     const result=await this.options.redis.eval(
-      "if redis.call('GET',KEYS[1])~='active' then return 0 end;redis.call('SET',KEYS[1],'revoked');return 1",
-      [this.key(rel)],[]);
+      "if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end;redis.call('SET',KEYS[1],'revoked');return 1",
+      [this.key(rel)],[this.marker(rel)]);
     if(Number(result)!==1)throw new Error('Relationship not active or concurrent change');
     return {revoked:true,relationshipId:rel.id,repository:rel.repository,integrationBranch:rel.integrationBranch};
   }

@@ -6,6 +6,7 @@ import { RedisOAuthGrantStore, GRANT_TRANSITION_SCRIPT, oauthGrantKey, requireOA
 import { VersionedProviderCredentialVault } from '../src/connections/universal/credential-vault.js';
 import type { PullRequestStatus } from '../src/runtime/types.js';
 import { PrEvents, RedisPrEventStore, type PrEventState } from '../src/runtime/pr-events.js';
+import { ProjectEvents, PROJECT_EVENT } from '../src/runtime/project-events.js';
 
 function deferred() {
   let resolve!: () => void;
@@ -21,6 +22,67 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
   const state = (owner: ReturnType<typeof identity>, generation: string): PrEventState => ({ deliveries: [], subscription: {
     id: 'test-subscription', owner, generation, url: 'https://unused.example/callback', secret: 'unused', expiresAt: expiry(), verifiedUntil: expiry(),
   } });
+
+
+  await t.test('project relationships remain isolated; leases renew and scoped revocation/key loss fail closed', async () => {
+    const me=identity('project-relations');
+    const grant=await grants.consent(me,['conductor.read','conductor.write'],expiry());
+    const auth={token:'local',clientId:me.clientId,scopes:['conductor.read','conductor.write'],
+      extra:{issuer:me.issuer,subject:me.subject,grantGeneration:grant.generation}};
+    const relationships=[
+      {id:randomUUID(),repository:'one/repo',integrationBranch:'preview' as const,installationId:101,expiresAt:expiry()},
+      {id:randomUUID(),repository:'two/repo',integrationBranch:'vercel-preview' as const,installationId:102,expiresAt:expiry()},
+    ];
+    const fingerprint=createHash('sha256').update(me.clientId).digest('hex');
+    const postBodies:string[]=[];
+    let localNow=Date.now();
+    const events=new ProjectEvents({relationships,owner:{issuer:me.issuer,subject:me.subject},
+      clientFingerprint:fingerprint,redis:redis.client,grants,
+      vault:new VersionedProviderCredentialVault({legacyPurpose:'project-test',currentKey:'local-only-vault-key'.repeat(3)}),
+      webhookSecret:'test-project-secret'.repeat(3),now:()=>localNow,
+      validateRecipient:async()=>{},
+      post:async(_url,body)=>{postBodies.push(body);
+        const v=JSON.parse(body);return {status:v.type==='verification'?200:204,
+          body:v.type==='verification'?JSON.stringify({challenge:v.challenge}):''};},
+      source:{async read(_owner,rel,number){
+        return {repository:rel.repository,pullRequestNumber:number,
+          head:{ref:'work/feature',sha:'a'.repeat(40)},
+          base:{ref:rel.integrationBranch,sha:'b'.repeat(40)},
+          state:'open',merged:false,draft:false,
+          checks:{total:1,pending:0,successful:1,failed:0,neutral:0,skipped:0,items:[]},
+          workflowRuns:[]} as unknown as PullRequestStatus;
+      }}
+    });
+    const args=relationships.map(({repository,integrationBranch})=>({repository,integrationBranch}));
+    const delivery={url:'https://receiver.example/callback',secret:'whsec_'+Buffer.alloc(32,7).toString('base64')};
+    await assert.rejects(events.subscribe(auth,args[0],delivery),/Relationship not active/);
+    for(let i=0;i<2;i++)await events.enable(auth,args[i],relationships[i].id,'owner-approved:existing-owner-decision');
+    const first=await events.subscribe(auth,args[0],delivery,1000);
+    const second=await events.subscribe(auth,args[1],delivery,1000);
+    assert.notEqual(first.id,second.id);
+    localNow+=200;
+    const renewed=await events.subscribe(auth,args[0],delivery,2000);
+    assert.equal(renewed.id,first.id);
+    assert.ok(Date.parse(renewed.refreshBefore)>Date.parse(first.refreshBefore));
+    const sign=(body:Buffer)=>'sha256='+createHash('sha256').update('unused').digest('hex');
+    const send=async(i:number,deliveryId:string)=>{
+      const data=Buffer.from(JSON.stringify({action:'opened',repository:{full_name:relationships[i].repository},
+        installation:{id:relationships[i].installationId},pull_request:{number:7,head:{sha:'a'.repeat(40)},
+          base:{ref:relationships[i].integrationBranch,sha:'b'.repeat(40)}}}));
+      const signature='sha256='+createHmac('sha256','test-project-secret'.repeat(3)).update(data).digest('hex');
+      return events.ingest(data,'pull_request',deliveryId,signature);
+    };
+    assert.equal(await send(0,'first'),'accepted');
+    assert.equal(await send(0,'first'),'duplicate');
+    assert.equal(await send(1,'first'),'accepted');
+    await events.revoke(auth,args[0],relationships[0].id,'owner-approved:revoke-one-relationship');
+    assert.equal(await send(0,'after-revoke'),'blocked');
+    assert.equal(await send(1,'after-revoke'),'unchanged');
+    await redis.command(['DEL','conductor:preview:project-events:authority:'+relationships[1].id]);
+    assert.equal(await send(1,'after-key-loss'),'blocked');
+    await assert.rejects(events.subscribe(auth,args[1],delivery),/Relationship not active/);
+    assert.equal(postBodies.filter(s=>JSON.parse(s).type!=='verification').length,2);
+  });
 
   await t.test('concurrent consent and revoke fence both commit orderings', async () => {
     for (const heldStatus of ['active', 'revoked']) {
