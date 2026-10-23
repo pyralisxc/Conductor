@@ -522,6 +522,9 @@ export class PrEvents {
     for (let i=0;i<3;i++) { const l=await this.options.store.load(); const d=l.state.deliveries.find(x=>x.id===eventId);
       if(!d)return false; if(d.status!=='pending'&&d.status!=='failed')return d.status===status;
       if(l.state.subscription?.id!==subscriptionId)return false; d.status=status; d.leaseUntil=0;
+      // A blocked claimed attempt must remain durable even when its revoked grant
+      // forbids saving the old subscription. Never restore delivery authority.
+      if(status==='blocked'){delete l.state.subscription;delete l.state.baseline;}
       if(await this.options.store.save(l.version,l.state))return true;
     } return false;
   }

@@ -1024,4 +1024,6 @@ test('grant revoked during final claimed checkpoint provider read marks blocked 
   assert.equal(f.posts.length, callbacksBefore);
   const state = (await f.store.load()).state;
   assert.equal(state.deliveries.find(d => d.source.endsWith(':checkpoint-revoked-final-claim-0001'))?.status, 'blocked');
+  assert.equal(state.subscription, undefined);
+  assert.equal(state.baseline, undefined);
 });
