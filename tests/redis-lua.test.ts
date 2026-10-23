@@ -102,6 +102,26 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
   });
 
 
+  await t.test('blocked claimed checkpoint persists without restoring a revoked subscription', async () => {
+    const owner = identity('checkpoint-blocked'); const grant = await grants.consent(owner, ['conductor.read'], expiry());
+    const events = new RedisPrEventStore(redis.client, 'test:checkpoint-blocked');
+    const active = state(owner, grant.generation); active.baseline = 'previous-baseline';
+    active.deliveries.push({ id: 'claimed-checkpoint', source: 'checkpoint:claimed', fingerprint: 'a'.repeat(64),
+      body: '{}', createdAt: Date.now(), attempts: 1, leaseUntil: Date.now() + 30000, status: 'pending' });
+    assert.equal(await events.save(null, active), true);
+    const observed = await events.load(); await grants.revoke(owner, grant.generation);
+    const stillBound = structuredClone(observed.state);
+    stillBound.deliveries[0].status = 'blocked'; stillBound.deliveries[0].leaseUntil = 0;
+    assert.equal(await events.save(observed.version, stillBound), false);
+    delete stillBound.subscription; delete stillBound.baseline;
+    assert.equal(await events.save(observed.version, stillBound), true);
+    const persisted = (await events.load()).state;
+    assert.equal(persisted.subscription, undefined); assert.equal(persisted.baseline, undefined);
+    assert.equal(persisted.deliveries[0].status, 'blocked');
+    assert.equal(persisted.deliveries[0].attempts, 1); assert.equal(persisted.deliveries[0].leaseUntil, 0);
+    assert.equal(await events.save(observed.version, observed.state), false);
+  });
+
   await t.test('expired binding release atomically checks current grant/CAS and preserves consumed approval/history', async () => {
     const owner = identity('expired-release');
     const oldGrant = await grants.consent(owner, ['conductor.read'], expiry());
