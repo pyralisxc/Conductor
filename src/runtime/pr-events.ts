@@ -114,7 +114,7 @@ export function prEventCatalog() {
     }
   ] };
 }
-export type PrEventService = PrEvents | 'discovery-only';
+export type PrEventService = PrEvents | import('./project-events.js').ProjectEvents | 'discovery-only';
 export interface PrEventSource {
   /** Revalidate principal/resource authority and current installation access on every call. */
   read(owner: EventOwner, target: PrEventArguments, generation: string): Promise<PrEventSnapshot>;

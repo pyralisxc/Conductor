@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { disposableRedis } from './helpers/disposable-redis.js';
 import { RedisOAuthGrantStore, GRANT_TRANSITION_SCRIPT, oauthGrantKey, requireOAuthGrant } from '../src/transport/oauth-grant-store.js';
 import { VersionedProviderCredentialVault } from '../src/connections/universal/credential-vault.js';
 import type { PullRequestStatus } from '../src/runtime/types.js';
 import { PrEvents, RedisPrEventStore, type PrEventState } from '../src/runtime/pr-events.js';
+import { ProjectEvents, PROJECT_EVENT, projectEventCatalog } from '../src/runtime/project-events.js';
+import { prReviewEvidence } from '../src/runtime/pr-events.js';
+import * as z from 'zod/v4';
 
 function deferred() {
   let resolve!: () => void;
@@ -21,6 +24,146 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
   const state = (owner: ReturnType<typeof identity>, generation: string): PrEventState => ({ deliveries: [], subscription: {
     id: 'test-subscription', owner, generation, url: 'https://unused.example/callback', secret: 'unused', expiresAt: expiry(), verifiedUntil: expiry(),
   } });
+
+
+  await t.test('project relationships remain isolated; leases renew and scoped revocation/key loss fail closed', async () => {
+    const me=identity('project-relations');
+    const grant=await grants.consent(me,['conductor.read','conductor.write'],expiry());
+    const auth={token:'local',clientId:me.clientId,scopes:['conductor.read','conductor.write'],
+      extra:{issuer:me.issuer,subject:me.subject,grantGeneration:grant.generation}};
+    const relationships=[
+      {id:randomUUID(),repository:'one/repo',integrationBranch:'preview' as const,installationId:101,expiresAt:expiry()},
+      {id:randomUUID(),repository:'two/repo',integrationBranch:'vercel-preview' as const,installationId:102,expiresAt:expiry()},
+    ];
+    const fingerprint=createHash('sha256').update(me.clientId).digest('hex');
+    const postBodies:string[]=[];
+    let localNow=Date.now(), callbackGone=false, currentSuccessful=1;
+    const events=new ProjectEvents({relationships,owner:{issuer:me.issuer,subject:me.subject},
+      clientFingerprint:fingerprint,redis:redis.client,grants,
+      vault:new VersionedProviderCredentialVault({legacyPurpose:'project-test',currentKey:'local-only-vault-key'.repeat(3)}),
+      webhookSecret:'test-project-secret'.repeat(3),now:()=>localNow,
+      validateRecipient:async()=>{},
+      post:async(_url,body)=>{postBodies.push(body);
+        const v=JSON.parse(body);return {status:v.type==='verification'?200:callbackGone?410:204,
+          body:v.type==='verification'?JSON.stringify({challenge:v.challenge}):''};},
+      source:{async read(_owner,rel,number){
+        return {repository:rel.repository,pullRequestNumber:number,
+          head:{ref:'work/feature',sha:'a'.repeat(40)},
+          base:{ref:rel.integrationBranch,sha:'b'.repeat(40)},
+          state:'open',merged:false,draft:false,
+          checks:{total:1,pending:0,successful:currentSuccessful,failed:0,neutral:0,skipped:0,items:[]},
+          reviews:{complete:true,reason:'complete',revision:'f'.repeat(64),effectiveDecisions:[],currentHeadApprovals:0,latestActivity:[],comments:[]},
+          workflowRuns:[]} as unknown as PullRequestStatus;
+      }}
+    });
+    const args=relationships.map(({repository,integrationBranch})=>({repository,integrationBranch}));
+    const delivery={url:'https://receiver.example/callback',secret:'whsec_'+Buffer.alloc(32,7).toString('base64')};
+    await assert.rejects(events.subscribe(auth,args[0],delivery),/Relationship not active/);
+    for(let i=0;i<2;i++)await events.enable(auth,args[i],relationships[i].id,'owner-approved:existing-owner-decision');
+    const challengedBefore=postBodies.length;
+    const racing=await Promise.allSettled([
+      events.subscribe(auth,args[0],delivery,10000),
+      events.subscribe(auth,args[0],delivery,10000),
+    ]);
+    assert.equal(racing.filter(r=>r.status==='fulfilled').length,1);
+    assert.equal(postBodies.slice(challengedBefore).filter(s=>JSON.parse(s).type==='verification').length,1);
+    const winner=racing.find(r=>r.status==='fulfilled') as PromiseFulfilledResult<Awaited<ReturnType<typeof events.subscribe>>>;
+    const first=winner.value;
+    const second=await events.subscribe(auth,args[1],delivery,10000);
+    assert.notEqual(first.id,second.id);
+    localNow+=200;
+    const renewed=await events.subscribe(auth,args[0],delivery,20000);
+    assert.equal(renewed.id,first.id);
+    assert.ok(Date.parse(renewed.refreshBefore)>Date.parse(first.refreshBefore));
+    const send=async(i:number,deliveryId:string,number=7)=>{
+      const data=Buffer.from(JSON.stringify({action:'opened',repository:{full_name:relationships[i].repository},
+        installation:{id:relationships[i].installationId},pull_request:{number,head:{sha:'a'.repeat(40)},
+          base:{ref:relationships[i].integrationBranch,sha:'b'.repeat(40)}}}));
+      const signature='sha256='+createHmac('sha256','test-project-secret'.repeat(3)).update(data).digest('hex');
+      return events.ingest(data,'pull_request',deliveryId,signature);
+    };
+    assert.equal(await send(0,'first'),'accepted');
+    // Recovery from a durable zero-attempt row after renewal/claim CAS contention.
+    // Seed only an unattempted record; an actually attempted callback must never replay.
+    const eventKey='conductor:preview:project-events:v1:'+createHash('sha256')
+      .update(JSON.stringify([relationships[0].id,relationships[0].repository,
+        relationships[0].integrationBranch,fingerprint,PROJECT_EVENT])).digest('hex');
+    const durable=new RedisPrEventStore(redis.client,eventKey);
+    const template=JSON.parse(postBodies.find(s=>JSON.parse(s).type!=='verification')!).data;
+    const seedPending=async(number:number,deliveryId:string)=>{
+      const observed=await durable.load();
+      const state=observed.state as PrEventState & {baselines?:Record<string,string>};
+      const data={...template,pullRequestNumber:number,
+        url:'https://github.com/one/repo/pull/'+number};
+      const digest=createHash('sha256').update(JSON.stringify(data)).digest('hex');
+      const source='one/repo:'+deliveryId+':'+number, id='evt_seed_'+randomUUID();
+      state.baselines={...state.baselines,[String(number)]:digest};
+      state.sources=[...(state.sources??[]),{id:source,observedAt:localNow}];
+      state.deliveries.push({id,source,fingerprint:digest,createdAt:localNow,attempts:0,
+        status:'pending',body:JSON.stringify({eventId:id,name:PROJECT_EVENT,
+          timestamp:new Date(localNow).toISOString(),data,cursor:null})});
+      assert.equal(await durable.save(observed.version,state),true);
+    };
+    await seedPending(8,'zero-claim');
+    assert.equal(await send(0,'zero-claim',8),'accepted');
+    assert.equal(await send(0,'zero-claim',8),'duplicate');
+    await seedPending(9,'original-hint');
+    assert.equal(await send(0,'equivalent-fresh-hint',9),'accepted');
+    assert.equal(await send(0,'original-hint',9),'duplicate');
+    assert.equal(await send(0,'first'),'duplicate');
+    assert.equal(await send(1,'first'),'accepted');
+    const schema=projectEventCatalog().events[0].payloadSchema;
+    assert.deepEqual(schema.properties.reviews,z.toJSONSchema(prReviewEvidence));
+    const application=postBodies.filter(body=>JSON.parse(body).type!=='verification').map(body=>JSON.parse(body));
+    assert.equal(application.length,4);
+    assert.equal(application[0].data.reviews.complete,true);
+    // HTTP 410 cancels only the matching repository subscription, never its sibling relationship.
+    callbackGone=true;currentSuccessful=2;
+    assert.equal(await send(1,'receiver-gone'),'stopped');
+    assert.equal(await send(1,'after-gone'),'inactive');
+    callbackGone=false;
+    assert.equal(await send(0,'other-still-live'),'accepted');
+    await events.revoke(auth,args[0],relationships[0].id,'owner-approved:revoke-one-relationship');
+    assert.equal(await send(0,'after-revoke'),'blocked');
+    assert.equal(await send(1,'after-revoke'),'inactive');
+    // HTTP 410 stopped only this lease; an explicit new subscribe is needed
+    // before loss of its relationship key can prove delivery is fenced.
+    await events.subscribe(auth,args[1],delivery,10000);
+    await redis.command(['DEL','conductor:preview:project-events:authority:'+relationships[1].id]);
+    assert.equal(await send(1,'after-key-loss'),'blocked');
+    await assert.rejects(events.subscribe(auth,args[1],delivery),/Relationship not active/);
+    assert.equal(postBodies.filter(s=>JSON.parse(s).type!=='verification').length,6);
+  });
+
+  await t.test('project challenge cancelled during recipient validation sends no challenge', async () => {
+    const me=identity('cancel-challenge'),grant=await grants.consent(
+      identity('cancel-challenge'),['conductor.read','conductor.write'],expiry());
+    const auth={token:'local',clientId:me.clientId,scopes:['conductor.read','conductor.write'],
+      extra:{issuer:me.issuer,subject:me.subject,grantGeneration:grant.generation}};
+    const relationship={id:randomUUID(),repository:'cancel/repo',
+      integrationBranch:'preview' as const,installationId:409,expiresAt:expiry()};
+    const args={repository:relationship.repository,integrationBranch:relationship.integrationBranch};
+    const delivery={url:'https://receiver.example/cancel',secret:'whsec_'+Buffer.alloc(32,4).toString('base64')};
+    let sent=0;
+    let events!:ProjectEvents;
+    events=new ProjectEvents({relationships:[relationship],owner:{issuer:me.issuer,subject:me.subject},
+      clientFingerprint:createHash('sha256').update(me.clientId).digest('hex'),
+      redis:redis.client,grants,
+      vault:new VersionedProviderCredentialVault({legacyPurpose:'cancel-challenge',
+        currentKey:'local-only-vault-key'.repeat(3)}),
+      webhookSecret:'isolated-project-webhook-secret'.repeat(2),
+      validateRecipient:async()=>{await events.unsubscribe(auth,args,delivery.url);},
+      post:async()=>{sent++;return {status:200,body:''};},
+      source:{async read(){throw new Error('Provider read must not happen');}}
+    });
+    await events.enable(auth,args,relationship.id,'owner-approved:enable-cancel-challenge');
+    await assert.rejects(events.subscribe(auth,args,delivery),/cancelled or replaced/);
+    assert.equal(sent,0);
+    const key='conductor:preview:project-events:v1:'+createHash('sha256')
+      .update(JSON.stringify([relationship.id,relationship.repository,relationship.integrationBranch,
+        createHash('sha256').update(me.clientId).digest('hex'),PROJECT_EVENT])).digest('hex');
+    assert.equal((await new RedisPrEventStore(redis.client,key).load()).state.subscription,undefined);
+  });
 
   await t.test('concurrent consent and revoke fence both commit orderings', async () => {
     for (const heldStatus of ['active', 'revoked']) {
