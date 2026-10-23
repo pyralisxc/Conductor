@@ -208,7 +208,8 @@ export class ProjectEvents {
     const data=await this.evidence(rel,sub.owner,sub.generation,number);
     const version=hash(data),key=String(number);
     state.baselines=state.baselines??{};
-    if(Object.keys(state.baselines).length>=64&&!Object.hasOwn(state.baselines,key))return 'capacity';
+    // Bound long-running project history without exhausting monitoring after 64 historical PRs.
+    if(Object.keys(state.baselines).length>=64&&!Object.hasOwn(state.baselines,key))delete state.baselines[Object.keys(state.baselines)[0]];
     state.sources.push({id:scoped,observedAt:this.now()});
     if(state.baselines[key]===version)return await store.save(loaded.version,state)?'unchanged':'pending';
     state.deliveries=state.deliveries.filter(d=>d.createdAt>this.now()-86400000);
@@ -217,7 +218,7 @@ export class ProjectEvents {
     const record={id,source:scoped,fingerprint:version,createdAt:this.now(),attempts:0,
       status:'pending' as const,body:JSON.stringify({eventId:id,name:PROJECT_EVENT,
         timestamp:new Date(this.now()).toISOString(),data,cursor:null})};
-    state.deliveries.push(record);state.baselines[key]=version;
+    state.deliveries.push(record);delete state.baselines[key];state.baselines[key]=version;
     if(!await store.save(loaded.version,state))return 'pending';
     const claimed=await store.load(),live=claimed.state.subscription;
     if((claimed.state as State).projectPhase!=='active')return 'inactive';

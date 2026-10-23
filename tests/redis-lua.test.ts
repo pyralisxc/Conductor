@@ -57,7 +57,15 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     const delivery={url:'https://receiver.example/callback',secret:'whsec_'+Buffer.alloc(32,7).toString('base64')};
     await assert.rejects(events.subscribe(auth,args[0],delivery),/Relationship not active/);
     for(let i=0;i<2;i++)await events.enable(auth,args[i],relationships[i].id,'owner-approved:existing-owner-decision');
-    const first=await events.subscribe(auth,args[0],delivery,10000);
+    const challengedBefore=postBodies.length;
+    const racing=await Promise.allSettled([
+      events.subscribe(auth,args[0],delivery,10000),
+      events.subscribe(auth,args[0],delivery,10000),
+    ]);
+    assert.equal(racing.filter(r=>r.status==='fulfilled').length,1);
+    assert.equal(postBodies.slice(challengedBefore).filter(s=>JSON.parse(s).type==='verification').length,1);
+    const winner=racing.find(r=>r.status==='fulfilled') as PromiseFulfilledResult<Awaited<ReturnType<typeof events.subscribe>>>;
+    const first=winner.value;
     const second=await events.subscribe(auth,args[1],delivery,10000);
     assert.notEqual(first.id,second.id);
     localNow+=200;
