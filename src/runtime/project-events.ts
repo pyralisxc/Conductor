@@ -20,7 +20,7 @@ export const projectRelationship = projectEventArguments.extend({
 export type ProjectRelationship = z.infer<typeof projectRelationship>;
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 type Subscription = NonNullable<PrEventState['subscription']>;
-type State = PrEventState & { baselines?: Record<string,string> };
+type State = PrEventState & { baselines?: Record<string,string>; projectPhase?: 'pending'|'challenging'|'active' };
 export function projectEventCatalog() {
   return { events: [{ name: PROJECT_EVENT,
     description: 'Authorized repository/Preview-branch PR and check transitions. Every callback carries current exact PR head/base evidence; receiver must reread before acting.',
@@ -142,16 +142,9 @@ export class ProjectEvents {
     const id=this.id(rel,owner,url);
     if(prior&&(prior.id!==id||prior.generation!==generation||prior.eventName!==PROJECT_EVENT))
       throw new Error('Project recipient/generation change requires unsubscribe');
+    const state=loaded.state as State;
+    if(prior&&state.projectPhase!=='active')throw new Error('Pending project challenge requires explicit unsubscribe');
     const existingSecret=prior?this.options.vault.open(prior.secret).plaintext:null;
-    if(!prior||existingSecret!==delivery.secret||prior.expiresAt<=this.now()) {
-      await this.options.validateRecipient(url);
-      await verifyCallback(async(...a)=>{
-        await this.authorizedRelationship(rel);
-        await requireOAuthGrant(this.options.grants,owner,generation,['conductor.read'],this.now);
-        return this.options.post(...a);
-      },{id,url,secret:delivery.secret});
-    }
-    await this.authorize(auth,rel);
     const expiresAt=Math.min(rel.expiresAt,grant.expiresAt,
       this.now()+Math.min(ttlMs??3600000,3600000),auth?.expiresAt===undefined?Infinity:auth.expiresAt*1000);
     if(expiresAt<=this.now())throw new Error('Project lease expired');
@@ -160,9 +153,34 @@ export class ProjectEvents {
       ...(prior&&existingSecret!==delivery.secret?{previousSecret:prior.secret,rotationUntil:this.now()+60000}:
       prior?.previousSecret&&(prior.rotationUntil??0)>this.now()?
       {previousSecret:prior.previousSecret,rotationUntil:prior.rotationUntil}:{})};
-    await this.authorizedRelationship(rel);
-    if(!await store.save(loaded.version,{...loaded.state,subscription:sub}))
-      throw new Error('Project lease CAS conflict');
+    const needsChallenge=!prior||existingSecret!==delivery.secret||prior.expiresAt<=this.now();
+    if(needsChallenge) {
+      // Claim pending/challenging before the first network request. Concurrent losers send no challenge.
+      const pending:State={...state,subscription:sub,projectPhase:'pending'};
+      await this.authorizedRelationship(rel);
+      if(!await store.save(loaded.version,pending))throw new Error('Pending project claim changed');
+      const observed=await store.load();
+      if(observed.version!==JSON.stringify(pending))throw new Error('Pending project claim changed');
+      const challenging=observed.state as State;
+      if(challenging.subscription?.id!==id||challenging.projectPhase!=='pending')throw new Error('Project challenge claim changed');
+      challenging.projectPhase='challenging';
+      if(!await store.save(observed.version,challenging))throw new Error('Project challenge claim changed');
+      await this.options.validateRecipient(url);
+      await verifyCallback(async(...a)=>{
+        await this.authorizedRelationship(rel);
+        await requireOAuthGrant(this.options.grants,owner,generation,['conductor.read'],this.now);
+        return this.options.post(...a);
+      },{id,url,secret:delivery.secret});
+      await this.authorize(auth,rel);
+      const after=await store.load(),current=after.state as State;
+      if(after.version!==JSON.stringify(challenging)||current.projectPhase!=='challenging'
+        ||current.subscription?.id!==id||current.subscription.generation!==generation)throw new Error('Project activation changed');
+      current.projectPhase='active';
+      if(!await store.save(after.version,current))throw new Error('Project activation changed');
+    } else {
+      await this.authorizedRelationship(rel);
+      if(!await store.save(loaded.version,{...state,subscription:sub}))throw new Error('Project lease CAS conflict');
+    }
     await this.check(rel,sub);
     return {id,refreshBefore:new Date(expiresAt).toISOString(),cursor:null,truncated:false};
   }
@@ -174,13 +192,14 @@ export class ProjectEvents {
       if(!sub)return {};
       if(sub.id!==this.id(rel,owner,canonical))throw new Error('Project recipient mismatch');
       delete loaded.state.subscription;
+      delete (loaded.state as State).projectPhase;
       if(await store.save(loaded.version,loaded.state))return {};
     }
     throw new Error('Project unsubscribe CAS conflict');
   }
   private async reconcile(rel:ProjectRelationship,number:number,source:string) {
     const store=this.store(rel),loaded=await store.load(),state=loaded.state as State,sub=state.subscription;
-    if(!sub)return 'inactive';
+    if(!sub||state.projectPhase!=='active')return 'inactive';
     try{await this.check(rel,sub);}catch{return 'blocked';}
     const scoped=source+':'+number;
     if(state.sources?.some(s=>s.id===scoped))return 'duplicate';
@@ -201,6 +220,7 @@ export class ProjectEvents {
     state.deliveries.push(record);state.baselines[key]=version;
     if(!await store.save(loaded.version,state))return 'pending';
     const claimed=await store.load(),live=claimed.state.subscription;
+    if((claimed.state as State).projectPhase!=='active')return 'inactive';
     const entry=claimed.state.deliveries.find(d=>d.id===id);
     if(!live||live.id!==sub.id||live.generation!==sub.generation||!entry||entry.attempts!==0)
       return 'pending';
@@ -210,7 +230,7 @@ export class ProjectEvents {
     entry.attempts=1;entry.leaseUntil=this.now()+30000;
     if(!await store.save(claimed.version,claimed.state))return 'pending';
     const after=await store.load(),current=after.state.subscription;
-    if(!current||current.id!==sub.id||current.generation!==sub.generation)return 'inactive';
+    if((after.state as State).projectPhase!=='active'||!current||current.id!==sub.id||current.generation!==sub.generation)return 'inactive';
     try{await this.check(rel,current);
       if(hash(await this.evidence(rel,current.owner,current.generation,number))!==version)return 'superseded';
     }catch{return 'blocked';}
@@ -223,7 +243,7 @@ export class ProjectEvents {
     const terminal=status!==undefined&&status>=200&&status<300?'accepted':
       status===410?'stopped':'uncertain';
     for(let i=0;i<3;i++){const latest=await store.load(),row=latest.state.deliveries.find(d=>d.id===id);
-      if(!row||latest.state.subscription?.id!==sub.id||latest.state.subscription.generation!==sub.generation)return 'uncertain';
+      if(!row||(latest.state as State).projectPhase!=='active'||latest.state.subscription?.id!==sub.id||latest.state.subscription.generation!==sub.generation)return 'uncertain';
       if(row.status!=='pending')return row.status;
       row.status=terminal;row.leaseUntil=0;
       if(await store.save(latest.version,latest.state))return terminal;

@@ -57,11 +57,11 @@ test('production OAuth/event Lua against disposable Redis (Docker required; neve
     const delivery={url:'https://receiver.example/callback',secret:'whsec_'+Buffer.alloc(32,7).toString('base64')};
     await assert.rejects(events.subscribe(auth,args[0],delivery),/Relationship not active/);
     for(let i=0;i<2;i++)await events.enable(auth,args[i],relationships[i].id,'owner-approved:existing-owner-decision');
-    const first=await events.subscribe(auth,args[0],delivery,1000);
-    const second=await events.subscribe(auth,args[1],delivery,1000);
+    const first=await events.subscribe(auth,args[0],delivery,10000);
+    const second=await events.subscribe(auth,args[1],delivery,10000);
     assert.notEqual(first.id,second.id);
     localNow+=200;
-    const renewed=await events.subscribe(auth,args[0],delivery,2000);
+    const renewed=await events.subscribe(auth,args[0],delivery,20000);
     assert.equal(renewed.id,first.id);
     assert.ok(Date.parse(renewed.refreshBefore)>Date.parse(first.refreshBefore));
     const send=async(i:number,deliveryId:string)=>{
