@@ -170,6 +170,12 @@ export class ProjectEvents {
       await verifyCallback(async(...a)=>{
         await this.authorizedRelationship(rel);
         await requireOAuthGrant(this.options.grants,owner,generation,['conductor.read'],this.now);
+        // Recheck the exact durable challenge after recipient validation, before outbound I/O.
+        const beforePost=await store.load(),liveClaim=beforePost.state as State;
+        if(beforePost.version!==JSON.stringify(challenging)||liveClaim.projectPhase!=='challenging'
+          ||liveClaim.subscription?.id!==id||liveClaim.subscription.generation!==generation)
+          throw new Error('Project challenge cancelled or replaced');
+        await this.authorizedRelationship(rel);
         return this.options.post(...a);
       },{id,url,secret:delivery.secret});
       await this.authorize(auth,rel);
@@ -203,38 +209,51 @@ export class ProjectEvents {
     if(!sub||state.projectPhase!=='active')return 'inactive';
     try{await this.check(rel,sub);}catch{return 'blocked';}
     const scoped=source+':'+number;
-    if(state.sources?.some(s=>s.id===scoped))return 'duplicate';
-    state.sources=(state.sources??[]).filter(s=>s.observedAt>this.now()-86400000);
-    if(state.sources.length>=256)return 'capacity';
+    // Durable pending attempts=0 may resume after CAS/renewal races; attempted callbacks never replay.
+    const prior=state.deliveries.find(d=>d.source===scoped);
+    if(prior&&(prior.attempts>0||prior.status!=='pending'))return 'duplicate';
+    if(!prior&&state.sources?.some(s=>s.id===scoped))return 'duplicate';
     const data=await this.evidence(rel,sub.owner,sub.generation,number);
-    const version=hash(data),key=String(number);
-    state.baselines=state.baselines??{};
-    // Bound long-running project history without exhausting monitoring after 64 historical PRs.
-    if(Object.keys(state.baselines).length>=64&&!Object.hasOwn(state.baselines,key))delete state.baselines[Object.keys(state.baselines)[0]];
-    state.sources.push({id:scoped,observedAt:this.now()});
-    if(state.baselines[key]===version)return await store.save(loaded.version,state)?'unchanged':'pending';
-    state.deliveries=state.deliveries.filter(d=>d.createdAt>this.now()-86400000);
-    if(state.deliveries.length>=128)return 'capacity';
-    const id='evt_'+hash([sub.id,scoped,version]);
-    const record={id,source:scoped,fingerprint:version,createdAt:this.now(),attempts:0,
-      status:'pending' as const,body:JSON.stringify({eventId:id,name:PROJECT_EVENT,
-        timestamp:new Date(this.now()).toISOString(),data,cursor:null})};
-    state.deliveries.push(record);delete state.baselines[key];state.baselines[key]=version;
-    if(!await store.save(loaded.version,state))return 'pending';
+    const fingerprint=hash(data),key=String(number);
+    let record=prior;
+    if(prior&&prior.fingerprint!==fingerprint)return 'superseded';
+    if(!record) {
+      // A newer equivalent provider hint must also recover a provably unattempted delivery.
+      record=state.deliveries.find(d=>d.attempts===0&&d.status==='pending'&&d.fingerprint===fingerprint
+        &&(()=>{try{return JSON.parse(d.body).data.pullRequestNumber===number;}catch{return false;}})());
+      if(!record) {
+        state.sources=(state.sources??[]).filter(s=>s.observedAt>this.now()-86400000);
+        if(state.sources.length>=256)return 'capacity';
+        state.baselines=state.baselines??{};
+        if(state.baselines[key]===fingerprint)return 'unchanged';
+        state.deliveries=state.deliveries.filter(d=>d.createdAt>this.now()-86400000);
+        if(state.deliveries.length>=128)return 'capacity';
+        if(Object.keys(state.baselines).length>=64&&!Object.hasOwn(state.baselines,key))
+          delete state.baselines[Object.keys(state.baselines)[0]];
+        const id='evt_'+hash([sub.id,scoped,fingerprint]);
+        record={id,source:scoped,fingerprint,createdAt:this.now(),attempts:0,
+          status:'pending' as const,body:JSON.stringify({eventId:id,name:PROJECT_EVENT,
+            timestamp:new Date(this.now()).toISOString(),data,cursor:null})};
+        state.sources.push({id:scoped,observedAt:this.now()});
+        state.deliveries.push(record);delete state.baselines[key];state.baselines[key]=fingerprint;
+        if(!await store.save(loaded.version,state))return 'pending';
+      }
+    }
+    const id=record.id;
     const claimed=await store.load(),live=claimed.state.subscription;
     if((claimed.state as State).projectPhase!=='active')return 'inactive';
     const entry=claimed.state.deliveries.find(d=>d.id===id);
     if(!live||live.id!==sub.id||live.generation!==sub.generation||!entry||entry.attempts!==0)
       return 'pending';
     try{await this.check(rel,live);
-      if(hash(await this.evidence(rel,live.owner,live.generation,number))!==version)return 'superseded';
+      if(hash(await this.evidence(rel,live.owner,live.generation,number))!==fingerprint)return 'superseded';
     }catch{return 'blocked';}
     entry.attempts=1;entry.leaseUntil=this.now()+30000;
     if(!await store.save(claimed.version,claimed.state))return 'pending';
     const after=await store.load(),current=after.state.subscription;
     if((after.state as State).projectPhase!=='active'||!current||current.id!==sub.id||current.generation!==sub.generation)return 'inactive';
     try{await this.check(rel,current);
-      if(hash(await this.evidence(rel,current.owner,current.generation,number))!==version)return 'superseded';
+      if(hash(await this.evidence(rel,current.owner,current.generation,number))!==fingerprint)return 'superseded';
     }catch{return 'blocked';}
     let status:number|undefined;
     try{status=(await signedCallback(this.options.post,{id:current.id,url:current.url,
