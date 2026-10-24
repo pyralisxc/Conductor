@@ -2,7 +2,7 @@
 
 ## Outcome
 
-Give every development client one stable, truthful execution contract before Conductor expands into advanced orchestration, delegation, or session machinery.
+Accelerate bounded development workflows across native tools and protocols: reduce redundant tool calls and tool-use drift, enforce consistent authorization and execution guarantees, and preserve recoverable durable outcomes. Conductor supplies truthful orchestration and provider evidence; product judgment and native monitoring remain with their existing owners. It is not an autonomous scheduler or a replacement for product decisions.
 
 ## Public tools
 
@@ -218,7 +218,7 @@ Redis stores one CAS-protected bounded record per configured wait: encrypted cal
 
 Ingress reports `accepted` only for callback 2xx receipt, `pending` for contention/uncertain completion, `failed` for exhausted transient failures, `stopped` for permanent rejection, `inactive` for expiry/unsubscribe, and `blocked` for failed access/exact-state reconciliation. Unsubscribe fences subsequent attempts but cannot recall a request already in flight. Callback receipt never proves a host turn, continuation, Slack delivery, or exactly-once action. The receiving dot must re-read native state and use the existing guarded continuation and idempotency contracts; this publisher performs no continuation or Slack send itself.
 
-Live acceptance still requires the approved provider signal, an actual host callback subscription, wake, authoritative reread, eligible continuation and deduplicated Slack permalink. Local transport tests and callback/store fakes establish none of those live outcomes. The broader workflow/review/deployment/issue categories tracked in #307 remain outside this narrow slice and are required before any Main proposal.
+If custom MCP Events activation is separately authorized, its live acceptance requires an actual provider signal, host callback subscription, wake, authoritative reread, eligible continuation and deduplicated Slack permalink; local transport/store tests establish none of those host outcomes. Under the owner's native-first decision, GitHub/Slack watching is handled by existing native watchers. Broader workflow/review/deployment/issue event publishers are **not** prerequisites to a Main proposal, and #307 does not authorize new event coverage or activation. Main promotion instead follows its existing exact-candidate release accounting, checks, provider-readback and explicit owner approval gates; evaluate any retained custom events separately on demonstrated consumers and security boundaries.
 
 
 ## Explicit agent checkpoint publication
