@@ -10,7 +10,6 @@ import { createConfiguredPrEvents } from '../src/config/pr-events.js';
 import { createConfiguredHttpHandler } from '../src/config/http-handler.js';
 import { ConductorToolRuntime } from '../src/runtime/runtime.js';
 import { PrEvents, RedisPrEventStore, prEventCatalog, PR_EVENT } from '../src/runtime/pr-events.js';
-import { projectEventCatalog } from '../src/runtime/project-events.js';
 import { RedisOAuthGrantStore } from '../src/transport/oauth-grant-store.js';
 import { GitHubRuntimeProvider } from '../src/providers/github.js';
 import { GitHubAppCredentialProvider } from '../src/connections/github/app-installation.js';
@@ -54,6 +53,9 @@ test('live configuration still initializes only with its full prerequisites', ()
     CONDUCTOR_GITHUB_APP_ID: '123', CONDUCTOR_GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
     CONDUCTOR_GITHUB_WEBHOOK_SECRET: 'test-only-webhook-secret'.repeat(3), CONDUCTOR_PROVIDER_CREDENTIAL_KEY: 'test-only-vault-key'.repeat(3) });
   assert.ok(delegated instanceof PrEvents);
+  // Retired project relationship configuration must not widen the exact-PR runtime.
+  assert.throws(() => createConfiguredPrEvents(runtime, { ...env,
+    CONDUCTOR_PR_EVENTS_JSON: JSON.stringify({ mode: 'projects', owner: { issuer: 'https://issuer.example', subject: 'owner' }, clientFingerprint: 'a'.repeat(64), relationships: [] }) }), /Invalid input|invalid/i);
   parsed.owner.clientId = 'body-identity-not-needed';
   assert.throws(() => createConfiguredPrEvents(runtime, { ...env, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify(parsed) }));
 
@@ -106,7 +108,7 @@ test('actual configured HTTP discovery uses ordinary OAuth and no live event ope
   assert.match(exchanges[0], /2026-07-28/); assert.match(exchanges[0], /"events":\{\}/);
   const schema = z.looseObject({});
   const catalog = await client.request({ method: 'events/list', params: {} }, schema);
-  assert.deepEqual(catalog.events, [...prEventCatalog().events,...projectEventCatalog().events]);
+  assert.deepEqual(catalog.events, prEventCatalog().events);
   assert.deepEqual(Object.keys(catalog).sort(), ['_meta', 'events']);
   assert.deepEqual(catalog._meta, { 'io.modelcontextprotocol/serverInfo': { name: 'conductor', version: '0.1.0' } });
   assert.doesNotMatch(JSON.stringify(catalog), /owner\/private|discovery-client|receiver\.example|local-owner|local-discovery|grant_generation/);
