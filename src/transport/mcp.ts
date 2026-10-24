@@ -1,5 +1,4 @@
 import { type PrEventService, PR_EVENT, CHECKPOINT_EVENT, prEventArguments, checkpointPublicationArguments, prEventBindingStatusSchema, prEventExpiredBindingReleaseArguments, prEventCatalog, eventOwner } from '../runtime/pr-events.js';
-import { ProjectEvents, PROJECT_EVENT, projectEventArguments, projectEventCatalog } from '../runtime/project-events.js';
 import { McpServer, ProtocolError } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { releaseIdentityFitsTransport, RELEASE_IDENTITY_MAX_BYTES } from '../runtime/release-identities.js';
@@ -250,7 +249,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
         catch { throw new ProtocolError(-32001, 'Authenticated conductor.read principal required'); }
       };
       server.server.setRequestHandler('events/list', { params: z.object({ cursor: z.null().optional() }).strict().optional() },
-        async (_params, ctx) => { authorize(ctx.http?.authInfo); return {events:[...prEventCatalog().events,...projectEventCatalog().events]}; });
+        async (_params, ctx) => { authorize(ctx.http?.authInfo); return prEventCatalog(); });
       // Do not parse delivery parameters, URLs or secrets in a disabled service.
       for (const method of ['events/subscribe', 'events/unsubscribe'] as const) {
         server.server.setRequestHandler(method, { params: z.unknown().optional() }, async (_params, ctx) => {
@@ -258,36 +257,6 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
           throw new ProtocolError(-32000, 'Event subscriptions are not enabled', { reason: 'events_not_enabled' });
         });
       }
-    } else if (events instanceof ProjectEvents) {
-      const delivery = z.object({mode:z.literal('webhook'),url:z.string().max(2048)}).strict();
-      const identity = z.object({name:z.literal(PROJECT_EVENT),arguments:projectEventArguments,delivery}).strict();
-      server.server.setRequestHandler('events/list',
-        {params:z.object({cursor:z.null().optional()}).strict().optional()},
-        async (_params,ctx)=>events.list(ctx.http?.authInfo));
-      server.server.setRequestHandler('events/subscribe',{params:identity.extend({
-        delivery:delivery.extend({secret:z.string().max(100)}),
-        cursor:z.null().optional(),ttlMs:z.number().int().min(1000).nullable().optional(),
-      })},async(params,ctx)=>events.subscribe(ctx.http?.authInfo,params.arguments,params.delivery,params.ttlMs,params.name));
-      server.server.setRequestHandler('events/unsubscribe',{params:identity},
-        async(params,ctx)=>events.unsubscribe(ctx.http?.authInfo,params.arguments,params.delivery.url,params.name));
-      const relationshipInput=z.object({arguments:projectEventArguments,id:z.uuid(),
-        approvalReference:z.string().min(16).max(500).regex(/^owner-approved:/u)}).strict();
-      server.registerTool('events.relationship.enable',{title:'Activate one approved project event relationship',
-        description:'Explicit owner-approved scoped relationship activation, independent of OAuth consent and code-work authority.',
-        inputSchema:relationshipInput,
-        annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
-        _meta:{securitySchemes:oauthWriteSecurity}},
-        async(input,extra)=>{requireWriteScope(extra.http?.authInfo?.scopes);
-          const result=await events.enable(extra.http?.authInfo,input.arguments,input.id,input.approvalReference);
-          return {structuredContent:result,content:[{type:'text',text:JSON.stringify(result)}]};});
-      server.registerTool('events.relationship.revoke',{title:'Revoke one project event relationship',
-        description:'Explicit owner-approved relationship revocation; never revokes the whole installed OAuth client.',
-        inputSchema:relationshipInput,
-        annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:false,openWorldHint:false},
-        _meta:{securitySchemes:oauthWriteSecurity}},
-        async(input,extra)=>{requireWriteScope(extra.http?.authInfo?.scopes);
-          const result=await events.revoke(extra.http?.authInfo,input.arguments,input.id,input.approvalReference);
-          return {structuredContent:result,content:[{type:'text',text:JSON.stringify(result)}]};});
     } else {
       const delivery = z.object({ mode: z.literal('webhook'), url: z.string().max(2048) }).strict();
       const identity = z.object({ name: z.enum([PR_EVENT, CHECKPOINT_EVENT]), arguments: prEventArguments, delivery }).strict();

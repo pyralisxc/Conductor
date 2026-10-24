@@ -1,5 +1,4 @@
 import { validateCallbackRecipient } from '../transport/event-callback.js';
-import { ProjectEvents, projectRelationship } from '../runtime/project-events.js';
 import { oauthGrantStore, requireOAuthGrant } from '../transport/oauth-grant-store.js';
 import { createHash } from 'node:crypto';
 import { Redis } from '@upstash/redis';
@@ -18,8 +17,6 @@ const commonConfiguration = {
   installationId: z.number().int().positive(),
 };
 const configuration = z.union([
-  z.object({ mode: z.literal('projects'), owner: commonConfiguration.owner.omit({ clientId: true }).strict(),
-    clientFingerprint: z.string().regex(/^[a-f0-9]{64}$/), relationships: z.array(projectRelationship).min(1).max(8) }).strict(),
   z.object({ ...commonConfiguration, callbackHostname: z.string().max(253).regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)+$/) }).strict(),
   z.object({ ...commonConfiguration, owner: commonConfiguration.owner.omit({ clientId: true }).strict(), delegatedRecipient: z.object({
     clientFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
@@ -51,27 +48,6 @@ export function createConfiguredPrEvents(runtime: ConductorToolRuntime, environm
   vault.seal('configuration-check'); // Fail at startup if the existing vault is unavailable.
   const redis = new Redis({ url, token, enableTelemetry: false, automaticDeserialization: false });
   const grants = oauthGrantStore(environment);
-  if ('mode' in config) {
-    const projectProvider = new GitHubRuntimeProvider({credentials:app,
-      bindings:config.relationships.map(r=>({id:r.repository,repository:r.repository,write:false}))});
-    return new ProjectEvents({relationships:config.relationships,owner:config.owner,clientFingerprint:config.clientFingerprint,
-      redis,grants,vault,webhookSecret,validateRecipient:validateCallbackRecipient,
-      post:(url,body,headers)=>safeCallbackPost(new URL(url).hostname)(url,body,headers),
-      source:{async read(owner,rel,number,generation) {
-        await requireOAuthGrant(grants,owner,generation);
-        await app.getRepositoryAttestation(rel.repository,rel.installationId);
-        const project=runtime.resolveProjectReference({id:rel.repository,repository:rel.repository});
-        const receipt=await runtime.pullRequestStatus({project,pullRequestNumber:number});
-        if(receipt.status!=='succeeded')throw new Error('Provider reconciliation unavailable');
-        if(receipt.result.base.ref!==rel.integrationBranch)throw new Error('Wrong integration branch');
-        const target={repository:rel.repository,pullRequestNumber:number,headSha:receipt.result.head.sha,baseSha:receipt.result.base.sha};
-        const reviews=await projectProvider.getPullRequestReviewState(target,rel.installationId,
-          ()=>requireOAuthGrant(grants,owner,generation),rel.integrationBranch);
-        await requireOAuthGrant(grants,owner,generation);
-        return {...receipt.result,reviews};
-      }}
-    });
-  }
   const reviewProvider = new GitHubRuntimeProvider({ credentials: app, bindings: [{ id: config.target.repository, repository: config.target.repository, write: false }] });
   // Stable single delegated slot prevents config edits silently moving existing authority.
   const digest = createHash('sha256').update(delegated ? `delegated:${config.installationId}` : JSON.stringify(config)).digest('hex');
