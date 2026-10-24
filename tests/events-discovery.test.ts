@@ -55,7 +55,7 @@ test('live configuration still initializes only with its full prerequisites', ()
   assert.ok(delegated instanceof PrEvents);
   // Retired project relationship configuration must not widen the exact-PR runtime.
   assert.throws(() => createConfiguredPrEvents(runtime, { ...env,
-    CONDUCTOR_PR_EVENTS_JSON: JSON.stringify({ mode: 'projects', owner: { issuer: 'https://issuer.example', subject: 'owner' }, clientFingerprint: 'a'.repeat(64), relationships: [] }) }), /Invalid input|invalid/i);
+    CONDUCTOR_PR_EVENTS_JSON: JSON.stringify({ mode: 'projects', owner: { issuer: 'https://issuer.example', subject: 'owner' }, clientFingerprint: 'a'.repeat(64), relationships: [{ id: '00000000-0000-4000-8000-000000000007', repository: 'owner/another-repo', integrationBranch: 'vercel-preview', installationId: 123, expiresAt: 1800000000000 }] }) }), /Invalid input|invalid/i);
   parsed.owner.clientId = 'body-identity-not-needed';
   assert.throws(() => createConfiguredPrEvents(runtime, { ...env, CONDUCTOR_PR_EVENTS_JSON: JSON.stringify(parsed) }));
 
