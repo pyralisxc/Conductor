@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { assertReleaseIdentityTransport } from './release-identities.js';
 import {
   supportsProjectPreflight,
   supportsOperationPreflight,
@@ -103,7 +104,7 @@ import {
   type WorkerRuntimeWorkerInput,
   type WorkerRuntimeStatusProjection,
 } from './types.js';
-import { IdempotentMutationExecutor } from './idempotency.js';
+import { IdempotentMutationExecutor, type IdempotentMutationInput, type MutationRecovery } from './idempotency.js';
 
 const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
@@ -122,6 +123,10 @@ const OPERATION_PREFLIGHT_DEFINITION: ToolDefinition = {
   name: 'preflight_operation',
   description: 'Verify whether one exact exposed Conductor operation can execute against a supplied execution referent.',
   mutates: false,
+};
+
+const OPERATION_STATUS_DEFINITION: ToolDefinition = {
+  name: 'operation.status', description: 'Look up this authenticated client’s exact repository commit mutation by its caller-known idempotency key; reconcile a known candidate using provider reads only.', mutates: false,
 };
 
 const REPOSITORY_ACQUISITION_PREFLIGHT_DEFINITION: ToolDefinition = {
@@ -267,6 +272,7 @@ const WORKFLOW_MUTATION_DEFINITION: ToolDefinition = {
 
 const CORE_PREFLIGHT_OPERATIONS = new Set<import('./types.js').RuntimeOperationName>([
   'capabilities',
+  'operation.status',
   'preflight_project',
   'preflight_operation',
 ]);
@@ -380,6 +386,10 @@ export class ConductorToolRuntime {
 
   get sourceControlMutationsEnabled(): boolean {
     return Boolean(this.sourceControlMutationProvider && this.mutationExecutor);
+  }
+
+  get operationStatusEnabled(): boolean {
+    return Boolean(this.sourceControlMutationProvider?.reconcileCommit && this.mutationExecutor?.supportsRecovery);
   }
 
   get workflowCommitEnabled(): boolean {
@@ -1206,8 +1216,9 @@ export class ConductorToolRuntime {
               role: lifecycleTransportRole(pullRequest),
               pullRequest,
             }));
-            const promotion = artifacts.find((artifact) => artifact.role === 'main-promotion');
-            const previewIntegration = artifacts.find((artifact) => artifact.role === 'preview-integration');
+            const currentArtifacts = artifacts.filter((artifact) => artifact.pullRequest.state === 'open' || artifact.pullRequest.merged);
+            const promotion = currentArtifacts.find((artifact) => artifact.role === 'main-promotion');
+            const previewIntegration = currentArtifacts.find((artifact) => artifact.role === 'preview-integration');
             const lifecycleStage = promotion
               ? 'main-promotion' as const
               : previewIntegration?.pullRequest.merged
@@ -1603,13 +1614,13 @@ export class ConductorToolRuntime {
       if (input.promotionWorkItemNumbers && !input.preparePromotion) {
         throw { code: 'CONFLICT', message: 'promotionWorkItemNumbers requires preparePromotion=true' };
       }
+      if (input.promotionWorkItemNumbers) assertReleaseIdentityTransport(input.promotionWorkItemNumbers);
       const requestedPromotionWorkItemNumbers = input.promotionWorkItemNumbers
         ? [...new Set(input.promotionWorkItemNumbers)].sort((a, b) => a - b)
         : null;
       if (requestedPromotionWorkItemNumbers
-        && (requestedPromotionWorkItemNumbers.some((number) => !Number.isSafeInteger(number) || number < 1)
-          || requestedPromotionWorkItemNumbers.length > 20)) {
-        throw { code: 'CONFLICT', message: 'promotionWorkItemNumbers must contain at most 20 positive issue numbers' };
+        && requestedPromotionWorkItemNumbers.some((number) => !Number.isSafeInteger(number) || number < 1)) {
+        throw { code: 'CONFLICT', message: 'promotionWorkItemNumbers must contain only positive issue numbers' };
       }
       const sameWorkItems = (left: number[], right: number[]) =>
         left.length === right.length && left.every((number, index) => number === right[index]);
@@ -2169,11 +2180,54 @@ export class ConductorToolRuntime {
     });
   }
 
-  async createCommit(input: CreateCommitInput) {
+  async createCommit(input: CreateCommitInput, caller?: { clientId: string }) {
+    if (caller && this.operationStatusEnabled) {
+      const project = this.commitProject(input.project);
+      const canonicalInput = { ...input, project };
+      return await this.mutationExecutor!.execute(
+        this.commitIdentity(canonicalInput, caller.clientId, mutationFingerprint('git.commit.create', canonicalInput)),
+        async (progress) => {
+          const result = await this.sourceControlMutationProvider!.createCommit(canonicalInput, progress);
+          return { result, identifiers: { branch: result.branch, commitSha: result.commitSha } };
+        },
+        this.commitRecovery(project),
+      );
+    }
     return await this.executeMutation(input, 'git.commit.create', async (provider) => {
       const result = await provider.createCommit(input);
       return { result, identifiers: { branch: result.branch, commitSha: result.commitSha } };
     });
+  }
+
+  async operationStatus(input: { project: ProjectReference; idempotencyKey: string }, caller: { clientId: string }) {
+    const project = this.commitProject(input.project);
+    return await this.executeRead('operation.status', { kind: 'repository', id: project.repository! }, async () => {
+      if (!this.operationStatusEnabled) throw { code: 'TOOL_UNAVAILABLE', message: 'Scoped commit operation status is not enabled' };
+      return { result: await this.mutationExecutor!.status(this.commitIdentity({ ...input, project }, caller.clientId, ''), this.commitRecovery(project)) };
+    });
+  }
+
+  private commitProject(input: ProjectReference): ProjectReference {
+    const resolved = this.resolveProjectReference(input);
+    const repository = (resolved.repository ?? resolved.id).toLowerCase();
+    if (repository.length > 256 || !/^[^/\s]+\/[^/\s]+$/u.test(repository)) throw { code: 'CONFLICT', message: 'Scoped commit status requires an exact canonical repository' };
+    return { id: repository, repository };
+  }
+
+  private commitIdentity(input: { project: ProjectReference; idempotencyKey: string }, clientId: string, fingerprint: string): IdempotentMutationInput {
+    if (!clientId) throw { code: 'AUTH_REQUIRED', message: 'Authenticated client identity is required' };
+    if (!/^[A-Za-z0-9._:/-]{8,200}$/u.test(input.idempotencyKey)) throw { code: 'CONFLICT', message: 'idempotencyKey must be 8-200 stable URL-safe characters' };
+    const scope = createHash('sha256').update(JSON.stringify([clientId, input.project.repository])).digest('hex');
+    return { key: input.idempotencyKey, storageKey: `commit-v1:${scope}:${createHash('sha256').update(input.idempotencyKey).digest('hex')}`, scope, fingerprint,
+      operation: 'git.commit.create', target: { kind: 'repository', id: input.project.repository! } };
+  }
+
+  private commitRecovery(project: ProjectReference): MutationRecovery<{ repository: string; branch: string; commitSha: string }> {
+    return { reconcile: async (record) => {
+      if (!record.checkpoint?.candidateCommitSha) return null;
+      const result = await this.sourceControlMutationProvider!.reconcileCommit!({ project, checkpoint: record.checkpoint });
+      return result ? { result, identifiers: { branch: result.branch, commitSha: result.commitSha }, diagnostics: [{ level: 'info', source: 'github', message: 'Exact candidate commit reconciled using provider reads only; no mutation was resumed.' }] } : null;
+    } };
   }
 
   async createWorkflowCommit(input: CreateWorkflowCommitInput) {
@@ -2318,6 +2372,7 @@ export class ConductorToolRuntime {
       ...(this.workItemReadEnabled ? WORK_ITEM_READ_DEFINITIONS : []),
       ...(this.workerRuntimeReadEnabled ? WORKER_RUNTIME_DEFINITIONS : []),
       ...(this.sourceControlMutationsEnabled ? MUTATION_DEFINITIONS : []),
+      ...(this.operationStatusEnabled ? [OPERATION_STATUS_DEFINITION] : []),
       ...(this.workflowCommitEnabled ? [WORKFLOW_MUTATION_DEFINITION] : []),
       ...(this.lifecycleAdvanceEnabled || this.lifecycleResumeEnabled ? LIFECYCLE_MUTATION_DEFINITIONS.filter((item) => item.name === 'lifecycle.advance' ? this.lifecycleAdvanceEnabled : this.lifecycleResumeEnabled) : []),
       ...(this.pullRequestLifecycleMutationsEnabled ? PULL_REQUEST_LIFECYCLE_MUTATION_DEFINITIONS : []),

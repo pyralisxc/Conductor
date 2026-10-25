@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import type { AuthInfo } from '@modelcontextprotocol/server';
 import { Redis } from '@upstash/redis';
 import type { ProjectReference, VercelReadEvidence, LifecycleGateSpec, LifecycleGateKind } from '../runtime/types.js';
 import { derivedSecret } from './owner-auth.js';
@@ -193,7 +193,9 @@ export function issueLifecycleGate(clientId: string, input: { repository: string
   const id = randomUUID();
   const value: LifecycleGateEvidence = { ...input.gate, v: 1, clientFingerprint: clientFingerprint(clientId), repository, projectId: input.projectId, expiresAt, id };
   const payload = Buffer.from(JSON.stringify(value)).toString('base64url');
-  return { handle: `${payload}.${lifecycleGateSignature(payload)}`, expiresAt, gateId: id };
+  const handle = `${payload}.${lifecycleGateSignature(payload)}`;
+  if (handle.length > 4096) throw new Error('Signed lifecycle continuation exceeds the 4096-byte transport budget');
+  return { handle, expiresAt, gateId: id };
 }
 export function verifyLifecycleGate(handle: string, clientId: string, expected: { repository: string; projectId: string; issueNumber?: number; kind?: LifecycleGateKind; allowedNextOperation?: 'lifecycle.advance' | 'lifecycle.resume' }): LifecycleGateEvidence {
   if (handle.length > 4096) throw new Error('Invalid lifecycle gate');

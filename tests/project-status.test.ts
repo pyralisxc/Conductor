@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/client';
 import {
   ConductorToolRuntime,
   GitHubRuntimeProvider,
@@ -264,6 +264,29 @@ test('development status groups active work without ranking it and preserves ins
   assert.equal(receipt.result.work.inProgress[0]?.workItem.issueNumber, 31);
   assert.equal(receipt.result.work.blocked[0]?.workItem.issueNumber, 32);
   assert.equal(receipt.result.work.review[0]?.workItem.issueNumber, 33);
+});
+
+test('closed unmerged history does not override the live work lifecycle or erase candidates', async () => {
+  const shared = {
+    repository: 'pyralisxc/Conductor', draft: false, mergeable: null, mergeableState: 'unknown', labels: [],
+    checks: { total: 0, pending: 0, successful: 0, failed: 0, neutral: 0, skipped: 0, items: [] }, workflowRuns: [],
+  };
+  const old = { ...shared, pullRequestNumber: 30, url: 'https://github.test/pull/30', state: 'closed', merged: false, head: { ref: 'preview', sha: 'a'.repeat(40) }, base: { ref: 'main', sha: 'b'.repeat(40) }, orchestration: { state: 'closed-unmerged', action: 'none', shouldAct: false } };
+  const successor = { ...shared, pullRequestNumber: 31, url: 'https://github.test/pull/31', state: 'closed', merged: true, head: { ref: 'work/successor', sha: 'c'.repeat(40) }, base: { ref: 'preview', sha: 'd'.repeat(40) }, orchestration: { state: 'merged', action: 'none', shouldAct: false } };
+  const provider: any = {
+    id: 'github', async getCapabilities() { return []; },
+    async listWorkItems() { return { repository: shared.repository, truncated: false, items: [{ repository: shared.repository, issueNumber: 23, state: 'open', status: 'in-progress' }] }; },
+    async listWorkItemPullRequests() { return [old, successor]; },
+  };
+  const runtime = new ConductorToolRuntime({ workItemCandidateProvider: provider });
+  const result = await runtime.developmentStatus({ project: { id: shared.repository } });
+  assert.equal(result.status, 'succeeded');
+  if (result.status !== 'succeeded') return;
+  const item = result.result.work.inProgress[0]!;
+  assert.equal(item.lifecycleStage, 'preview-integrated');
+  assert.deepEqual(item.candidates.map((pull) => pull.pullRequestNumber), [30, 31]);
+  assert.equal(item.artifacts.length, 2);
+  assert.equal(item.workItem.state, 'open');
 });
 
 test('MCP advertises development.status only when candidate reconstruction is configured', async () => {

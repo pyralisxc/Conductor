@@ -4,6 +4,15 @@ import { clientFingerprint, issueBootstrapEvidence, issueLifecycleGate, issueWor
 
 process.env.CONDUCTOR_SESSION_SECRET = 'test-work-context-secret-long-enough-for-hmac';
 
+test('release continuation accepts coherent identity above twenty issues and rejects oversized serialized gates', () => {
+  const workItemNumbers = Array.from({ length: 25 }, (_, index) => index + 1);
+  const gate = { kind: 'human-approval' as const, allowedNextOperation: 'lifecycle.resume' as const, issueNumber: 1, summary: 'Verified release candidate', resumeWhen: 'Exact owner approval', expectedHeadSha: 'a'.repeat(40), expectedBaseSha: 'b'.repeat(40), pullRequestNumber: 2, workItemNumbers };
+  const issued = issueLifecycleGate('release-client', { repository: 'pyralisxc/Conductor', projectId: 'Conductor', gate });
+  const verified = verifyLifecycleGate(issued.handle, 'release-client', { repository: 'pyralisxc/Conductor', projectId: 'Conductor', kind: 'human-approval' });
+  assert.deepEqual(verified.workItemNumbers, workItemNumbers);
+  assert.throws(() => issueLifecycleGate('release-client', { repository: 'pyralisxc/Conductor', projectId: 'Conductor', gate: { ...gate, summary: 'x'.repeat(4096) } }), /4096-byte transport budget/);
+});
+
 function fixture() {
   const grants = new Map<string, WorkScopeGrant>();
   const contextGrants = new Map<string, ContextWorkScopeGrant>();

@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/client';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import {
   ConductorToolRuntime,
   createConductorHttpHandler,
@@ -14,7 +14,15 @@ import {
 } from '../src/index.js';
 import type { SourceControlMutationProvider, SourceArtifactReadProvider, CiReadProvider } from '../src/index.js';
 import { compositeMutationOutputSchema } from '../src/transport/mcp.js';
+import { parseContentLength } from '../src/transport/http.js';
 
+test('parseContentLength accepts numeric byte lengths and rejects malformed values', () => {
+  assert.equal(parseContentLength('1044736'), 1_044_736);
+  assert.equal(parseContentLength('0'), 0);
+  assert.equal(parseContentLength('\\d'), null);
+  assert.equal(parseContentLength(undefined), null);
+  assert.equal(parseContentLength('9007199254740992'), null);
+});
 async function within<T>(promise: Promise<T>, timeoutMs = 5000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {

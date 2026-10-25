@@ -382,6 +382,38 @@ test('GitHub provider can delete a tracked path in a bounded commit', async () =
   assert.equal(requests.some(request => request.url.endsWith('/git/blobs')), false);
 });
 
+test('GitHub commits a representative 53-file UTF-8 payload through one native tree request', async () => {
+  const expectedHead = 'a'.repeat(40), commitSha = 'b'.repeat(40);
+  const files = Array.from({ length: 51 }, (_, index) => ({ path: `src/file-${index}.txt`, content: `file ${index}\n${'λ'.repeat(9500)}\n` }));
+  const changed: Array<{ path: string; content: string | null }> = [...files, { path: 'empty.txt', content: '' }, { path: 'retired.txt', content: null }];
+  const requests: Array<{ path: string; method: string; body?: any }> = [];
+  const provider = new GitHubRuntimeProvider({
+    token: 'test-token', allowedOwners: ['pyralisxc'],
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname, method = init?.method ?? 'GET';
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      requests.push({ path, method, body });
+      if (path === '/repos/pyralisxc/Conductor') return Response.json({ permissions: { push: true, pull: true } });
+      if (path.endsWith('/git/ref/heads/work/native-tree')) return Response.json({ object: { sha: expectedHead } });
+      if (path.endsWith(`/git/commits/${expectedHead}`)) return Response.json({ tree: { sha: 'c'.repeat(40) } });
+      if (path.endsWith('/git/trees') && method === 'POST') return Response.json({ sha: 'd'.repeat(40) });
+      if (path.endsWith('/git/commits') && method === 'POST') return Response.json({ sha: commitSha });
+      if (path.endsWith('/git/refs/heads/work/native-tree') && method === 'PATCH') return Response.json({});
+      throw new Error(`Unexpected request ${method} ${path}`);
+    },
+  });
+  const result = await provider.createCommit({ project: { id: 'pyralisxc/Conductor' }, branch: 'work/native-tree', expectedHeadSha: expectedHead, message: 'Use native tree content', files: changed, idempotencyKey: 'native-tree-53-files' });
+  assert.equal(result.commitSha, commitSha);
+  assert.equal(requests.filter((request) => request.path.endsWith('/git/trees')).length, 1);
+  assert.equal(requests.some((request) => request.path.endsWith('/git/blobs')), false);
+  const tree = requests.find((request) => request.path.endsWith('/git/trees'))?.body?.tree;
+  assert.equal(tree.length, 53);
+  assert.equal(tree[0].content, files[0]!.content);
+  assert.deepEqual(tree.at(-2), { path: 'empty.txt', mode: '100644', type: 'blob', content: '' });
+  assert.deepEqual(tree.at(-1), { path: 'retired.txt', mode: '100644', type: 'blob', sha: null });
+  assert.deepEqual(requests.find((request) => request.method === 'PATCH')?.body, { sha: commitSha, force: false });
+});
+
 test('GitHub provider deletes only exact integrated development branches', async () => {
   const expected = 'a'.repeat(40);
   let refSha = expected;
@@ -540,6 +572,159 @@ test('GitHub derives complete canonical release inventory from the exact Main-to
   );
 });
 
+test('GitHub release inventory requires exact unchanged Main tree proof for promotion-only ancestry', async (t) => {
+  const baseSha = 'a'.repeat(40), mergeBaseSha = 'b'.repeat(40);
+  const sourceSha = 'c'.repeat(40), headSha = 'd'.repeat(40), treeSha = 'e'.repeat(40);
+  const project = { id: 'Conductor', repository: 'pyralisxc/Conductor' };
+  const input = { project, expectedBaseSha: baseSha, expectedHeadSha: headSha, integrationBranch: 'preview' as const };
+  const fixture = () => {
+    const comparison: Record<string, any> = {
+      status: 'diverged', ahead_by: 2, behind_by: 1, total_commits: 2,
+      base_commit: { sha: baseSha, commit: { tree: { sha: treeSha } } },
+      merge_base_commit: { sha: mergeBaseSha, commit: { tree: { sha: treeSha } } },
+      commits: [{ sha: sourceSha }, { sha: headSha }],
+    };
+    const requests: string[] = [];
+    const provider = new GitHubRuntimeProvider({
+      token: 'secret', allowedOwners: ['pyralisxc'],
+      fetch: async (request) => {
+        const url = new URL(String(request));
+        requests.push(`${url.pathname}${url.search}`);
+        if (url.pathname === '/repos/pyralisxc/Conductor') return Response.json({ default_branch: 'main' });
+        if (url.pathname.startsWith('/repos/pyralisxc/Conductor/compare/')) return Response.json(comparison);
+        if (url.pathname === '/repos/pyralisxc/Conductor/pulls') return Response.json([{
+          number: 299, html_url: 'https://github.test/pull/299', state: 'closed', merged_at: '2026-10-19T00:00:00Z',
+          merge_commit_sha: headSha, body: 'Canonical Conductor work: #298',
+          head: { ref: 'work/298-release-inventory', sha: sourceSha }, base: { ref: 'preview', sha: mergeBaseSha },
+        }]);
+        if (url.pathname === '/repos/pyralisxc/Conductor/pulls/299/commits') return Response.json([{ sha: sourceSha }]);
+        throw new Error(`Unexpected request ${url}`);
+      },
+    });
+    return { provider, comparison, requests };
+  };
+
+  await t.test('inventories divergent Preview work after a content-preserving Main promotion', async () => {
+    const { provider, requests } = fixture();
+    const inventory = await provider.getPreviewReleaseInventory(input);
+    assert.equal(inventory.expectedBaseSha, baseSha);
+    assert.equal(inventory.expectedHeadSha, headSha);
+    assert.deepEqual(inventory.commitShas, [sourceSha, headSha]);
+    assert.deepEqual(inventory.workItemNumbers, [298]);
+    assert.deepEqual(inventory.pullRequests, [{
+      pullRequestNumber: 299, mergeCommitSha: headSha, role: 'integration', workItemNumbers: [298],
+    }]);
+    assert.deepEqual(requests, [
+      '/repos/pyralisxc/Conductor',
+      `/repos/pyralisxc/Conductor/compare/${baseSha}...${headSha}?per_page=100&page=1`,
+      '/repos/pyralisxc/Conductor/pulls?state=closed&base=preview&sort=updated&direction=desc&per_page=100&page=1',
+      '/repos/pyralisxc/Conductor/pulls/299/commits?per_page=100&page=1',
+    ]);
+  });
+
+  await t.test('accepts an empty release immediately after a content-preserving promotion', async () => {
+    const { provider, comparison, requests } = fixture();
+    Object.assign(comparison, { status: 'behind', ahead_by: 0, total_commits: 0, commits: [] });
+    comparison.merge_base_commit.sha = mergeBaseSha.toUpperCase();
+    comparison.base_commit.sha = baseSha.toUpperCase();
+    comparison.base_commit.commit.tree.sha = treeSha.toUpperCase();
+    const inventory = await provider.getPreviewReleaseInventory({ ...input, expectedHeadSha: mergeBaseSha });
+    assert.equal(inventory.expectedBaseSha, baseSha);
+    assert.equal(inventory.expectedHeadSha, mergeBaseSha);
+    assert.deepEqual(inventory.commitShas, []);
+    assert.deepEqual(inventory.workItemNumbers, []);
+    assert.deepEqual(inventory.pullRequests, []);
+    assert.equal(requests.length, 2);
+  });
+
+  const invalidProofs: Array<[string, (comparison: Record<string, any>) => void]> = [
+    ['Main-only content drift', (comparison) => { comparison.base_commit.commit.tree.sha = 'f'.repeat(40); }],
+    ['missing Main identity', (comparison) => { delete comparison.base_commit; }],
+    ['wrong exact Main identity', (comparison) => { comparison.base_commit.sha = 'f'.repeat(40); }],
+    ['missing Main tree', (comparison) => { delete comparison.base_commit.commit.tree; }],
+    ['missing merge-base identity', (comparison) => { delete comparison.merge_base_commit; }],
+    ['invalid merge-base identity', (comparison) => { comparison.merge_base_commit.sha = 'not-a-sha'; }],
+    ['non-string merge-base identity', (comparison) => { comparison.merge_base_commit.sha = 1; }],
+    ['missing merge-base tree', (comparison) => { delete comparison.merge_base_commit.commit; }],
+    ['missing both tree identities', (comparison) => {
+      delete comparison.base_commit.commit.tree.sha;
+      delete comparison.merge_base_commit.commit.tree.sha;
+    }],
+    ['matching short tree identities', (comparison) => {
+      comparison.base_commit.commit.tree.sha = comparison.merge_base_commit.commit.tree.sha = 'e'.repeat(39);
+    }],
+    ['matching non-hex tree identities', (comparison) => {
+      comparison.base_commit.commit.tree.sha = comparison.merge_base_commit.commit.tree.sha = 'g'.repeat(40);
+    }],
+    ['matching non-string tree identities', (comparison) => {
+      comparison.base_commit.commit.tree.sha = comparison.merge_base_commit.commit.tree.sha = 1;
+    }],
+    ['unknown compare status', (comparison) => { comparison.status = 'unknown'; }],
+    ['missing compare status', (comparison) => { delete comparison.status; }],
+  ];
+  for (const [name, invalidate] of invalidProofs) {
+    await t.test(`rejects ${name} before accounting for release work`, async () => {
+      const { provider, comparison, requests } = fixture();
+      invalidate(comparison);
+      await assert.rejects(provider.getPreviewReleaseInventory(input), (error: any) => error?.code === 'CONFLICT');
+      assert.equal(requests.length, 2);
+    });
+  }
+
+  for (const [name, change, message] of [
+    ['oversized release', { ahead_by: 101 }, /bounded to 100 commits/u],
+    ['incomplete commit inventory', { ahead_by: 3 }, /bounded to 100 commits/u],
+    ['unattributed Preview commit', { commits: [{ sha: 'f'.repeat(40) }, { sha: headSha }] }, /unattributed Preview commit/u],
+  ] as const) {
+    await t.test(`still rejects ${name} after promotion-only ancestry is proven`, async () => {
+      const { provider, comparison } = fixture();
+      Object.assign(comparison, change);
+      await assert.rejects(provider.getPreviewReleaseInventory(input), (error: any) => error?.code === 'CONFLICT' && message.test(error.message));
+    });
+  }
+});
+
+
+test('GitHub release inventory and seal preserve more than twenty canonical work items', async () => {
+  const base = 'a'.repeat(40), head = 'b'.repeat(40);
+  const workItems = Array.from({ length: 25 }, (_, index) => index + 1);
+  let sealItems = workItems;
+  const seal = () => `<!-- conductor-release-seal:${JSON.stringify({ v: 1, head, base, workItems: sealItems })} -->`;
+  const pull = () => ({
+    number: 300, html_url: 'https://github.test/pull/300', state: 'open', draft: false, merged: false,
+    head: { ref: 'preview', sha: head }, base: { ref: 'main', sha: base }, labels: [], body: seal(),
+  });
+  const provider = new GitHubRuntimeProvider({
+    token: 'test-token', allowedOwners: ['pyralisxc'],
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/repos/pyralisxc/Conductor') return Response.json({ default_branch: 'main', permissions: { pull: true } });
+      if (url.pathname.includes('/compare/')) return Response.json({ status: 'ahead', ahead_by: 1, commits: [{ sha: head }] });
+      if (url.pathname.endsWith('/pulls') && url.searchParams.get('state') === 'closed') return Response.json([{
+        ...pull(), state: 'closed', merged_at: '2026-10-17T00:00:00Z', merge_commit_sha: head,
+        head: { ref: 'work/coherent-release', sha: 'c'.repeat(40) }, base: { ref: 'preview', sha: base },
+        body: `Canonical Conductor work: ${workItems.map((number) => `#${number}`).join(', ')}`,
+      }]);
+      if (url.pathname.endsWith('/pulls')) return Response.json(url.searchParams.get('head')?.endsWith(':preview') ? [pull()] : []);
+      if (url.pathname.endsWith('/pulls/300')) return Response.json(pull());
+      if (url.pathname.endsWith('/check-runs')) return Response.json({ check_runs: [] });
+      if (url.pathname.endsWith('/actions/runs')) return Response.json({ workflow_runs: [] });
+      throw new Error(`Unexpected request ${url}`);
+    },
+  });
+  const project = { id: 'Conductor', repository: 'pyralisxc/Conductor' };
+  const inventory = await provider.getPreviewReleaseInventory({ project, expectedBaseSha: base, expectedHeadSha: head, integrationBranch: 'preview' });
+  assert.deepEqual(inventory.workItemNumbers, workItems);
+  const promotion = await provider.findOpenPromotionPullRequest(project);
+  assert.equal(promotion?.sealState, 'current');
+  assert.deepEqual(promotion?.seal?.workItemNumbers, workItems);
+  for (const malformed of [[1, 1], [0], [-1], [Number.MAX_SAFE_INTEGER + 1]]) {
+    sealItems = malformed;
+    assert.equal((await provider.findOpenPromotionPullRequest(project))?.sealState, 'unsealed');
+  }
+  sealItems = Array.from({ length: 10000 }, (_, index) => index + 1);
+  await assert.rejects(provider.findOpenPromotionPullRequest(project), (error: any) => /byte transport budget/.test(error.message));
+});
 
 test('GitHub release inventory attributes merge-style integration source commits to the canonical PR', async () => {
   const baseSha = 'a'.repeat(40);
