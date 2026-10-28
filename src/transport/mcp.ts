@@ -82,7 +82,7 @@ const capabilitiesReceiptSchema = z.union([
     status: z.literal('succeeded'),
     result: z.object({
       contractVersion: z.literal('conductor.tool-runtime.v0'),
-      catalogVersion: z.literal('conductor.catalog.v16'),
+      catalogVersion: z.literal('conductor.catalog.v17'),
       catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
       operations: z.array(z.object({
         name: runtimeOperationSchema,
@@ -131,7 +131,8 @@ const preflightReceiptSchema = z.union([
 
 const oauthSecurity = [{ type: 'oauth2', scopes: ['conductor.read'] }];
 const oauthWriteSecurity = [{ type: 'oauth2', scopes: ['conductor.read', 'conductor.write'] }];
-const workContextSchema = z.string().min(20).max(1024).describe('Token from work-scope.begin for this conversation’s active repository; required for code/deployment writes');
+const workContextSchema = z.string().min(20).max(1024).describe('Token from work-scope.begin or work.bootstrap for this conversation’s active repository; required for code/deployment writes');
+const workScopeBeginOutputSchema = z.object({ workContext: workContextSchema, repository: z.string(), expiresAt: z.number() });
 const bootstrapEvidenceSchema = z.string().min(20).max(2048).optional().describe('Short-lived signed handle from work.bootstrap; valid only for safe adjacent reads and never for mutations');
 
 function withoutWorkContext<T extends Record<string, unknown>>(input: T): Omit<T, 'workContext'> {
@@ -235,7 +236,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
   const server = new McpServer(
     { name: 'conductor', version: '0.1.0' },
     {
-      instructions: 'Call capabilities first in a fresh conversation. Establish the active repository from the user or workspace, then call work-scope.begin once and reuse its workContext for code and deployment writes; issue routing and maintenance in another repository do not change the active repository. Search for an existing issue before creating another; comment there when it owns the new evidence, and link a confirmed duplicate before closing it. Use preflight_project for readiness and preflight_operation with workContext for code/deployment writes or without it for issue routing. Treat unavailable or blocked checks as hard evidence; do not infer hidden access or project meaning.',
+      instructions: 'Establish the active repository from the user or workspace. Prefer work.bootstrap when exposed: it returns capabilities, development status and the client-bound workScope.workContext in one call. Otherwise call capabilities, then work-scope.begin once and reuse its workContext for code and deployment writes; issue routing and maintenance in another repository do not change the active repository. Search for an existing issue before creating another; comment there when it owns the new evidence, and link a confirmed duplicate before closing it. Use preflight_project for readiness and preflight_operation with workContext for code/deployment writes or without it for issue routing. Treat unavailable or blocked checks as hard evidence; do not infer hidden access or project meaning.',
     },
   );
 
@@ -318,7 +319,7 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
   if (workScope) server.registerTool('work-scope.identity', {
     title: 'Identify this connected client for owner scope management',
-    description: 'Return this OAuth client fingerprint and any owner-granted code-work exceptions. Start each conversation’s active repository with work-scope.begin. Issue routing depends on provider access and current session authorization. Share the fingerprint with the owner to grant a temporary wider scope in the Conductor owner page.',
+    description: 'Return this OAuth client fingerprint and any owner-granted code-work exceptions. Prefer work.bootstrap for conversation startup when exposed; otherwise begin the active repository with work-scope.begin. Issue routing depends on provider access and current session authorization. Share the fingerprint with the owner to grant a temporary wider scope in the Conductor owner page.',
     inputSchema: z.object({}),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: { securitySchemes: oauthSecurity },
@@ -331,15 +332,17 @@ export function createConductorMcpServer(runtime: ConductorToolRuntime, workScop
 
   if (workScope) server.registerTool('work-scope.begin', {
     title: 'Begin code work in the active repository',
-    description: 'After establishing this conversation’s active repository from the user or workspace, call once with its exact owner/repository. Reuse the returned workContext for code and deployment writes in this conversation. Do not switch the active repository merely to work on an issue routed elsewhere; ask the owner for an additional scoped grant. The declaration is agent supplied and cannot independently prove the chat’s workspace.',
+    description: 'When work.bootstrap is unavailable, call once after establishing this conversation’s active exact owner/repository. Return the same workContext in structuredContent and text JSON; reuse it for code and deployment writes in this conversation. Do not switch the active repository merely to work on an issue routed elsewhere; ask the owner for an additional scoped grant. The declaration is agent supplied and cannot independently prove the chat’s workspace.',
     inputSchema: z.object({ repository: z.string().min(3).describe('Exact owner/repository of the active development project') }),
+    outputSchema: workScopeBeginOutputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     _meta: { securitySchemes: oauthWriteSecurity },
   }, async ({ repository }, extra) => {
     requireWriteScope(extra.http?.authInfo?.scopes);
     const clientId = extra.http?.authInfo?.clientId;
     if (!clientId) throw new Error('Authenticated client identity is required');
-    return { content: [{ type: 'text', text: JSON.stringify(workScope.begin(clientId, repository)) }] };
+    const result = workScope.begin(clientId, repository);
+    return { structuredContent: result, content: [{ type: 'text', text: JSON.stringify(result) }] };
   });
 
 
