@@ -96,7 +96,7 @@ for (const events of [undefined, 'discovery-only'] as const) test(`MCP refuses c
     const structured = context.structuredContent as { workContext: string; repository: string; expiresAt: number };
     const text = JSON.parse(((context.content as Array<{ text: string }>)[0]).text) as typeof structured;
     assert.deepEqual(structured, text, 'structured and legacy text consumers receive identical client-bound context');
-    assert.equal(structured.repository, 'pyralisxc/Conductor');
+    assert.equal(structured.repository, 'pyralisxc/conductor', 'the work-scope authorizer normalizes repository identity');
     assert.ok(structured.expiresAt > Date.now());
     const workContext = structured.workContext;
     const input = { project: { id: 'Other', repository: 'pyralisxc/Other' }, workContext, branch: 'work/scope-test', fromSha: 'a'.repeat(40), idempotencyKey: 'scope-boundary-test' };
