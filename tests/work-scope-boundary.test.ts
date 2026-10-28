@@ -87,9 +87,18 @@ for (const events of [undefined, 'discovery-only'] as const) test(`MCP refuses c
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`), {
       requestInit: { headers: { Authorization: 'Bearer test-token' } },
     }));
+    const listed = await client.listTools();
+    const beginTool = listed.tools.find(tool => tool.name === 'work-scope.begin');
+    assert.ok(beginTool?.outputSchema, 'work-scope.begin advertises typed output');
+    assert.ok(beginTool.description?.includes('work.bootstrap'), 'scope fallback guidance is discoverable');
     const context = await client.callTool({ name: 'work-scope.begin', arguments: { repository: 'pyralisxc/Conductor' } });
     assert.notEqual(context.isError, true);
-    const workContext = JSON.parse(((context.content as Array<{ text: string }>)[0]).text).workContext as string;
+    const structured = context.structuredContent as { workContext: string; repository: string; expiresAt: number };
+    const text = JSON.parse(((context.content as Array<{ text: string }>)[0]).text) as typeof structured;
+    assert.deepEqual(structured, text, 'structured and legacy text consumers receive identical client-bound context');
+    assert.equal(structured.repository, 'pyralisxc/Conductor');
+    assert.ok(structured.expiresAt > Date.now());
+    const workContext = structured.workContext;
     const input = { project: { id: 'Other', repository: 'pyralisxc/Other' }, workContext, branch: 'work/scope-test', fromSha: 'a'.repeat(40), idempotencyKey: 'scope-boundary-test' };
     const blocked = await client.callTool({ name: 'git.branch.create', arguments: input });
     assert.equal(blocked.isError, true);

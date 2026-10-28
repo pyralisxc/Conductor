@@ -1,5 +1,5 @@
 export const TOOL_RUNTIME_CONTRACT_VERSION = 'conductor.tool-runtime.v0' as const;
-export const TOOL_CATALOG_VERSION = 'conductor.catalog.v16' as const;
+export const TOOL_CATALOG_VERSION = 'conductor.catalog.v17' as const;
 
 export type ToolOperationName =
   | 'capabilities'
