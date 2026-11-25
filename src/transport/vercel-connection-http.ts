@@ -146,8 +146,8 @@ export async function handleVercelConnectionRequest(req: IncomingMessage, res: S
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: callback }),
       });
-      const payload = await response.json() as { access_token?: string; team_id?: string | null };
-      if (!response.ok || !payload.access_token) throw new Error('Vercel did not authorize this connection');
+      const payload = await response.json() as { access_token?: string; installation_id?: string; team_id?: string | null };
+      if (!response.ok || !payload.access_token || payload.installation_id !== configurationId) throw new Error('Vercel did not authorize this connection');
       const teamId = payload.team_id ?? null;
       const returnedTeam = url.searchParams.get('teamId');
       if (returnedTeam && returnedTeam !== teamId) throw new Error('Vercel account selection changed during authorization');
