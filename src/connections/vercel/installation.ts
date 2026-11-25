@@ -1,3 +1,4 @@
+import { shortLivedInstallationToken } from './short-lived-token.js';
 import { Redis } from '@upstash/redis';
 import { RedisProviderConnectionCredentialStore } from '../universal/provider-connections.js';
 import { providerCredentialVaultFromEnvironment } from '../universal/credential-vault.js';
@@ -140,17 +141,16 @@ export async function vercelInstallationMetadata(
 }
 
 export async function vercelInstallationToken(configurationId: string, teamId?: string): Promise<string | undefined> {
-  const { redis } = configuration();
+  if (!/^icfg_[\w-]+$/u.test(configurationId)) throw new Error('Invalid Vercel installation ID');
+  const { redis, clientId, clientSecret } = configuration();
   const key = prefix + ':installation:' + configurationId;
   const record = await redis.get<string>(key);
   if (!record) return undefined;
-  const opened = decrypt(record);
-  if (opened.replacement) {
-    await redis.set(key, opened.replacement);
-  }
-  const installation = opened.installation;
+  const { installation } = decrypt(record);
+  if (installation.configurationId !== configurationId) throw new Error('Stored Vercel installation identity mismatch');
   if ((installation.teamId ?? undefined) !== teamId) return undefined;
-  return installation.token;
+  return shortLivedInstallationToken({ redis, vault: installationVault(), installationKey: key,
+    installationRecord: record, installationId: configurationId, teamId: installation.teamId, clientId, clientSecret });
 }
 
 

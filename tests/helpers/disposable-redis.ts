@@ -35,7 +35,12 @@ export async function disposableRedis() {
       const args = JSON.parse(Buffer.concat(chunks).toString()) as (string | number)[];
       if (beforeCommand) await beforeCommand(args);
       res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ result: encode(await command(args)) }));
+      const run = async (value: (string | number)[]) => ({ result: encode(await command(value)) });
+      if (req.url === '/pipeline') {
+        const results = [];
+        for (const value of args as unknown as (string | number)[][]) results.push(await run(value));
+        res.end(JSON.stringify(results));
+      } else res.end(JSON.stringify(await run(args)));
     } catch (error) {
       res.end(JSON.stringify({ error: (error as Error).message }));
     }
@@ -51,7 +56,7 @@ export async function disposableRedis() {
     if (!address || typeof address === 'string') throw new Error('Missing local test listener');
     const client = new Redis({ url: `http://127.0.0.1:${address.port}`, token: 'disposable-test-only',
       automaticDeserialization: false, enableAutoPipelining: false, enableTelemetry: false, retry: false });
-    return { client, command, before(fn?: typeof beforeCommand) { beforeCommand = fn; },
+    return { client, url: `http://127.0.0.1:${address.port}`, command, before(fn?: typeof beforeCommand) { beforeCommand = fn; },
       async close() { await new Promise<void>(resolve => server.close(() => resolve())); await docker('rm', '--force', name); } };
   } catch (error) {
     server.close(); await docker('rm', '--force', name); throw error;
